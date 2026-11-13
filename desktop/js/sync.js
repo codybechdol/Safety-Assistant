@@ -467,6 +467,16 @@ class SyncEngine {
       };
     }
 
+    if (action === 'SAVE_FLOATING_HOLIDAY_ASSIGNMENTS') {
+      return {
+        icon: '🏖️',
+        sheet: 'Safety Compliance',
+        title: 'Floating Holiday Days Off',
+        desc: 'Updated crew floating holiday day off assignments',
+        time: timeStr
+      };
+    }
+
     if (action === 'ADD_LOCATION_OVERRIDE') {
       return {
         icon: '📍',
@@ -861,15 +871,18 @@ class SyncEngine {
         }
       }
 
-      // Resolve row index if missing on UPDATE_ROW
-      if ((m.action === 'UPDATE_ROW' || m.action === 'UPDATE_JOB_TRACKING') && !m.row && m.itemIdentifier && this.db) {
+      // Resolve row index if missing or <= 1 on UPDATE_ROW / UPDATE_JOB_TRACKING / UPDATE_CELL
+      if ((m.action === 'UPDATE_ROW' || m.action === 'UPDATE_JOB_TRACKING' || m.action === 'UPDATE_CELL') && (!m.row || m.row <= 1) && m.itemIdentifier && this.db) {
         const tblKey = m.tableKey || this.db.getTableKeyForSheet(m.sheetName);
         const tbl = tblKey ? this.db.getTable(tblKey) : null;
         if (tbl && Array.isArray(tbl.rows)) {
           const targetIdLower = String(m.itemIdentifier).trim().toLowerCase();
+          const targetNorm = targetIdLower.replace(/[\s\u00A0]+/g, '').replace(/[–—]/g, '-').replace(/^[#bbs\-_]+/, '');
           const rowIdxInArr = tbl.rows.findIndex(r => {
-            const c0 = String(r['Employee Name'] || r['Name'] || r['Job Number'] || r['Job #'] || r['Item #'] || r['Serial #'] || Object.values(r)[0] || '').trim().toLowerCase();
-            return c0 === targetIdLower || c0.replace(/\.\d+.*$/, '').trim() === targetIdLower;
+            const raw = String(r['HVT #'] || r['HV Tester'] || r['Phasing Set'] || r['PS #'] || r['AED #'] || r['Employee Name'] || r['Name'] || r['Job Number'] || r['Job #'] || r['Item #'] || r['Serial #'] || Object.values(r)[0] || '').trim();
+            const c0 = raw.toLowerCase();
+            const c0Norm = c0.replace(/[\s\u00A0]+/g, '').replace(/[–—]/g, '-').replace(/^[#bbs\-_]+/, '');
+            return c0 === targetIdLower || (targetNorm && c0Norm === targetNorm) || c0.replace(/\.\d+.*$/, '').trim() === targetIdLower;
           });
           if (rowIdxInArr !== -1) {
             m.row = tbl.rows[rowIdxInArr]._rowIdx || (rowIdxInArr + 2);
@@ -965,6 +978,9 @@ class SyncEngine {
           const mCopy = { ...m };
           if (!mCopy.action && mCopy.type) mCopy.action = mCopy.type;
           if (!mCopy.sheetName && mCopy.sheet) mCopy.sheetName = mCopy.sheet;
+          if (!mCopy.sheetName && mCopy.tableKey && this.db && typeof this.db.getSheetNameForTableKey === 'function') {
+            mCopy.sheetName = this.db.getSheetNameForTableKey(mCopy.tableKey);
+          }
           if (!mCopy.tableKey && mCopy.sheetName && this.db) mCopy.tableKey = this.db.getTableKeyForSheet(mCopy.sheetName);
           if (!mCopy.rowData && mCopy.data) mCopy.rowData = mCopy.data;
           if (!mCopy.itemIdentifier) {

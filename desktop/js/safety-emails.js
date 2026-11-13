@@ -1501,14 +1501,18 @@ class SafetyEmailsEngine {
       const sheetName = log.sheetName;
 
       if (sheetName === 'JHA Log' || log.type === 'JHA') {
+        const resolved = resolveJobAlias(log.jobNumber, log.creditedTo, log.status, log.notes);
+        let cleanFm = log.foreman || '';
+        if (!cleanFm || /^\d{3}-\d{2}/.test(cleanFm) || cleanFm.toLowerCase() === 'unknown') {
+          cleanFm = this.lookupForemanForCrew(resolved.creditedTo || log.jobNumber) || cleanFm;
+        }
         const exists = jhaTbl.rows.some(r => String(r['Email ID'] || r.email_id || '').trim() === emailId);
         if (!exists) {
-          const resolved = resolveJobAlias(log.jobNumber, log.creditedTo, log.status, log.notes);
           jhaTbl.rows.push({
             'Date Received': log.dateReceived || '',
             'Date Created': log.date || '',
             'Job Number': log.jobNumber || '',
-            'Foreman': log.foreman || '',
+            'Foreman': cleanFm,
             'Email Subject': log.subject || '',
             'Email ID': emailId,
             'Source': log.source || '',
@@ -1519,14 +1523,27 @@ class SafetyEmailsEngine {
           modified = true;
         }
       } else if (sheetName === 'Weekly Safety Log' || log.type === 'Weekly Safety Meeting') {
-        const exists = weeklyTbl.rows.some(r => String(r['Email ID'] || r.email_id || '').trim() === emailId);
-        if (!exists) {
-          const resolved = resolveJobAlias(log.jobNumber, log.creditedTo, log.status, log.notes);
+        const resolved = resolveJobAlias(log.jobNumber, log.creditedTo, log.status, log.notes);
+        let cleanFm = log.foreman || '';
+        if (!cleanFm || /^\d{3}-\d{2}/.test(cleanFm) || cleanFm.toLowerCase() === 'unknown') {
+          cleanFm = this.lookupForemanForCrew(resolved.creditedTo || log.jobNumber) || cleanFm;
+        }
+        const targetCrew = (resolved.creditedTo || log.jobNumber || '').trim().toLowerCase();
+        const weekOf = (log.date || '').trim();
+        const existsIdx = weeklyTbl.rows.findIndex(r => {
+          const rEmail = String(r['Email ID'] || r.email_id || '').trim();
+          if (emailId && rEmail && rEmail === emailId) return true;
+          const rWeek = String(r['Week Of'] || '').trim();
+          const rCrew = String(r['Credited To'] || r['Job Number'] || '').trim().toLowerCase();
+          return weekOf && rWeek === weekOf && targetCrew && rCrew === targetCrew;
+        });
+
+        if (existsIdx === -1) {
           weeklyTbl.rows.push({
             'Date Received': log.dateReceived || '',
             'Week Of': log.date || '',
             'Job Number': log.jobNumber || '',
-            'Foreman': log.foreman || '',
+            'Foreman': cleanFm,
             'Email Subject': log.subject || '',
             'Email ID': emailId,
             'Status': resolved.status,
@@ -1534,16 +1551,28 @@ class SafetyEmailsEngine {
             'Notes': resolved.notes
           });
           modified = true;
+        } else {
+          // If existing row has a job number as foreman and we have a real name, update it!
+          const existingRow = weeklyTbl.rows[existsIdx];
+          const currFm = String(existingRow['Foreman'] || '');
+          if ((!currFm || /^\d{3}-\d{2}/.test(currFm) || currFm.toLowerCase() === 'unknown') && cleanFm && !/^\d{3}-\d{2}/.test(cleanFm)) {
+            existingRow['Foreman'] = cleanFm;
+            modified = true;
+          }
         }
       } else if (sheetName === 'Monthly Checklist Log' || log.type === 'Monthly Checklist') {
+        const resolved = resolveJobAlias(log.jobNumber, log.creditedTo, log.status, log.notes);
+        let cleanFm = log.foreman || '';
+        if (!cleanFm || /^\d{3}-\d{2}/.test(cleanFm) || cleanFm.toLowerCase() === 'unknown') {
+          cleanFm = this.lookupForemanForCrew(resolved.creditedTo || log.jobNumber) || cleanFm;
+        }
         const exists = monthlyTbl.rows.some(r => String(r['Email ID'] || r.email_id || '').trim() === emailId);
         if (!exists) {
-          const resolved = resolveJobAlias(log.jobNumber, log.creditedTo, log.status, log.notes);
           monthlyTbl.rows.push({
             'Date Received': log.dateReceived || '',
             'Date Created': log.date || '',
             'Job Number': log.jobNumber || '',
-            'Foreman': log.foreman || '',
+            'Foreman': cleanFm,
             'Equipment Number': log.equipmentNumber || '',
             'Email Subject': log.subject || '',
             'Email ID': emailId,
@@ -1567,7 +1596,7 @@ class SafetyEmailsEngine {
   /**
    * Recalculates Safety Compliance matrix without re-scanning Gmail.
    */
-  async runRecalculateCompliance() {
+  async runRecalculateCompliance(floatingAssignments = null, skipConfirm = false) {
     if (this.isProcessing) return;
 
     const syncUrl = window.syncEngine ? window.syncEngine.getSyncUrl() : '';
@@ -1576,8 +1605,10 @@ class SafetyEmailsEngine {
       return;
     }
 
-    const confirmRecalc = confirm('Recalculate Safety Compliance matrix now?\n\nThis will evaluate all logged JHAs, weekly safety meetings, and monthly checklists for current and previous weeks and refresh your desktop view.');
-    if (!confirmRecalc) return;
+    if (!skipConfirm) {
+      const confirmRecalc = confirm('Recalculate Safety Compliance matrix now?\n\nThis will evaluate all logged JHAs, weekly safety meetings, and monthly checklists for current and previous weeks and refresh your desktop view.');
+      if (!confirmRecalc) return;
+    }
 
     this.isProcessing = true;
     window.syncEngine.updateStatusUI('syncing', 'Recalculating Compliance...');
@@ -1587,6 +1618,11 @@ class SafetyEmailsEngine {
         action: 'recalculateCompliance',
         targetWeek: 'both'
       };
+      if (floatingAssignments) {
+        payload.floatingAssignments = floatingAssignments;
+      } else if (window.sheetNavigator && typeof window.sheetNavigator.getFloatingHolidayAssignments === 'function') {
+        payload.floatingAssignments = window.sheetNavigator.getFloatingHolidayAssignments();
+      }
 
       const response = await window.syncEngine.executeNetworkRequest(syncUrl, 'POST', payload, 180000);
       console.log('Recalculate compliance response:', response);
@@ -1772,7 +1808,7 @@ class SafetyEmailsEngine {
     }
 
     body.innerHTML = `
-      <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; color: var(--text-secondary); padding: 40px;">
+      <div style="margin: auto; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; color: var(--text-secondary); padding: 40px;">
         <div class="loading-spinner" style="width: 40px; height: 40px; border: 3px solid rgba(16, 185, 129, 0.2); border-top-color: #10b981; border-radius: 50%; animation: spin 0.8s linear infinite;"></div>
         <div style="font-size: 13.5px; font-weight: 700; color: #f8fafc;">Retrieving attached PDF directly from Gmail...</div>
         <div style="font-size: 11.5px; color: #94a3b8;">${this.escapeHtml(log.subject || logJob)}</div>
@@ -1822,24 +1858,31 @@ class SafetyEmailsEngine {
         this.pdfCache.set(cacheKey, pdfData);
       }
 
-      // Convert base64 to Blob URL
-      const byteCharacters = atob(pdfData.base64);
-      const byteNumbers = new Array(byteCharacters.length);
+      // Convert base64 to Uint8Array safely
+      const rawBase64 = String(pdfData.base64 || '').includes('base64,')
+        ? String(pdfData.base64).split('base64,')[1].trim()
+        : String(pdfData.base64 || '').trim().replace(/[\r\n\s]/g, '');
+      const byteCharacters = atob(rawBase64);
+      const byteArray = new Uint8Array(byteCharacters.length);
       for (let i = 0; i < byteCharacters.length; i++) {
-        byteNumbers[i] = byteCharacters.charCodeAt(i);
+        byteArray[i] = byteCharacters.charCodeAt(i);
       }
-      const byteArray = new Uint8Array(byteNumbers);
 
-      // Auto-scan checklist PDF in background for equipment defects (expired fire extinguishers, AED pads, etc.)
-      if (isChecklist) {
-        this.scanAndSyncChecklistIssues(byteArray, log).catch(e => {
-          console.warn('[PDF Viewer] Auto-scan checklist issues failed:', e);
-        });
-      }
-      // Guarantee proper application/pdf MIME type even if email server reported application/octet-stream
+      // CRITICAL: Guarantee proper application/pdf MIME type and create Blob FIRST before any pdf.js operations,
+      // so the Blob owns a permanent copy of the bytes before pdf.js Web Worker can detach the ArrayBuffer!
       const mimeType = (pdfData.filename && pdfData.filename.toLowerCase().endsWith('.pdf')) ? 'application/pdf' : (pdfData.contentType || 'application/pdf');
       const blob = new Blob([byteArray], { type: mimeType });
       const blobUrl = URL.createObjectURL(blob);
+
+      // Auto-scan checklist PDF in background for equipment defects (expired fire extinguishers, AED pads, etc.)
+      let detectedIssues = [];
+      if (isChecklist) {
+        try {
+          detectedIssues = await this.scanAndSyncChecklistIssues(byteArray.slice(), log) || [];
+        } catch (e) {
+          console.warn('[PDF Viewer] Auto-scan checklist issues failed:', e);
+        }
+      }
 
       if (downloadBtn) {
         downloadBtn.href = blobUrl;
@@ -1877,20 +1920,62 @@ class SafetyEmailsEngine {
         subtitleEl.textContent = `${pdfData.filename || 'Document.pdf'} (${Math.round((pdfData.sizeBytes || 0)/1024)} KB) · Foreman: ${logForeman}${logUnit && logUnit !== 'Checklist' ? ` · Unit: ${logUnit}` : ''} · Date: ${logDate} · Received: ${logDateRec}`;
       }
 
-      body.innerHTML = `
-        <object data="${blobUrl}#view=FitH&toolbar=1" type="application/pdf" style="width: 100%; height: 100%; border: none; background: #1e293b;">
-          <iframe src="${blobUrl}#view=FitH" style="width: 100%; height: 100%; border: none; background: #1e293b;">
-            <div style="padding: 30px; text-align: center; color: var(--text-secondary);">
-              <p>Preview cannot be rendered inline in this view.</p>
-              <button class="btn btn-primary" onclick="if (window.desktopAPI) window.desktopAPI.openPdfExternally('${pdfData.base64}', '${pdfData.filename || 'SafetyDocument.pdf'}')">Open in System PDF Viewer</button>
-            </div>
-          </iframe>
-        </object>
-      `;
+      // Configure View Switcher Toggle for Checklists (Highlighted Document vs Raw PDF)
+      const headerControls = document.getElementById('safety-pdf-btn-action-items')?.parentElement;
+      let viewToggleBtn = document.getElementById('safety-pdf-btn-view-toggle');
+      if (isChecklist) {
+        if (!viewToggleBtn && headerControls) {
+          viewToggleBtn = document.createElement('button');
+          viewToggleBtn.id = 'safety-pdf-btn-view-toggle';
+          viewToggleBtn.className = 'btn btn-secondary';
+          viewToggleBtn.type = 'button';
+          viewToggleBtn.style.cssText = 'font-size: 11px; padding: 4px 10px; display: inline-flex; align-items: center; gap: 5px; border-color: rgba(234, 179, 8, 0.4); background: rgba(234, 179, 8, 0.15); color: #fef08a; cursor: pointer; font-weight: 700; white-space: nowrap; flex-shrink: 0;';
+          headerControls.insertBefore(viewToggleBtn, document.getElementById('safety-pdf-btn-action-items') || headerControls.firstChild);
+        }
+      } else if (viewToggleBtn) {
+        viewToggleBtn.style.display = 'none';
+      }
+
+      // Default checklists to the rich PDF.js canvas Document View (which shows highlights if issues exist,
+      // or renders all pages cleanly without highlights if clean).
+      let isHighlightView = Boolean(isChecklist && window.pdfjsLib);
+
+      const renderActivePdfView = async () => {
+        if (isHighlightView) {
+          if (viewToggleBtn) {
+            viewToggleBtn.style.display = 'inline-flex';
+            viewToggleBtn.innerHTML = (detectedIssues && detectedIssues.length > 0)
+              ? `<span>🟡</span> Highlighted (${detectedIssues.length})`
+              : `<span>📑</span> Document View`;
+            viewToggleBtn.title = 'Viewing document with PDF.js. Click to switch to raw browser PDF view.';
+            viewToggleBtn.onclick = () => { isHighlightView = false; renderActivePdfView(); };
+          }
+          await this.renderChecklistPdfWithHighlights(byteArray.slice(), log, detectedIssues, pdfData, blobUrl);
+        } else {
+          if (viewToggleBtn && isChecklist) {
+            viewToggleBtn.style.display = 'inline-flex';
+            viewToggleBtn.innerHTML = `<span>📄</span> Raw PDF`;
+            viewToggleBtn.title = 'Viewing original embedded PDF. Click to switch to document view.';
+            viewToggleBtn.onclick = () => { isHighlightView = true; renderActivePdfView(); };
+          }
+          body.innerHTML = `
+            <object data="${blobUrl}#view=FitH&toolbar=1" type="application/pdf" style="width: 100%; height: 100%; border: none; background: #1e293b;">
+              <iframe src="${blobUrl}#view=FitH" style="width: 100%; height: 100%; border: none; background: #1e293b;">
+                <div style="padding: 30px; text-align: center; color: var(--text-secondary);">
+                  <p>Preview cannot be rendered inline in this view.</p>
+                  <button class="btn btn-primary" onclick="if (window.desktopAPI) window.desktopAPI.openPdfExternally('${pdfData.base64}', '${pdfData.filename || 'SafetyDocument.pdf'}')">Open in System PDF Viewer</button>
+                </div>
+              </iframe>
+            </object>
+          `;
+        }
+      };
+
+      await renderActivePdfView();
 
     } catch (err) {
       body.innerHTML = `
-        <div style="padding: 30px; text-align: center; max-width: 500px; color: #f87171;">
+        <div style="margin: auto; padding: 30px; text-align: center; max-width: 500px; color: #f87171;">
           <div style="font-size: 32px; margin-bottom: 12px;">⚠️</div>
           <div style="font-size: 14px; font-weight: 700; margin-bottom: 6px;">Could not load PDF document directly</div>
           <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 20px; line-height: 1.5;">${this.escapeHtml(err.message || 'Unknown error')}</div>
@@ -1917,6 +2002,335 @@ class SafetyEmailsEngine {
       if (window.windowManager && typeof window.windowManager.syncBackdrop === 'function') {
         window.windowManager.syncBackdrop();
       }
+    }
+  }
+
+  /**
+   * Renders a Monthly Checklist PDF onto high-DPI canvases using pdfjsLib with
+   * true aspect-ratio sizing, interactive zoom controls, and scoped yellow callouts
+   * over any defective or expired equipment items.
+   */
+  async renderChecklistPdfWithHighlights(byteArray, log, issues, pdfData, blobUrl) {
+    const body = document.getElementById('safety-pdf-modal-body');
+    if (!body) return;
+
+    body.innerHTML = `
+      <div style="margin: auto; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; color: var(--text-secondary); padding: 40px;">
+        <div class="loading-spinner" style="width: 36px; height: 36px; border: 3px solid rgba(234, 179, 8, 0.2); border-top-color: #eab308; border-radius: 50%; animation: spin 0.8s linear infinite;"></div>
+        <div style="font-size: 13.5px; font-weight: 700; color: #f8fafc;">Scanning document and highlighting action items...</div>
+      </div>
+    `;
+
+    try {
+      const loadingTask = window.pdfjsLib.getDocument({ data: byteArray.slice() });
+      const pdfDoc = await loadingTask.promise;
+      const numPages = pdfDoc.numPages;
+
+      const container = document.createElement('div');
+      container.id = 'pdf-highlight-container';
+      container.style.cssText = 'width: 100%; height: 100%; flex: 1; min-height: 0; overflow: auto; background: #0b1329; padding: 14px 18px 24px; display: flex; flex-direction: column; align-items: stretch; gap: 14px; box-sizing: border-box;';
+
+      // Sticky Zoom & Navigation Bar
+      const zoomPresets = [
+        { value: 'fit', label: 'Fit Width' },
+        { value: 1.0, label: '100%' },
+        { value: 1.25, label: '125%' },
+        { value: 1.5, label: '150%' },
+        { value: 2.0, label: '200%' }
+      ];
+      let currentZoom = 'fit';
+
+      const zoomBar = document.createElement('div');
+      zoomBar.style.cssText = 'flex: 0 0 auto; position: sticky; top: 0; z-index: 25; margin: 0 auto; max-width: 100%; background: rgba(15, 23, 42, 0.94); backdrop-filter: blur(8px); border: 1px solid #334155; border-radius: 8px; padding: 5px 10px; display: inline-flex; align-items: center; gap: 6px; box-shadow: 0 4px 14px rgba(0,0,0,0.35); flex-wrap: wrap;';
+
+      const zoomMinusBtn = document.createElement('button');
+      zoomMinusBtn.type = 'button';
+      zoomMinusBtn.className = 'btn btn-secondary';
+      zoomMinusBtn.textContent = '➖';
+      zoomMinusBtn.title = 'Zoom Out';
+      zoomMinusBtn.style.cssText = 'font-size: 11px; padding: 3px 8px; cursor: pointer;';
+
+      const zoomPlusBtn = document.createElement('button');
+      zoomPlusBtn.type = 'button';
+      zoomPlusBtn.className = 'btn btn-secondary';
+      zoomPlusBtn.textContent = '➕';
+      zoomPlusBtn.title = 'Zoom In';
+      zoomPlusBtn.style.cssText = 'font-size: 11px; padding: 3px 8px; cursor: pointer;';
+
+      const zoomButtons = new Map();
+      const zoomInfoLabel = document.createElement('span');
+      zoomInfoLabel.style.cssText = 'font-size: 11px; color: #94a3b8; margin-left: 6px; padding-left: 8px; border-left: 1px solid #334155; white-space: nowrap;';
+      zoomInfoLabel.textContent = `${numPages} page${numPages > 1 ? 's' : ''}`;
+
+      zoomBar.appendChild(zoomMinusBtn);
+      zoomPresets.forEach((preset) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'btn btn-secondary';
+        btn.textContent = preset.label;
+        btn.style.cssText = 'font-size: 11px; padding: 3px 9px; cursor: pointer; font-weight: 700; white-space: nowrap;';
+        zoomButtons.set(preset.value, btn);
+        zoomBar.appendChild(btn);
+      });
+      zoomBar.appendChild(zoomPlusBtn);
+      zoomBar.appendChild(zoomInfoLabel);
+      container.appendChild(zoomBar);
+
+      // 1. Action Items Summary Banner (if issues present)
+      if (issues && issues.length > 0) {
+        const banner = document.createElement('div');
+        banner.style.cssText = 'flex: 0 0 auto; max-width: 960px; width: 100%; margin: 0 auto; background: linear-gradient(135deg, rgba(239, 68, 68, 0.16) 0%, rgba(185, 28, 28, 0.08) 100%); border: 1px solid rgba(239, 68, 68, 0.45); border-radius: 8px; padding: 12px 16px; box-shadow: 0 4px 14px rgba(0,0,0,0.35); display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; box-sizing: border-box;';
+
+        banner.innerHTML = `
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <span style="font-size: 22px;">⚠️</span>
+            <div>
+              <div style="font-size: 13.5px; font-weight: 800; color: #fca5a5;">
+                ${issues.length} Action Item${issues.length > 1 ? 's' : ''} Highlighted on this Checklist
+              </div>
+              <div style="font-size: 11.5px; color: #cbd5e1; margin-top: 2px;">
+                Items needing repair, recharge, testing, or restock are highlighted in yellow on the document below.
+              </div>
+            </div>
+          </div>
+          <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+            ${issues.map((iss, i) => `
+              <button type="button" class="btn" onclick="document.getElementById('pdf-highlight-anchor-${i}')?.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });" style="font-size: 11px; font-weight: 700; background: rgba(234, 179, 8, 0.2); border: 1px solid #eab308; color: #fef08a; padding: 4px 10px; border-radius: 4px; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;" title="Jump to highlighted ${this.escapeHtml(iss.issueDescription || iss.equipmentType)}">
+                <span>🔍 Jump to:</span> <strong>${this.escapeHtml(iss.shortLabel || iss.equipmentType)}</strong>
+              </button>
+            `).join('')}
+          </div>
+        `;
+        container.appendChild(banner);
+      }
+
+      // Collect target search terms from detected issues (preserve scoped phrase terms)
+      const searchTerms = [];
+      if (issues && issues.length > 0) {
+        issues.forEach((iss, issIdx) => {
+          if (iss.rawDateStr) searchTerms.push({ text: iss.rawDateStr, issue: iss, issueIdx: issIdx });
+          if (iss.feTestDate) searchTerms.push({ text: iss.feTestDate, issue: iss, issueIdx: issIdx });
+          (iss.highlightKeywords || []).forEach(kw => {
+            if (kw && kw.length > 1) searchTerms.push({ text: kw, issue: iss, issueIdx: issIdx });
+          });
+        });
+      }
+
+      const pagesHost = document.createElement('div');
+      pagesHost.style.cssText = 'display: flex; flex-direction: column; align-items: stretch; gap: 18px; flex: 0 0 auto; width: 100%;';
+      container.appendChild(pagesHost);
+
+      // Mount container before rendering so container.clientWidth reflects actual modal width
+      body.innerHTML = '';
+      body.appendChild(container);
+
+      const genericLabels = new Set([
+        'no', 'yes', 'na', 'n/a', 'comments', 'comments:', 'test date', 'test date:',
+        'test due', 'test due:', 'good condition', 'good condition?:', 'truck', 'trucks',
+        'general', 'other', 'other:', 'date', 'unit', 'job'
+      ]);
+
+      const updateZoomButtonStyles = () => {
+        zoomButtons.forEach((btn, val) => {
+          const isActive = currentZoom === val;
+          btn.style.background = isActive ? 'rgba(59, 130, 246, 0.3)' : '';
+          btn.style.borderColor = isActive ? '#60a5fa' : '';
+          btn.style.color = isActive ? '#bfdbfe' : '';
+        });
+      };
+
+      let renderGeneration = 0;
+
+      const renderPages = async (zoomMode) => {
+        currentZoom = zoomMode;
+        updateZoomButtonStyles();
+
+        renderGeneration += 1;
+        const myGen = renderGeneration;
+
+        pagesHost.innerHTML = '';
+        const availableWidth = Math.max(360, (container.clientWidth || body.clientWidth || 1040) - 44);
+        const pixelRatio = Math.min(3, Math.max(2, window.devicePixelRatio || 1));
+        const highlightedIssueIndices = new Set();
+
+        for (let p = 1; p <= numPages; p++) {
+          if (myGen !== renderGeneration) return;
+
+          const page = await pdfDoc.getPage(p);
+          if (myGen !== renderGeneration) return;
+
+          const unscaledViewport = page.getViewport({ scale: 1 });
+          const fitScale = availableWidth / unscaledViewport.width;
+          const displayScale = zoomMode === 'fit'
+            ? Math.max(0.75, Math.min(2.5, fitScale))
+            : (1.35 * Number(zoomMode || 1.0));
+
+          const cssWidth = Math.round(unscaledViewport.width * displayScale);
+          const cssHeight = Math.round(unscaledViewport.height * displayScale);
+          const renderViewport = page.getViewport({ scale: displayScale * pixelRatio });
+
+          if (p === 1) {
+            const pctDisplay = Math.round((displayScale / 1.35) * 100);
+            zoomInfoLabel.textContent = `${numPages} page${numPages > 1 ? 's' : ''} · ${zoomMode === 'fit' ? `Fit (${pctDisplay}%)` : `${pctDisplay}%`}`;
+          }
+
+          const pageWrapper = document.createElement('div');
+          pageWrapper.className = 'pdf-page-wrapper';
+          const sizingCss = zoomMode === 'fit'
+            ? `width: min(${cssWidth}px, 100%); aspect-ratio: ${unscaledViewport.width} / ${unscaledViewport.height}; height: auto;`
+            : `width: ${cssWidth}px; height: ${cssHeight}px;`;
+          pageWrapper.style.cssText = `position: relative; flex: 0 0 auto; margin: 0 auto; ${sizingCss} background: #ffffff; box-shadow: 0 10px 25px rgba(0,0,0,0.5); border-radius: 4px; overflow: visible;`;
+
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.round(renderViewport.width);
+          canvas.height = Math.round(renderViewport.height);
+          canvas.style.cssText = 'width: 100%; height: 100%; display: block; border-radius: 4px;';
+          const ctx = canvas.getContext('2d');
+          await page.render({ canvasContext: ctx, viewport: renderViewport }).promise;
+          if (myGen !== renderGeneration) return;
+
+          pageWrapper.appendChild(canvas);
+
+          // Scan text content to locate exact highlight positions
+          const textContent = await page.getTextContent();
+          if (myGen !== renderGeneration) return;
+          const textItems = textContent.items || [];
+          const paintedItemIssueKeys = new Set();
+
+          for (let i = 0; i < textItems.length; i++) {
+            const item = textItems[i];
+            const str = (item.str || '').trim();
+            if (!str) continue;
+
+            const strLower = str.toLowerCase();
+            // Build combined 2-token string when label and value live on the same row
+            let combinedLower = '';
+            let nextItem = null;
+            for (let j = i + 1; j < Math.min(textItems.length, i + 3); j++) {
+              const cand = textItems[j];
+              const candStr = (cand.str || '').trim();
+              if (!candStr) continue;
+              if (Math.abs((cand.transform[5] || 0) - (item.transform[5] || 0)) < 10) {
+                nextItem = cand;
+                combinedLower = `${str} ${candStr}`.replace(/\s+/g, ' ').trim().toLowerCase();
+              }
+              break;
+            }
+
+            for (let s = 0; s < searchTerms.length; s++) {
+              const termObj = searchTerms[s];
+              const term = termObj.text.toLowerCase().trim();
+              if (!term) continue;
+
+              const itemIssueKey = `${i}:${termObj.issueIdx}`;
+              if (paintedItemIssueKeys.has(itemIssueKey)) continue;
+
+              const directMatch = strLower.includes(term);
+              const splitSpanMatch = !directMatch && combinedLower &&
+                combinedLower.includes(term) &&
+                combinedLower.indexOf(term) < strLower.length &&
+                !genericLabels.has(strLower);
+              const specificInverseMatch = !directMatch && !splitSpanMatch &&
+                term.length > 6 &&
+                strLower.replace(/[:?\s]/g, '').length >= 6 &&
+                !genericLabels.has(strLower) &&
+                term.includes(strLower);
+
+              if (!directMatch && !splitSpanMatch && !specificInverseMatch) continue;
+
+              paintedItemIssueKeys.add(itemIssueKey);
+
+              const renderScale = renderViewport.scale;
+              const [vx, vy] = renderViewport.convertToViewportPoint(item.transform[4], item.transform[5]);
+              const fontSizePt = item.height > 0
+                ? item.height
+                : Math.hypot(item.transform[0] || 0, item.transform[1] || 0) || Math.abs(item.transform[3] || 12);
+
+              let spanWidth = item.width * renderScale;
+              if (splitSpanMatch && nextItem) {
+                const [nx] = renderViewport.convertToViewportPoint(nextItem.transform[4], nextItem.transform[5]);
+                const nextRight = nx + (nextItem.width * renderScale);
+                if (nextRight > vx) {
+                  spanWidth = Math.max(spanWidth, nextRight - vx);
+                }
+              }
+
+              const padX = 4 * pixelRatio;
+              const padY = 2 * pixelRatio;
+              const left = Math.max(0, vx - padX);
+              const top = Math.max(0, vy - (fontSizePt * renderScale * 0.95) - padY);
+              const width = Math.max(12 * pixelRatio, spanWidth + (padX * 2));
+              const height = Math.max(10 * pixelRatio, (fontSizePt * renderScale * 1.25) + (padY * 2));
+
+              // Draw translucent highlight directly on HiDPI canvas
+              ctx.save();
+              ctx.fillStyle = 'rgba(254, 240, 138, 0.45)';
+              ctx.fillRect(left, top, width, height);
+              ctx.strokeStyle = '#eab308';
+              ctx.lineWidth = Math.max(2, 2 * pixelRatio);
+              ctx.strokeRect(left, top, width, height);
+              ctx.restore();
+
+              const leftPct = (left / renderViewport.width) * 100;
+              const topPct = (top / renderViewport.height) * 100;
+              const widthPct = (width / renderViewport.width) * 100;
+              const heightPct = (height / renderViewport.height) * 100;
+
+              // Add interactive percentage-positioned DOM overlay element
+              const overlay = document.createElement('div');
+              overlay.className = 'pdf-highlight-overlay';
+              if (!highlightedIssueIndices.has(termObj.issueIdx)) {
+                overlay.id = `pdf-highlight-anchor-${termObj.issueIdx}`;
+                highlightedIssueIndices.add(termObj.issueIdx);
+
+                const badgePosCss = topPct < 5
+                  ? 'top: 100%; margin-top: 4px;'
+                  : 'bottom: 100%; margin-bottom: 4px;';
+                const badge = document.createElement('div');
+                badge.style.cssText = `position: absolute; left: 0; ${badgePosCss} background: #dc2626; color: #fff; font-size: 10.5px; font-weight: 800; padding: 2px 8px; border-radius: 4px; white-space: nowrap; box-shadow: 0 2px 8px rgba(0,0,0,0.5); display: flex; align-items: center; gap: 4px; z-index: 10; pointer-events: none;`;
+                badge.innerHTML = `<span>⚠️</span> Action Required: ${this.escapeHtml(termObj.issue.shortLabel || termObj.issue.equipmentType)}`;
+                overlay.appendChild(badge);
+              }
+
+              overlay.style.cssText = `position: absolute; left: ${leftPct.toFixed(4)}%; top: ${topPct.toFixed(4)}%; width: ${widthPct.toFixed(4)}%; height: ${heightPct.toFixed(4)}%; pointer-events: auto; cursor: pointer; border-radius: 3px; z-index: 5;`;
+              overlay.title = `Action Item: ${termObj.issue.issueDescription}`;
+              pageWrapper.appendChild(overlay);
+            }
+          }
+
+          pagesHost.appendChild(pageWrapper);
+
+          const pageLabel = document.createElement('div');
+          pageLabel.style.cssText = 'flex: 0 0 auto; font-size: 11px; color: #94a3b8; text-align: center; margin-top: -6px; margin-bottom: 4px;';
+          pageLabel.textContent = `Page ${p} of ${numPages}`;
+          pagesHost.appendChild(pageLabel);
+        }
+      };
+
+      zoomButtons.forEach((btn, val) => {
+        btn.onclick = () => renderPages(val);
+      });
+      const zoomSteps = [0.85, 1.0, 1.25, 1.5, 1.75, 2.0];
+      zoomMinusBtn.onclick = () => {
+        const numericCur = currentZoom === 'fit' ? 1.25 : Number(currentZoom);
+        const prevStep = [...zoomSteps].reverse().find(z => z < numericCur - 0.01) || zoomSteps[0];
+        renderPages(prevStep);
+      };
+      zoomPlusBtn.onclick = () => {
+        const numericCur = currentZoom === 'fit' ? 1.0 : Number(currentZoom);
+        const nextStep = zoomSteps.find(z => z > numericCur + 0.01) || zoomSteps[zoomSteps.length - 1];
+        renderPages(nextStep);
+      };
+
+      await renderPages('fit');
+
+    } catch (renderErr) {
+      console.warn('PDF Highlight canvas rendering failed, falling back to object viewer:', renderErr);
+      body.innerHTML = `
+        <object data="${blobUrl}#view=FitH&toolbar=1" type="application/pdf" style="width: 100%; height: 100%; border: none; background: #1e293b;">
+          <iframe src="${blobUrl}#view=FitH" style="width: 100%; height: 100%; border: none; background: #1e293b;"></iframe>
+        </object>
+      `;
     }
   }
 
@@ -2385,25 +2799,27 @@ class SafetyEmailsEngine {
     if (stopMatch) {
       return remaining.slice(0, stopMatch.index);
     }
-    return remaining.slice(0, 600);
+    return remaining.slice(0, 2500);
   }
 
   /**
-   * Parses safety defects (fire extinguishers, AEDs, hot sticks, etc.) from extracted checklist text.
+   * Parses safety defects (fire extinguishers, AEDs, hot sticks, truck repairs, etc.)
+   * from extracted checklist text with scoped highlight keywords.
    */
   parseChecklistIssuesFromText(text, context = {}) {
     const issues = [];
     if (!text) return issues;
     const normalized = String(text).replace(/\r?\n/g, ' ');
 
-    const nextSectionRegex = /\b(?:First Aid Kits|Triangles|Hot Sticks|Fire Extinguisher|Cones|Signs|Insulated Jumpers|AED|Crane log books|Mileage books|Manuf\. operation manual|Fall Protection Gear|Harnesses\/Lanyards|Trucks|General)\b/i;
+    const nextSectionRegex = /\b(?:First Aid Kits|Triangles|Hot Sticks|Fire Extinguisher|Cones|Signs|Insulated Jumpers|AED|Crane log books|Mileage books|Manuf\.?\s*operation manual|Fall Protection Gear|Harnesses\/Lanyards|Tools|Hot Hoist|Chains,\s*Chokers|Barriers|Trucks|Misc\s*Comments|General)\b/i;
 
     // 1. Fire Extinguisher section
     const feText = this.extractChecklistSection(normalized, /\bfire\s*extinguisher\b/i, nextSectionRegex);
     if (feText) {
-      const testMatch = feText.match(/test\s*date\s*:?\s*([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}|\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4})/i);
+      const testMatch = feText.match(/test\s*(?:date|due)\s*:?\s*([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}|\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4})/i);
       if (testMatch) {
-        const tDate = new Date(testMatch[1]);
+        const rawTestDate = testMatch[1].trim();
+        const tDate = new Date(rawTestDate);
         if (!isNaN(tDate.getTime())) {
           const expDate = new Date(tDate);
           expDate.setFullYear(expDate.getFullYear() + 1);
@@ -2415,8 +2831,11 @@ class SafetyEmailsEngine {
             const formattedTestDate = `${String(tDate.getMonth() + 1).padStart(2, '0')}/${String(tDate.getDate()).padStart(2, '0')}/${tDate.getFullYear()}`;
             issues.push({
               equipmentType: 'Fire Extinguisher',
+              shortLabel: 'Fire Extinguisher',
               issueDescription: `Fire Extinguisher EXPIRED - Last test: ${tDateStr} (expired ${expDateStr})`,
               feTestDate: formattedTestDate,
+              rawDateStr: rawTestDate,
+              highlightKeywords: [rawTestDate, formattedTestDate, `Test due: ${rawTestDate}`, `Test date: ${rawTestDate}`, 'Fire Extinguisher'],
               notes: `Fire Extinguisher EXPIRED - Last test: ${tDateStr} (expired ${expDateStr})`
             });
           }
@@ -2427,8 +2846,10 @@ class SafetyEmailsEngine {
       if (chargeMatch && chargeMatch[1].toLowerCase() === 'no') {
         issues.push({
           equipmentType: 'Fire Extinguisher',
+          shortLabel: 'Fire Extinguisher (Charge)',
           issueDescription: 'Fire Extinguisher not properly charged',
           feTestDate: '',
+          highlightKeywords: ['Properly charged?: No', 'Properly charged: No', 'Fire Extinguisher'],
           notes: 'Discharged / needs recharge'
         });
       }
@@ -2437,8 +2858,10 @@ class SafetyEmailsEngine {
       if (inspMatch && inspMatch[1].toLowerCase() === 'no') {
         issues.push({
           equipmentType: 'Fire Extinguisher',
+          shortLabel: 'Fire Extinguisher (Insp)',
           issueDescription: 'Fire Extinguisher monthly inspection not done',
           feTestDate: '',
+          highlightKeywords: ['Monthly inspection done?: No', 'Monthly inspection done: No', 'Fire Extinguisher'],
           notes: 'Monthly inspection missing'
         });
       }
@@ -2447,29 +2870,56 @@ class SafetyEmailsEngine {
     // 2. AED section
     const aedText = this.extractChecklistSection(normalized, /\baed\b/i, nextSectionRegex);
     if (aedText) {
+      const aedDamageNa = /any\s*damage\s*visible\s*\??\s*:?\s*na\b/i.test(aedText);
+      const aedPadsNa = /defibrillation\s*pads\s*:?\s*na\b/i.test(aedText);
+
       const dmgMatch = aedText.match(/any\s*damage\s*visible\s*\??\s*:?\s*(yes|no)/i);
       if (dmgMatch && dmgMatch[1].toLowerCase() === 'yes') {
         issues.push({
           equipmentType: 'AED',
+          shortLabel: 'AED Damage',
           issueDescription: 'AED has visible damage',
+          highlightKeywords: ['Any damage visible?: Yes', 'Any damage visible: Yes', 'AED'],
           notes: 'Visible damage reported on AED'
         });
       }
 
-      const pad1Match = aedText.match(/expiration\s*date\s*of\s*pads\s*set\s*1\s*:?\s*([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}|\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4})/i);
-      if (pad1Match) {
-        const pDate = new Date(pad1Match[1]);
+      const padRegex = /expiration\s*date\s*of\s*pads\s*set\s*([12])\s*:?\s*([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}|\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4})/gi;
+      let padMatch;
+      const seenPadDates = new Set();
+      while ((padMatch = padRegex.exec(aedText)) !== null) {
+        const setNum = padMatch[1];
+        const pDateStr = padMatch[2].trim();
+        const pDate = new Date(pDateStr);
         if (!isNaN(pDate.getTime())) {
           const oneMonthFuture = new Date();
           oneMonthFuture.setMonth(oneMonthFuture.getMonth() + 1);
-          if (pDate <= oneMonthFuture) {
-            const pDateStr = pad1Match[1].trim();
+          if (pDate <= oneMonthFuture && !seenPadDates.has(`${setNum}:${pDateStr}`)) {
+            seenPadDates.add(`${setNum}:${pDateStr}`);
             issues.push({
               equipmentType: 'AED',
-              issueDescription: 'Needs AED Pads',
-              notes: `Set 1 pads expire/expired on ${pDateStr}. Needs replacement AED pads.`
+              shortLabel: `AED Pads (Set ${setNum})`,
+              issueDescription: `Needs AED Pads (Set ${setNum}: ${pDateStr})`,
+              rawDateStr: pDateStr,
+              highlightKeywords: [pDateStr, `Expiration date of pads Set ${setNum}: ${pDateStr}`, 'AED'],
+              notes: `Set ${setNum} pads expire/expired on ${pDateStr}. Needs replacement AED pads.`
             });
           }
+        }
+      }
+
+      // Only flag status indicator light failures when the unit carries an AED (not NA/NA)
+      if (!(aedDamageNa && aedPadsNa)) {
+        const lightMatch = aedText.match(/visual\s*rescue\s*ready\s*light(?:\s*is)?\s*:?\s*(no\s*light|red|flashing|blinking|error|fail)/i);
+        if (lightMatch) {
+          const lightStatus = lightMatch[1].trim();
+          issues.push({
+            equipmentType: 'AED',
+            shortLabel: 'AED Status Light',
+            issueDescription: `AED Visual Rescue Ready Light issue (${lightStatus})`,
+            highlightKeywords: [`Visual Rescue Ready Light is: ${lightStatus}`, 'Visual Rescue Ready Light', lightStatus, 'AED'],
+            notes: `AED rescue ready light reported as: ${lightStatus}`
+          });
         }
       }
     }
@@ -2481,7 +2931,9 @@ class SafetyEmailsEngine {
       if (stockMatch && stockMatch[1].toLowerCase() === 'no') {
         issues.push({
           equipmentType: 'First Aid',
+          shortLabel: 'First Aid Kit',
           issueDescription: 'First Aid Kit not fully stocked',
+          highlightKeywords: ['Fully Stocked: No', 'Fully Stocked?: No', 'First Aid Kits'],
           notes: 'Restock First Aid supplies'
         });
       }
@@ -2494,11 +2946,13 @@ class SafetyEmailsEngine {
       if (condMatch && condMatch[1].toLowerCase() === 'no') {
         issues.push({
           equipmentType: 'Hot Sticks',
+          shortLabel: 'Hot Sticks',
           issueDescription: 'Hot Sticks not in good condition',
+          highlightKeywords: ['Good Condition?: No', 'Good Condition: No', 'Hot Sticks'],
           notes: 'Hot sticks damaged or failing inspection'
         });
       }
-      const hsTestMatch = hsText.match(/test\s*date\s*:?\s*([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}|\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4})/i);
+      const hsTestMatch = hsText.match(/test\s*(?:date|due)\s*:?\s*([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}|\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4})/i);
       if (hsTestMatch) {
         const hsDate = new Date(hsTestMatch[1]);
         if (!isNaN(hsDate.getTime())) {
@@ -2506,10 +2960,14 @@ class SafetyEmailsEngine {
           hsExp.setFullYear(hsExp.getFullYear() + 2); // 24-month cycle
           const now = new Date();
           if (now > hsExp) {
+            const rawHsDate = hsTestMatch[1].trim();
             issues.push({
               equipmentType: 'Hot Sticks',
-              issueDescription: `Hot Sticks EXPIRED / Due for Testing - Last test: ${hsTestMatch[1]}`,
-              notes: `Hot sticks overdue for dielectric test (2-year cycle)`
+              shortLabel: 'Hot Sticks (Test)',
+              issueDescription: `Hot Sticks EXPIRED / Due for Testing - Last test: ${rawHsDate}`,
+              rawDateStr: rawHsDate,
+              highlightKeywords: [rawHsDate, `Test Date: ${rawHsDate}`, `Test due: ${rawHsDate}`, 'Hot Sticks'],
+              notes: 'Hot sticks overdue for dielectric test (2-year cycle)'
             });
           }
         }
@@ -2523,30 +2981,97 @@ class SafetyEmailsEngine {
       if (condMatch && condMatch[1].toLowerCase() === 'no') {
         issues.push({
           equipmentType: 'Hot Sticks',
+          shortLabel: 'Insulated Jumpers',
           issueDescription: 'Insulated Jumpers not in good condition',
+          highlightKeywords: ['Good condition?: No', 'Good condition: No', 'Insulated Jumpers'],
           notes: 'Jumpers damaged or failing visual inspection'
         });
       }
     }
 
-    // 6. Truck Defects (Wipers, Horn)
-    const truckText = this.extractChecklistSection(normalized, /\b(?:Trucks|General)\b/i, nextSectionRegex);
+    // 6. Truck Defects (Page 2 "Trucks" section: Wipers, Horn/Air Horn, Other/Dashboard, Tires, Brakes, Lights, etc.)
+    const truckText = this.extractChecklistSection(normalized, /\bTrucks\b/i, /\b(?:Misc\s*Comments|General)\b/i);
     if (truckText) {
-      const badWiper = truckText.match(/wipers?\s*\??\s*:?\s*(no|bad|poor|torn|needs?\s*replac)/i);
-      if (badWiper) {
-        issues.push({
-          equipmentType: 'Truck',
-          issueDescription: 'Windshield wipers need replacement',
-          notes: 'Wipers torn or failing inspection'
+      const seenTruckKeys = new Set();
+      const truckFieldHeader = '(?:Tires|Wheel\\s*[Cc]hocks|Brakes|Lights|Mirrors|Reflectors|Warning\\s*[Ll]ights|Windows|Heater|Windshield|Wipers|Air\\s*[Hh]orns?|Horns?|Back-?[Uu]p\\s*[Aa]larm|Seat\\s*[Bb]elts|Other|[A-Z][a-z]+(?:\\s+[A-Z][a-z]+)?)';
+      const truckFieldBoundaryRegex = new RegExp(`(${truckFieldHeader})\\s*\\??\\s*:\\s*([Yy][Ee][Ss]|[Nn][Oo]|[Nn]\\/?[Aa])\\b`, 'g');
+      const truckFields = [];
+      let bMatch;
+      while ((bMatch = truckFieldBoundaryRegex.exec(truckText)) !== null) {
+        truckFields.push({
+          label: bMatch[1].trim(),
+          status: bMatch[2].trim().toLowerCase(),
+          endIdx: truckFieldBoundaryRegex.lastIndex,
+          startIdx: bMatch.index
         });
       }
-      const badHorn = truckText.match(/horn\s*\??\s*:?\s*(no|bad|poor|inop|doesn't\s*work)/i);
-      if (badHorn) {
+
+      for (let i = 0; i < truckFields.length; i++) {
+        const field = truckFields[i];
+        if (field.status !== 'no') continue;
+
+        const nextStart = i + 1 < truckFields.length ? truckFields[i + 1].startIdx : truckText.length;
+        const rawBetween = truckText.slice(field.endIdx, nextStart).trim();
+        const rawComment = rawBetween.replace(/^comments?\s*:?\s*/i, '').trim();
+
+        const rawLabel = field.label;
+        const normLabel = rawLabel.toLowerCase();
+        if (seenTruckKeys.has(normLabel)) continue;
+        seenTruckKeys.add(normLabel);
+
+        let desc = `${rawLabel} requires repair/attention`;
+        let shortLabel = rawLabel;
+        if (/wiper/i.test(rawLabel)) {
+          desc = rawComment ? `Windshield wipers need replacement (${rawComment})` : 'Windshield wipers need replacement';
+          shortLabel = 'Wipers';
+        } else if (/horn/i.test(rawLabel) || /air\s*horn/i.test(rawComment)) {
+          desc = rawComment ? `${rawLabel}: ${rawComment}` : 'City/Air horn inoperative';
+          shortLabel = /air\s*horn/i.test(`${rawLabel} ${rawComment}`) ? 'Air Horn' : rawLabel;
+        } else if (/^other$/i.test(rawLabel) && rawComment) {
+          desc = `Truck defect (Other): ${rawComment}`;
+          shortLabel = 'Truck (Other)';
+        } else if (rawComment) {
+          desc = `Truck ${rawLabel}: ${rawComment}`;
+        }
+
+        const kws = [`${rawLabel}: No`, `${rawLabel}?: No`];
+        if (rawComment && rawComment.length >= 4) {
+          kws.push(rawComment);
+        }
+
         issues.push({
           equipmentType: 'Truck',
-          issueDescription: 'City/Air horn inoperative',
-          notes: 'Horn inoperative'
+          shortLabel,
+          issueDescription: desc,
+          highlightKeywords: kws,
+          notes: rawComment || `${rawLabel} marked No on truck inspection`
         });
+      }
+
+      // Fallback checks for free-text truck failure phrasing when boolean format differs
+      if (!seenTruckKeys.has('wipers')) {
+        const badWiper = truckText.match(/wipers?\s*\??\s*:?\s*(bad|poor|torn|needs?\s*replac[^\s,;.]*)/i);
+        if (badWiper) {
+          issues.push({
+            equipmentType: 'Truck',
+            shortLabel: 'Wipers',
+            issueDescription: 'Windshield wipers need replacement',
+            highlightKeywords: [`Wipers: ${badWiper[1].trim()}`, badWiper[1].trim()],
+            notes: 'Wipers torn or failing inspection'
+          });
+        }
+      }
+      if (!seenTruckKeys.has('horn') && !seenTruckKeys.has('horns') && !seenTruckKeys.has('air horn')) {
+        const badHorn = truckText.match(/((?:air\s*)?horns?\s*\??\s*:?\s*(?:bad|poor|inop[^\s,;.]*|doesn't\s*work|does\s*not\s*work))/i);
+        if (badHorn) {
+          issues.push({
+            equipmentType: 'Truck',
+            shortLabel: 'Horn',
+            issueDescription: 'City/Air horn inoperative',
+            highlightKeywords: [badHorn[1].trim()],
+            notes: 'Horn inoperative'
+          });
+        }
       }
     }
 
@@ -2561,7 +3086,7 @@ class SafetyEmailsEngine {
     if (!byteArray || !log || !window.pdfjsLib) return;
 
     try {
-      const loadingTask = window.pdfjsLib.getDocument({ data: byteArray });
+      const loadingTask = window.pdfjsLib.getDocument({ data: byteArray.slice() });
       const pdfDoc = await loadingTask.promise;
       let fullText = '';
       for (let p = 1; p <= pdfDoc.numPages; p++) {
@@ -2707,8 +3232,10 @@ class SafetyEmailsEngine {
           window.showToast(`⚠️ Detected equipment defect in Unit ${unit} checklist — added to Trip Planner!`, 'warning');
         }
       }
+      return issues || [];
     } catch (err) {
       console.warn('[PDF Viewer] scanAndSyncChecklistIssues error:', err);
+      return [];
     }
   }
 
@@ -2733,6 +3260,7 @@ class SafetyEmailsEngine {
       targetType = 'Monthly Checklist';
     }
 
+    // 1. Monthly Checklist handling
     if (targetType === 'Monthly Checklist') {
       const checklists = this.getMonthlyChecklistsForCrew(cleanJob, cleanWeek, cleanForeman);
       if (checklists.length > 0) {
@@ -2742,42 +3270,319 @@ class SafetyEmailsEngine {
       }
     }
 
-    // Try to extract date from column header e.g. "Tue (09/29)" or "(09/29/2026)"
-    const dateMatch = String(colHeader).match(/(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)/);
-    const dateSubstr = dateMatch ? dateMatch[1] : '';
-
-    const match = (this.currentLogs || []).find(l => {
-      const jobMatches = (l.jobNumber === cleanJob) || (l.creditedTo === cleanJob) ||
-        (cleanForeman && l.foreman && l.foreman.toLowerCase() === cleanForeman.toLowerCase());
-      if (!jobMatches) return false;
-
-      if (targetType === 'Weekly Safety Meeting') {
+    // 2. Weekly Safety Meeting handling
+    if (targetType === 'Weekly Safety Meeting') {
+      const weeklyLogs = (this.currentLogs || []).filter(l => {
         const isWeekly = l.type === 'Weekly Safety Meeting' || l.sheetName === 'Weekly Safety Log';
         if (!isWeekly) return false;
-        if (cleanWeek && l.date) return l.date.includes(cleanWeek) || cleanWeek.includes(l.date);
-        return true;
+        const jMatches = (l.jobNumber === cleanJob) || (l.creditedTo === cleanJob) ||
+                         (cleanJob && (String(l.jobNumber).startsWith(cleanJob) || cleanJob.startsWith(String(l.jobNumber)))) ||
+                         (cleanForeman && l.foreman && l.foreman.toLowerCase().trim() === cleanForeman.toLowerCase().trim());
+        return jMatches;
+      });
+
+      if (weeklyLogs.length > 0) {
+        let bestMatch = null;
+        if (cleanWeek) {
+          const wStart = this.parseDateHelper(cleanWeek);
+          if (wStart) {
+            // Sunday noon reference
+            const startMs = wStart.getTime() - 24 * 60 * 60 * 1000;
+            const endMs = wStart.getTime() + 7 * 24 * 60 * 60 * 1000;
+            bestMatch = weeklyLogs.find(l => {
+              const mDate = this.parseDateHelper(l.date) || this.parseDateHelper(l.dateReceived);
+              if (mDate) {
+                return mDate.getTime() >= startMs && mDate.getTime() <= endMs;
+              }
+              return false;
+            });
+            // Extended search window if needed (covers slight timezone shifts)
+            if (!bestMatch) {
+              const extStartMs = wStart.getTime() - 4 * 24 * 60 * 60 * 1000;
+              const extEndMs = wStart.getTime() + 11 * 24 * 60 * 60 * 1000;
+              bestMatch = weeklyLogs.find(l => {
+                const mDate = this.parseDateHelper(l.date) || this.parseDateHelper(l.dateReceived);
+                if (mDate) {
+                  return mDate.getTime() >= extStartMs && mDate.getTime() <= extEndMs;
+                }
+                return false;
+              });
+            }
+          }
+        }
+        // Fallback to the newest weekly meeting for this crew
+        if (!bestMatch) {
+          bestMatch = weeklyLogs[0];
+        }
+        if (bestMatch) {
+          this.openPdfViewer(bestMatch);
+          return;
+        }
       }
-      if (targetType === 'Monthly Checklist') {
-        return l.type === 'Monthly Checklist' || l.sheetName === 'Monthly Checklist Log';
+    }
+
+    // 3. Daily JHA handling
+    if (targetType === 'JHA') {
+      const dayMap = { 'sun': 0, 'mon': 1, 'tue': 2, 'wed': 3, 'thu': 4, 'fri': 5, 'sat': 6 };
+      const dateMatch = String(colHeader).match(/(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)/);
+      let dateSubstr = dateMatch ? dateMatch[1] : '';
+      let targetDateObj = null;
+
+      if (!dateSubstr && cleanWeek && dayMap[hLower] !== undefined) {
+        const wStart = this.parseDateHelper(cleanWeek);
+        if (wStart) {
+          targetDateObj = new Date(wStart.getTime() + dayMap[hLower] * 24 * 60 * 60 * 1000);
+          const m = String(targetDateObj.getMonth() + 1).padStart(2, '0');
+          const d = String(targetDateObj.getDate()).padStart(2, '0');
+          dateSubstr = `${m}/${d}`;
+        }
       }
 
-      // For JHA:
-      if (l.type !== 'JHA' && l.sheetName !== 'JHA Log') return false;
-      if (dateSubstr) {
-        if (l.date && l.date.includes(dateSubstr)) return true;
-        if (l.dateReceived && l.dateReceived.includes(dateSubstr)) return true;
-      }
-      return true;
-    });
+      const jhaLogs = (this.currentLogs || []).filter(l => {
+        if (l.type !== 'JHA' && l.sheetName !== 'JHA Log') return false;
+        const jMatches = (l.jobNumber === cleanJob) || (l.creditedTo === cleanJob) ||
+                         (cleanJob && (String(l.jobNumber).startsWith(cleanJob) || cleanJob.startsWith(String(l.jobNumber)))) ||
+                         (cleanForeman && l.foreman && l.foreman.toLowerCase().trim() === cleanForeman.toLowerCase().trim());
+        return jMatches;
+      });
 
-    if (match) {
-      this.openPdfViewer(match.id);
-    } else {
-      this.openSafetyLogsModal();
-      if (cleanJob) {
-        this.onSearchInput(cleanJob);
-        const searchBox = document.getElementById('safety-log-search');
-        if (searchBox) searchBox.value = cleanJob;
+      let bestJha = null;
+      if (targetDateObj) {
+        bestJha = jhaLogs.find(l => {
+          const itemDate = this.parseDateHelper(l.date) || this.parseDateHelper(l.dateReceived);
+          if (itemDate) {
+            return itemDate.getFullYear() === targetDateObj.getFullYear() &&
+                   itemDate.getMonth() === targetDateObj.getMonth() &&
+                   itemDate.getDate() === targetDateObj.getDate();
+          }
+          return false;
+        });
+      }
+      if (!bestJha && dateSubstr) {
+        bestJha = jhaLogs.find(l => {
+          return (l.date && l.date.includes(dateSubstr)) || (l.dateReceived && l.dateReceived.includes(dateSubstr));
+        });
+      }
+      if (!bestJha && jhaLogs.length > 0) {
+        bestJha = jhaLogs[0];
+      }
+      if (bestJha) {
+        this.openPdfViewer(bestJha);
+        return;
+      }
+    }
+
+    // 4. Fallback if no matching record found at all: open audit logs modal with pre-filter
+    this.openSafetyLogsModal();
+    if (cleanJob) {
+      this.onSearchInput(cleanJob);
+      const searchBox = document.getElementById('safety-log-search');
+      if (searchBox) searchBox.value = cleanJob;
+    }
+  }
+
+  /**
+   * Authoritative lookup that resolves a crew or job number to the real employee foreman name.
+   * Checks job_tracking, FY_TRANSITION_ALIAS_MAP, employees, and employee_history.
+   * NEVER returns a job number or 'UNKNOWN'.
+   */
+  lookupForemanForCrew(crewOrJob) {
+    if (!crewOrJob) return '';
+    const raw = String(crewOrJob).trim();
+    if (!raw) return '';
+
+    // If already a person's name (contains letters, spaces, no job number format, not UNKNOWN)
+    if (!/^\d{3}-\d{2}/.test(raw) && raw.toLowerCase() !== 'unknown' && isNaN(raw) && raw.length >= 3) {
+      return raw;
+    }
+
+    const snap = (window.localDB && typeof window.localDB.getSnapshot === 'function') ? window.localDB.getSnapshot() : null;
+    if (!snap || !snap.tables) return '';
+
+    const clean = raw.toLowerCase();
+    const cleanBase = raw.split('.')[0].trim().toLowerCase();
+    const aliasMap = (snap.configs && snap.configs['FY_TRANSITION_ALIAS_MAP']) || {};
+    const aliased = (aliasMap[raw] || aliasMap[clean] || aliasMap[cleanBase] || '').toLowerCase();
+
+    // 1. Check job_tracking table
+    const jt = snap.tables.job_tracking;
+    if (jt && jt.rows) {
+      const row = jt.rows.find(r => {
+        const jn = String(r['Job Number'] || r['Crew'] || r['Job #'] || '').trim().toLowerCase();
+        const jnBase = jn.split('.')[0].trim();
+        return jn === clean || jn === cleanBase || jn === aliased || jnBase === cleanBase;
+      });
+      if (row) {
+        const fm = String(row['Foreman'] || row['Crew Lead'] || row['Lead'] || '').trim();
+        if (fm && !/^\d{3}-\d{2}/.test(fm) && fm.toLowerCase() !== 'unknown') {
+          return fm;
+        }
+      }
+    }
+
+    // 2. Check employees table (prefer foreman classifications)
+    const emp = snap.tables.employees;
+    if (emp && emp.rows) {
+      const candidates = emp.rows.filter(r => {
+        const jn = String(r['Job Number'] || r['Crew'] || '').trim().toLowerCase();
+        const jnBase = jn.split('.')[0].trim();
+        return jn === clean || jn === cleanBase || jn === aliased || jnBase === cleanBase;
+      });
+      if (candidates.length > 0) {
+        const rank = (c) => {
+          const cl = String(c['Classification'] || c['Title'] || '').toUpperCase();
+          if (cl.includes('SUP')) return 1;
+          if (cl.includes('GF')) return 2;
+          if (cl === 'F' || cl.startsWith('F ') || cl.endsWith(' F')) return 3;
+          if (cl.includes('GTO F')) return 4;
+          if (cl.includes('JRY')) return 5;
+          return 10;
+        };
+        candidates.sort((a, b) => rank(a) - rank(b));
+        const empName = String(candidates[0]['Name'] || candidates[0]['Employee Name'] || '').trim();
+        if (empName && !/^\d{3}-\d{2}/.test(empName) && empName.toLowerCase() !== 'unknown') {
+          return empName;
+        }
+      }
+    }
+
+    // 3. Check employee_history table
+    const hist = snap.tables.employee_history;
+    if (hist && hist.rows) {
+      const hRow = hist.rows.find(r => {
+        const jn = String(r['Job Number'] || r['Crew'] || '').trim().toLowerCase();
+        const jnBase = jn.split('.')[0].trim();
+        return jn === clean || jn === cleanBase || jn === aliased || jnBase === cleanBase;
+      });
+      if (hRow) {
+        const hName = String(hRow['Name'] || hRow['Employee Name'] || '').trim();
+        if (hName && !/^\d{3}-\d{2}/.test(hName) && hName.toLowerCase() !== 'unknown') {
+          return hName;
+        }
+      }
+    }
+
+    // 4. Known FY transition aliases fallback
+    const knownTransitionForemen = {
+      '053-26': 'Ryan Taylor',
+      '014-27': 'Ryan Taylor',
+      '049-26': 'Nick Wright',
+      '026-27': 'Nick Wright',
+      '012-26': 'Chad Cliff',
+      '012-27': 'Chad Cliff'
+    };
+    if (knownTransitionForemen[raw]) return knownTransitionForemen[raw];
+
+    return '';
+  }
+
+  /**
+   * Immediately credits a report in the local Safety Compliance table and refreshes the UI.
+   * Ensures UI cards (e.g. Chad Cliff 012-27) immediately show Received without waiting for cloud recalc.
+   */
+  creditComplianceRecordLocally({ crew, originalJob, dateStr, reportType, status, foreman }) {
+    if (!window.localDB || !window.localDB.snapshot || !window.localDB.snapshot.tables) return;
+    const snap = window.localDB.snapshot;
+    const scTable = snap.tables.safety_compliance;
+    if (!scTable || !scTable.rows) return;
+
+    const targetCrew = String(crew || originalJob || '').trim();
+    if (!targetCrew) return;
+
+    const parseToNoon = (dStr) => {
+      if (!dStr) return null;
+      if (dStr instanceof Date) return dStr;
+      const parts = String(dStr).trim().split(/[-/]/);
+      if (parts.length === 3) {
+        if (parts[0].length === 4) {
+          return new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10), 12, 0, 0);
+        } else {
+          return new Date(parseInt(parts[2], 10), parseInt(parts[0], 10) - 1, parseInt(parts[1], 10), 12, 0, 0);
+        }
+      }
+      const d = new Date(dStr);
+      return isNaN(d.getTime()) ? null : d;
+    };
+
+    const reportDate = parseToNoon(dateStr) || new Date();
+    const repDay = reportDate.getDay();
+    const weekSunday = new Date(reportDate.getTime());
+    weekSunday.setDate(weekSunday.getDate() - repDay);
+    const weekSundayTime = weekSunday.getTime();
+
+    const isSameWeek = (wVal) => {
+      const wDate = parseToNoon(wVal);
+      if (!wDate) return false;
+      const wDay = wDate.getDay();
+      const wSun = new Date(wDate.getTime());
+      wSun.setDate(wSun.getDate() - wDay);
+      return Math.abs(wSun.getTime() - weekSundayTime) < 86400000 * 3.5;
+    };
+
+    const isMatchCrew = (r) => {
+      const jn = String(r['Job Number'] || r['Job #'] || r['Crew'] || '').trim().toLowerCase();
+      const tc = targetCrew.toLowerCase();
+      if (jn === tc) return true;
+      const jnBase = jn.split('.')[0].trim();
+      const tcBase = tc.split('.')[0].trim();
+      if (jnBase === tcBase) return true;
+      const aliasMap = (snap.configs && snap.configs['FY_TRANSITION_ALIAS_MAP']) || {};
+      if (aliasMap[tc] && aliasMap[tc].toLowerCase() === jn) return true;
+      if (aliasMap[jn] && aliasMap[jn].toLowerCase() === tc) return true;
+      return false;
+    };
+
+    const matchingRow = scTable.rows.find(r => isMatchCrew(r) && isSameWeek(r['Week Start'] || r['Week']));
+    if (matchingRow) {
+      const isCredited = (status === 'Credited');
+      const markValue = isCredited ? '✅' : '⏳';
+      const typeLower = String(reportType || '').toLowerCase();
+
+      if (typeLower.includes('meeting') || typeLower.includes('weekly')) {
+        matchingRow['Weekly Meeting'] = markValue;
+      } else if (typeLower.includes('checklist') || typeLower.includes('monthly')) {
+        matchingRow['Monthly Checklist'] = markValue;
+      } else if (typeLower.includes('jha')) {
+        const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+        const dayCol = days[reportDate.getDay()];
+        matchingRow[dayCol] = markValue;
+      }
+
+      if (foreman && (!matchingRow['Foreman'] || matchingRow['Foreman'].toLowerCase() === 'unknown' || /^\d{3}-\d{2}/.test(matchingRow['Foreman']))) {
+        matchingRow['Foreman'] = foreman;
+      }
+
+      // Recalculate row status
+      const allDays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+      let hasMissing = false;
+      let hasPending = false;
+      for (const d of allDays) {
+        const v = String(matchingRow[d] || '');
+        if (v.startsWith('❌')) hasMissing = true;
+        else if (v.includes('⏳')) hasPending = true;
+      }
+      const wm = String(matchingRow['Weekly Meeting'] || '');
+      if (wm.startsWith('❌')) hasMissing = true;
+      else if (wm.includes('⏳')) hasPending = true;
+
+      const mc = String(matchingRow['Monthly Checklist'] || '');
+      if (mc.startsWith('❌')) hasMissing = true;
+      else if (mc.includes('⏳')) hasPending = true;
+
+      if (hasMissing) matchingRow['Status'] = 'Missing Reports';
+      else if (hasPending) matchingRow['Status'] = 'Pending';
+      else matchingRow['Status'] = 'Complete';
+
+      matchingRow['Updated'] = new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' }) + ' ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+      // Persist snapshot to disk
+      if (typeof window.localDB.persistSnapshot === 'function') {
+        window.localDB.persistSnapshot(snap);
+      }
+
+      // Re-render Safety Compliance view immediately
+      if (window.sheetNavigator && typeof window.sheetNavigator.renderSafetyCompliance === 'function') {
+        window.sheetNavigator.renderSafetyCompliance();
       }
     }
   }
@@ -2794,6 +3599,13 @@ class SafetyEmailsEngine {
 
     const existingModal = document.getElementById('edit-log-entry-modal');
     if (existingModal) existingModal.remove();
+
+    // Auto-resolve foreman if it is currently a job number or UNKNOWN
+    let initialForeman = log.foreman || '';
+    if (!initialForeman || /^\d{3}-\d{2}/.test(initialForeman) || initialForeman.toLowerCase() === 'unknown') {
+      const resolved = this.lookupForemanForCrew(log.creditedTo || log.jobNumber);
+      if (resolved) initialForeman = resolved;
+    }
 
     const modal = document.createElement('div');
     modal.id = 'edit-log-entry-modal';
@@ -2817,7 +3629,8 @@ class SafetyEmailsEngine {
 
           <div>
             <label style="display: block; font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; margin-bottom: 4px;">Foreman Name</label>
-            <input type="text" id="edit-log-foreman" value="${this.escapeHtml(log.foreman || '')}" style="width: 100%; background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: 6px; padding: 8px 12px; color: var(--text-primary); font-size: 13px;" />
+            <input type="text" id="edit-log-foreman" value="${this.escapeHtml(initialForeman)}" placeholder="e.g. Chad Cliff" style="width: 100%; background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: 6px; padding: 8px 12px; color: var(--text-primary); font-size: 13px;" />
+            <div style="font-size: 11px; color: #94a3b8; margin-top: 4px;">Must be an employee name only (never a job number).</div>
           </div>
 
           <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
@@ -2864,6 +3677,22 @@ class SafetyEmailsEngine {
       window.windowManager.enhanceModal(modal);
       window.windowManager.bringToFront(modal);
     }
+
+    // Attach dynamic auto-lookup listener when user types Job # or Credited To
+    const jobInput = document.getElementById('edit-log-jobnum');
+    const credInput = document.getElementById('edit-log-credited');
+    const fmInput = document.getElementById('edit-log-foreman');
+    const autoLookupForeman = () => {
+      const target = credInput?.value.trim() || jobInput?.value.trim();
+      if (target) {
+        const found = this.lookupForemanForCrew(target);
+        if (found && (!fmInput.value || /^\d{3}-\d{2}/.test(fmInput.value) || fmInput.value.toLowerCase() === 'unknown')) {
+          fmInput.value = found;
+        }
+      }
+    };
+    jobInput?.addEventListener('input', autoLookupForeman);
+    credInput?.addEventListener('input', autoLookupForeman);
   }
 
   /**
@@ -2873,12 +3702,20 @@ class SafetyEmailsEngine {
     const log = (this.currentLogs || []).find(l => (l.id === logId || (l.sheetName + '_' + l.rowIndex) === logId));
     if (!log) return;
 
-    const foreman = document.getElementById('edit-log-foreman')?.value.trim() || '';
+    let foreman = document.getElementById('edit-log-foreman')?.value.trim() || '';
     const jobNum = document.getElementById('edit-log-jobnum')?.value.trim() || '';
     const credited = document.getElementById('edit-log-credited')?.value.trim() || '';
     const dateStr = document.getElementById('edit-log-date')?.value.trim() || '';
     const status = document.getElementById('edit-log-status')?.value.trim() || 'Credited';
     const notes = document.getElementById('edit-log-notes')?.value.trim() || '';
+
+    // Enforce that Foreman is ALWAYS an employee name, NEVER a job number or UNKNOWN
+    if (!foreman || /^\d{3}-\d{2}/.test(foreman) || foreman.toLowerCase() === 'unknown') {
+      const resolved = this.lookupForemanForCrew(credited || jobNum);
+      if (resolved) {
+        foreman = resolved;
+      }
+    }
 
     // Update in-memory log
     log.foreman = foreman;
@@ -2888,10 +3725,35 @@ class SafetyEmailsEngine {
     log.status = status;
     log.notes = notes;
 
+    // Update local snapshot table row
+    if (window.localDB && window.localDB.snapshot && window.localDB.snapshot.tables) {
+      const snap = window.localDB.snapshot;
+      let tblKey = '';
+      if (log.sheetName === 'JHA Log') tblKey = 'jha_log';
+      else if (log.sheetName === 'Weekly Safety Log') tblKey = 'weekly_safety_log';
+      else if (log.sheetName === 'Monthly Checklist Log') tblKey = 'monthly_checklist_log';
+
+      if (tblKey && snap.tables[tblKey] && snap.tables[tblKey].rows) {
+        const row = snap.tables[tblKey].rows.find(r => (r._rowIdx === log.rowIndex) || (log.emailId && (r['Email ID'] === log.emailId || r.email_id === log.emailId)));
+        if (row) {
+          row['Foreman'] = foreman;
+          row['Job Number'] = jobNum;
+          row['Credited To'] = credited;
+          row['Status'] = status;
+          row['Notes'] = notes;
+          if (tblKey === 'weekly_safety_log') row['Week Of'] = dateStr;
+          else if (tblKey === 'jha_log') { row['Date Created'] = dateStr; row['Work Date'] = dateStr; }
+          else if (tblKey === 'monthly_checklist_log') { row['Report Date'] = dateStr; row['Date Created'] = dateStr; }
+        }
+      }
+      if (typeof window.localDB.persistSnapshot === 'function') {
+        window.localDB.persistSnapshot(snap);
+      }
+    }
+
     // Queue mutations to sync back to Google Sheets
     if (window.syncEngine && log.sheetName && log.rowIndex > 1) {
       if (log.sheetName === 'JHA Log') {
-        // Col B (2)=Date, C (3)=JobNum, D (4)=Foreman, H (8)=Status, I (9)=CreditedTo, J (10)=Notes
         if (dateStr) window.syncEngine.addMutation({ action: 'UPDATE_CELL', sheetName: log.sheetName, row: log.rowIndex, col: 2, value: dateStr });
         window.syncEngine.addMutation({ action: 'UPDATE_CELL', sheetName: log.sheetName, row: log.rowIndex, col: 3, value: jobNum });
         window.syncEngine.addMutation({ action: 'UPDATE_CELL', sheetName: log.sheetName, row: log.rowIndex, col: 4, value: foreman });
@@ -2899,7 +3761,6 @@ class SafetyEmailsEngine {
         window.syncEngine.addMutation({ action: 'UPDATE_CELL', sheetName: log.sheetName, row: log.rowIndex, col: 9, value: credited });
         window.syncEngine.addMutation({ action: 'UPDATE_CELL', sheetName: log.sheetName, row: log.rowIndex, col: 10, value: notes });
       } else if (log.sheetName === 'Weekly Safety Log') {
-        // Col B (2)=Week Of, C (3)=JobNum, D (4)=Foreman, G (7)=Status, H (8)=CreditedTo, I (9)=Notes
         if (dateStr) window.syncEngine.addMutation({ action: 'UPDATE_CELL', sheetName: log.sheetName, row: log.rowIndex, col: 2, value: dateStr });
         window.syncEngine.addMutation({ action: 'UPDATE_CELL', sheetName: log.sheetName, row: log.rowIndex, col: 3, value: jobNum });
         window.syncEngine.addMutation({ action: 'UPDATE_CELL', sheetName: log.sheetName, row: log.rowIndex, col: 4, value: foreman });
@@ -2907,7 +3768,6 @@ class SafetyEmailsEngine {
         window.syncEngine.addMutation({ action: 'UPDATE_CELL', sheetName: log.sheetName, row: log.rowIndex, col: 8, value: credited });
         window.syncEngine.addMutation({ action: 'UPDATE_CELL', sheetName: log.sheetName, row: log.rowIndex, col: 9, value: notes });
       } else if (log.sheetName === 'Monthly Checklist Log') {
-        // Col B (2)=Report Date, C (3)=JobNum, D (4)=Foreman, H (8)=Status, I (9)=CreditedTo, K (11)=Notes
         if (dateStr) window.syncEngine.addMutation({ action: 'UPDATE_CELL', sheetName: log.sheetName, row: log.rowIndex, col: 2, value: dateStr });
         window.syncEngine.addMutation({ action: 'UPDATE_CELL', sheetName: log.sheetName, row: log.rowIndex, col: 3, value: jobNum });
         window.syncEngine.addMutation({ action: 'UPDATE_CELL', sheetName: log.sheetName, row: log.rowIndex, col: 4, value: foreman });
@@ -2916,6 +3776,16 @@ class SafetyEmailsEngine {
         window.syncEngine.addMutation({ action: 'UPDATE_CELL', sheetName: log.sheetName, row: log.rowIndex, col: 11, value: notes });
       }
     }
+
+    // Immediately reflect credit on Safety Compliance matrix
+    this.creditComplianceRecordLocally({
+      crew: credited || jobNum,
+      originalJob: jobNum,
+      dateStr: dateStr,
+      reportType: log.type || log.sheetName,
+      status: status,
+      foreman: foreman
+    });
 
     // Close edit modal
     const editModal = document.getElementById('edit-log-entry-modal');
@@ -2929,6 +3799,10 @@ class SafetyEmailsEngine {
     if (container) {
       container.innerHTML = this.renderLogsTableHtml();
       this.updateLogCountIndicator();
+    }
+
+    if (typeof window.showToast === 'function') {
+      window.showToast('✅ Safety log record updated and credited!', 'success');
     }
   }
 
@@ -3046,7 +3920,13 @@ class SafetyEmailsEngine {
           dateReceived: getLogRowDateReceived(r),
           date: r['Date Created'] || r['Date Completed'] || r['Work Date'] || r.date || '',
           jobNumber: jobNum,
-          foreman: r['Foreman'] || '',
+          foreman: (() => {
+            const rawFm = r['Foreman'] || '';
+            if (!rawFm || /^\d{3}-\d{2}/.test(rawFm) || rawFm.toLowerCase() === 'unknown') {
+              return this.lookupForemanForCrew(r['Credited To'] || jobNum) || rawFm;
+            }
+            return rawFm;
+          })(),
           subject: subject,
           emailId: emailId,
           gmailUrl: buildLogUrl(subject, emailId, jobNum, 'JHA'),
@@ -3072,7 +3952,13 @@ class SafetyEmailsEngine {
           dateReceived: getLogRowDateReceived(r),
           date: r['Week Of'] || '',
           jobNumber: jobNum,
-          foreman: r['Foreman'] || '',
+          foreman: (() => {
+            const rawFm = r['Foreman'] || '';
+            if (!rawFm || /^\d{3}-\d{2}/.test(rawFm) || rawFm.toLowerCase() === 'unknown') {
+              return this.lookupForemanForCrew(r['Credited To'] || jobNum) || rawFm;
+            }
+            return rawFm;
+          })(),
           subject: subject,
           emailId: emailId,
           gmailUrl: buildLogUrl(subject, emailId, jobNum, 'Safety Meeting'),
@@ -3098,7 +3984,13 @@ class SafetyEmailsEngine {
           dateReceived: getLogRowDateReceived(r),
           date: r['Report Date'] || r['Date Created'] || r['Date Completed'] || r['Date'] || '',
           jobNumber: jobNum,
-          foreman: r['Foreman'] || '',
+          foreman: (() => {
+            const rawFm = r['Foreman'] || '';
+            if (!rawFm || /^\d{3}-\d{2}/.test(rawFm) || rawFm.toLowerCase() === 'unknown') {
+              return this.lookupForemanForCrew(r['Credited To'] || jobNum) || rawFm;
+            }
+            return rawFm;
+          })(),
           vehicleNumber: r['Vehicle Number'] || r['Equipment Number'] || '',
           subject: subject,
           emailId: emailId,
@@ -3153,7 +4045,10 @@ class SafetyEmailsEngine {
     if (footer) {
       footer.innerHTML = `
         <div style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
-          <button class="btn btn-primary" id="btn-refresh-audit-logs" onclick="window.safetyComplianceEngine.fetchLatestLogsFromSheets()" style="font-size: 12px; padding: 6px 14px; background: #3b82f6; color: white;">🔄 Fetch Latest from Sheets</button>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <button class="btn btn-primary" id="btn-refresh-audit-logs" onclick="window.safetyComplianceEngine.fetchLatestLogsFromSheets()" style="font-size: 12px; padding: 6px 14px; background: #3b82f6; color: white;">🔄 Fetch Latest from Sheets</button>
+            <button class="btn btn-secondary" id="btn-clean-dedup-logs" onclick="window.safetyComplianceEngine.cleanAndDeduplicateLogs()" style="font-size: 12px; padding: 6px 14px; background: #0f766e; border-color: #14b8a6; color: white;" title="Auto-resolve job numbers in Foreman column to real employee names and delete duplicate entries">🧹 Clean Foremen & Deduplicate</button>
+          </div>
           <button class="btn btn-secondary" onclick="window.safetyComplianceEngine.closeProcessEmailsModal()">Close</button>
         </div>
       `;

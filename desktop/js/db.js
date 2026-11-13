@@ -435,7 +435,8 @@ class LocalDatabase {
       { cfgKey: 'CREW_IMPORT_LEAD_SELECTIONS', lsKeys: ['CREW_IMPORT_LEAD_SELECTIONS'] },
       { cfgKey: 'CREW_IMPORT_MISSING_ROSTER_ACTIONS', lsKeys: ['CREW_IMPORT_MISSING_ROSTER_ACTIONS'] },
       { cfgKey: 'CREW_IMPORT_PRIMARY_JOB_SELECTIONS', lsKeys: ['CREW_IMPORT_PRIMARY_JOB_SELECTIONS'] },
-      { cfgKey: 'FY_TRANSITION_ALIAS_MAP', lsKeys: ['FY_TRANSITION_ALIAS_MAP'] }
+      { cfgKey: 'FY_TRANSITION_ALIAS_MAP', lsKeys: ['FY_TRANSITION_ALIAS_MAP'] },
+      { cfgKey: 'floating_holiday_assignments', lsKeys: ['sa_floating_holiday_assignments', 'FLOATING_HOLIDAY_ASSIGNMENTS'] }
     ];
 
     configMappings.forEach(({ cfgKey, lsKeys }) => {
@@ -518,6 +519,7 @@ class LocalDatabase {
     writeJsonKeys(cfg.CREW_IMPORT_MISSING_ROSTER_ACTIONS, ['CREW_IMPORT_MISSING_ROSTER_ACTIONS']);
     writeJsonKeys(cfg.CREW_IMPORT_PRIMARY_JOB_SELECTIONS, ['CREW_IMPORT_PRIMARY_JOB_SELECTIONS']);
     writeJsonKeys(cfg.FY_TRANSITION_ALIAS_MAP, ['FY_TRANSITION_ALIAS_MAP']);
+    writeJsonKeys(cfg.floating_holiday_assignments, ['sa_floating_holiday_assignments', 'FLOATING_HOLIDAY_ASSIGNMENTS']);
 
     if (cfg.workSchedule) {
       try {
@@ -4184,8 +4186,8 @@ class LocalDatabase {
       }
     }
 
-    // Coalesce config mutations (SAVE_PLANNED_TRIPS, SAVE_MANUAL_TASKS, SET_HOLIDAYS, SET_TRIP_SCHEDULE, SAVE_CERT_PHOTOS)
-    if (mutation.action === 'SAVE_PLANNED_TRIPS' || mutation.action === 'SAVE_MANUAL_TASKS' || mutation.action === 'SET_HOLIDAYS' || mutation.action === 'SET_TRIP_SCHEDULE' || mutation.action === 'SAVE_CERT_PHOTOS') {
+    // Coalesce config mutations (SAVE_PLANNED_TRIPS, SAVE_MANUAL_TASKS, SET_HOLIDAYS, SET_TRIP_SCHEDULE, SAVE_CERT_PHOTOS, SAVE_FLOATING_HOLIDAY_ASSIGNMENTS)
+    if (mutation.action === 'SAVE_PLANNED_TRIPS' || mutation.action === 'SAVE_MANUAL_TASKS' || mutation.action === 'SET_HOLIDAYS' || mutation.action === 'SET_TRIP_SCHEDULE' || mutation.action === 'SAVE_CERT_PHOTOS' || mutation.action === 'SAVE_FLOATING_HOLIDAY_ASSIGNMENTS') {
       const existingIdx = this.outbox.findIndex(m => m.action === mutation.action);
       if (existingIdx !== -1) {
         this.outbox[existingIdx] = {
@@ -4254,6 +4256,11 @@ class LocalDatabase {
     if (mut.action === 'SET_HOLIDAYS') {
       if (!this.snapshot.configs) this.snapshot.configs = {};
       this.snapshot.configs.holidays = mut.holidays;
+      return;
+    }
+    if (mut.action === 'SAVE_FLOATING_HOLIDAY_ASSIGNMENTS') {
+      if (!this.snapshot.configs) this.snapshot.configs = {};
+      this.snapshot.configs.floating_holiday_assignments = mut.assignments;
       return;
     }
     if (mut.action === 'SET_TRIP_SCHEDULE') {

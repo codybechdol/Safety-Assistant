@@ -1721,6 +1721,16 @@ function applyBatchSyncMutations(mutations, returnSnapshot, options) {
     return empLocationCache[cleanEmp] || 'Helena';
   }
 
+  function normalizeEquipmentKey(k) {
+    if (k === null || k === undefined) return '';
+    return String(k)
+      .trim()
+      .toLowerCase()
+      .replace(/[\s\u00A0]+/g, '')
+      .replace(/[–—]/g, '-')
+      .replace(/^[#bbs\-_]+/, '');
+  }
+
   var invItemIndexCache = {};
   function getInvItemRowIndexFast(targetSheet, targetSheetName, itemNum) {
     if (!itemNum || itemNum === '—' || itemNum === '-') return -1;
@@ -1745,15 +1755,24 @@ function applyBatchSyncMutations(mutations, returnSnapshot, options) {
             invItemIndexCache[sName][itm] = r + 1;
             var itmClean = itm.replace(/^[#bBsS\-_]+/, '').trim();
             if (itmClean && !invItemIndexCache[sName][itmClean]) invItemIndexCache[sName][itmClean] = r + 1;
+            var itmNorm = normalizeEquipmentKey(itm);
+            if (itmNorm && !invItemIndexCache[sName][itmNorm]) invItemIndexCache[sName][itmNorm] = r + 1;
           }
           if (esl) {
             invItemIndexCache[sName][esl] = r + 1;
+            var eslNorm = normalizeEquipmentKey(esl);
+            if (eslNorm && !invItemIndexCache[sName][eslNorm]) invItemIndexCache[sName][eslNorm] = r + 1;
           }
-          // Only index serial number as unique row identifier for Grounds (where Col 0 is serial)
-          if (ser && sLower.indexOf('ground') !== -1) {
-            invItemIndexCache[sName][ser] = r + 1;
+          // Index serial number as unique row identifier for Grounds (where Col 0 is serial)
+          // or secondary fallback for other equipment items
+          if (ser) {
+            if (sLower.indexOf('ground') !== -1 || !invItemIndexCache[sName][ser]) {
+              invItemIndexCache[sName][ser] = r + 1;
+            }
             var serClean = ser.replace(/^[#\-_]+/, '').trim();
             if (serClean && !invItemIndexCache[sName][serClean]) invItemIndexCache[sName][serClean] = r + 1;
+            var serNorm = normalizeEquipmentKey(ser);
+            if (serNorm && !invItemIndexCache[sName][serNorm]) invItemIndexCache[sName][serNorm] = r + 1;
           }
         }
       }
@@ -1765,6 +1784,11 @@ function applyBatchSyncMutations(mutations, returnSnapshot, options) {
     var strippedKey = cleanKey.replace(/^[#bBsS\-_]+/, '').trim();
     if (strippedKey && invItemIndexCache[sName] && invItemIndexCache[sName][strippedKey] !== undefined) {
       return invItemIndexCache[sName][strippedKey];
+    }
+
+    var normKey = normalizeEquipmentKey(itemNum);
+    if (normKey && invItemIndexCache[sName] && invItemIndexCache[sName][normKey] !== undefined) {
+      return invItemIndexCache[sName][normKey];
     }
     return -1;
   }
@@ -1902,6 +1926,7 @@ function applyBatchSyncMutations(mutations, returnSnapshot, options) {
         'SET_TASK_STATUS',
         'TRIGGER_SYNC_CREWS',
         'SET_HOLIDAYS',
+        'SAVE_FLOATING_HOLIDAY_ASSIGNMENTS',
         'SET_TRIP_SCHEDULE',
         'SCHEDULE_CREW_VISIT',
         'UNSCHEDULE_CREW_VISIT',
@@ -2001,7 +2026,28 @@ function applyBatchSyncMutations(mutations, returnSnapshot, options) {
               valToWrite = false;
             }
 
-            safeSetCellWithValidationFallback(sheet.getRange(targetRow, mut.col), valToWrite);
+            var colToWrite = mut.col;
+            if (mut.header && sheet.getLastColumn() > 0) {
+              var sData = activeSheetData[sheetName];
+              if (!sData) {
+                try {
+                  sData = sheet.getDataRange().getValues();
+                  activeSheetData[sheetName] = sData;
+                } catch (eHdr) {}
+              }
+              if (sData && sData.length > 0) {
+                var hRow = sData[0];
+                var hSearch = String(mut.header).trim().toLowerCase();
+                for (var hi = 0; hi < hRow.length; hi++) {
+                  if (String(hRow[hi] || '').trim().toLowerCase() === hSearch) {
+                    colToWrite = hi + 1;
+                    break;
+                  }
+                }
+              }
+            }
+
+            safeSetCellWithValidationFallback(sheet.getRange(targetRow, colToWrite), valToWrite);
             sheetsModified[sheetName] = true;
             appliedCount++;
 
@@ -2092,7 +2138,7 @@ function applyBatchSyncMutations(mutations, returnSnapshot, options) {
                   eqColPicked = colsRef.HOT_STICKS ? colsRef.HOT_STICKS.PICKED_FOR : 10;         // 10
                 }
 
-                var isAssignedToEdit = (mut.col === eqColAssignedTo || hLower === 'assigned to' || hLower === 'assigned_to');
+                var isAssignedToEdit = (colToWrite === eqColAssignedTo || hLower === 'assigned to' || hLower === 'assigned_to');
 
                 if (isAssignedToEdit) {
                   var assignedVal = String(mut.value || '').trim();
@@ -2107,10 +2153,10 @@ function applyBatchSyncMutations(mutations, returnSnapshot, options) {
                   if (assignedValLower === 'on shelf') {
                     newStatus = 'On Shelf';
                     newLocation = 'Helena';
-                    if (eqColPicked) safeSetCellWithValidationFallback(sheet.getRange(mut.row, eqColPicked), '');
+                    if (eqColPicked) safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColPicked), '');
                     if (eqColDateAssigned) {
                       var todayFormatted = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'MM/dd/yyyy');
-                      safeSetCellWithValidationFallback(sheet.getRange(mut.row, eqColDateAssigned), todayFormatted);
+                      safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColDateAssigned), todayFormatted);
                     }
                   } else if (assignedValLower === 'packed for delivery') {
                     newStatus = 'Ready For Delivery';
@@ -2124,99 +2170,99 @@ function applyBatchSyncMutations(mutations, returnSnapshot, options) {
                   } else if (assignedValLower === 'failed rubber' || assignedValLower === 'not repairable') {
                     newStatus = 'Failed Rubber';
                     newLocation = 'Destroyed';
-                    if (eqColChangeOutDate) safeSetCellWithValidationFallback(sheet.getRange(mut.row, eqColChangeOutDate), 'N/A');
-                    if (eqColPicked) safeSetCellWithValidationFallback(sheet.getRange(mut.row, eqColPicked), '');
+                    if (eqColChangeOutDate) safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColChangeOutDate), 'N/A');
+                    if (eqColPicked) safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColPicked), '');
                   } else if (assignedValLower === 'lost') {
                     newStatus = 'Lost';
                     newLocation = 'Lost';
-                    if (eqColChangeOutDate) safeSetCellWithValidationFallback(sheet.getRange(mut.row, eqColChangeOutDate), 'N/A');
-                    if (eqColPicked) safeSetCellWithValidationFallback(sheet.getRange(mut.row, eqColPicked), '');
+                    if (eqColChangeOutDate) safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColChangeOutDate), 'N/A');
+                    if (eqColPicked) safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColPicked), '');
                   } else if (assignedVal !== '') {
                     // Regular employee assignment: look up in fast in-memory Employees cache
                     newStatus = 'Assigned';
                     newLocation = getEmpLocationFast(assignedVal);
-                    if (eqColPicked) safeSetCellWithValidationFallback(sheet.getRange(mut.row, eqColPicked), '');
+                    if (eqColPicked) safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColPicked), '');
                   }
 
                   if (newStatus && eqColStatus) {
-                    safeSetCellWithValidationFallback(sheet.getRange(mut.row, eqColStatus), newStatus);
+                    safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColStatus), newStatus);
                   }
                   if (newLocation && eqColLocation) {
-                    safeSetCellWithValidationFallback(sheet.getRange(mut.row, eqColLocation), newLocation);
+                    safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColLocation), newLocation);
                   }
 
                   // Recalculate Change Out Date if Date Assigned exists
                   if (eqColDateAssigned && eqColChangeOutDate && assignedValLower !== 'failed rubber' && assignedValLower !== 'lost') {
-                    var dateAssignedVal = sheet.getRange(mut.row, eqColDateAssigned).getValue();
+                    var dateAssignedVal = sheet.getRange(targetRow, eqColDateAssigned).getValue();
                     if (dateAssignedVal) {
                       var chgOut = null;
                       if (isBlanket && typeof calculateBlanketChangeOutDate === 'function') {
-                        var bTest = sheet.getRange(mut.row, eqColTestDate).getValue();
+                        var bTest = sheet.getRange(targetRow, eqColTestDate).getValue();
                         chgOut = calculateBlanketChangeOutDate(bTest);
                       } else if (isMack && typeof calculateMackChangeOutDate === 'function') {
-                        var mTest = sheet.getRange(mut.row, eqColTestDate).getValue();
+                        var mTest = sheet.getRange(targetRow, eqColTestDate).getValue();
                         chgOut = calculateMackChangeOutDate(mTest);
                       } else if (typeof calculateChangeOutDate === 'function') {
                         chgOut = calculateChangeOutDate(dateAssignedVal, newLocation, assignedVal, isSleeve);
                       }
                       if (chgOut && chgOut !== 'N/A') {
-                        safeSetCellWithValidationFallback(sheet.getRange(mut.row, eqColChangeOutDate), chgOut);
+                        safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColChangeOutDate), chgOut);
                       }
                       if (eqColPicked && assignedValLower !== 'on shelf' && assignedValLower !== 'in testing' && assignedValLower !== 'packed for delivery') {
-                        safeSetCellWithValidationFallback(sheet.getRange(mut.row, eqColPicked), '');
+                        safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColPicked), '');
                       }
                     }
                   }
                 }
 
                 // If Status was edited directly
-                var isStatusEdit = (mut.col === eqColStatus || hLower === 'status' || hLower === 'item status');
+                var isStatusEdit = (colToWrite === eqColStatus || hLower === 'status' || hLower === 'item status');
                 if (isStatusEdit) {
                   var statVal = String(mut.value || '').trim().toLowerCase();
                   if (statVal === 'on shelf') {
-                    if (eqColAssignedTo) safeSetCellWithValidationFallback(sheet.getRange(mut.row, eqColAssignedTo), 'On Shelf');
-                    if (eqColLocation) safeSetCellWithValidationFallback(sheet.getRange(mut.row, eqColLocation), 'Helena');
-                    if (eqColPicked) safeSetCellWithValidationFallback(sheet.getRange(mut.row, eqColPicked), '');
+                    if (eqColAssignedTo) safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColAssignedTo), 'On Shelf');
+                    if (eqColLocation) safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColLocation), 'Helena');
+                    if (eqColPicked) safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColPicked), '');
                   } else if (statVal === 'ready for delivery') {
-                    if (eqColAssignedTo) safeSetCellWithValidationFallback(sheet.getRange(mut.row, eqColAssignedTo), 'Packed For Delivery');
-                    if (eqColLocation) safeSetCellWithValidationFallback(sheet.getRange(mut.row, eqColLocation), "Cody's Truck");
+                    if (eqColAssignedTo) safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColAssignedTo), 'Packed For Delivery');
+                    if (eqColLocation) safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColLocation), "Cody's Truck");
                   } else if (statVal === 'ready for test') {
-                    if (eqColAssignedTo) safeSetCellWithValidationFallback(sheet.getRange(mut.row, eqColAssignedTo), 'Packed For Testing');
-                    if (eqColLocation) safeSetCellWithValidationFallback(sheet.getRange(mut.row, eqColLocation), "Cody's Truck");
+                    if (eqColAssignedTo) safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColAssignedTo), 'Packed For Testing');
+                    if (eqColLocation) safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColLocation), "Cody's Truck");
                   } else if (statVal === 'in testing') {
-                    if (eqColAssignedTo) safeSetCellWithValidationFallback(sheet.getRange(mut.row, eqColAssignedTo), 'In Testing');
-                    if (eqColLocation) safeSetCellWithValidationFallback(sheet.getRange(mut.row, eqColLocation), 'Arnett / JM Test');
+                    if (eqColAssignedTo) safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColAssignedTo), 'In Testing');
+                    if (eqColLocation) safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColLocation), 'Arnett / JM Test');
                   } else if (statVal === 'failed rubber' || statVal === 'not repairable') {
-                    if (eqColAssignedTo) safeSetCellWithValidationFallback(sheet.getRange(mut.row, eqColAssignedTo), 'Failed Rubber');
-                    if (eqColLocation) safeSetCellWithValidationFallback(sheet.getRange(mut.row, eqColLocation), 'Destroyed');
-                    if (eqColChangeOutDate) safeSetCellWithValidationFallback(sheet.getRange(mut.row, eqColChangeOutDate), 'N/A');
-                    if (eqColPicked) safeSetCellWithValidationFallback(sheet.getRange(mut.row, eqColPicked), '');
+                    if (eqColAssignedTo) safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColAssignedTo), 'Failed Rubber');
+                    if (eqColLocation) safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColLocation), 'Destroyed');
+                    if (eqColChangeOutDate) safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColChangeOutDate), 'N/A');
+                    if (eqColPicked) safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColPicked), '');
                   } else if (statVal === 'lost') {
-                    if (eqColAssignedTo) safeSetCellWithValidationFallback(sheet.getRange(mut.row, eqColAssignedTo), 'Lost');
-                    if (eqColLocation) safeSetCellWithValidationFallback(sheet.getRange(mut.row, eqColLocation), 'Lost');
-                    if (eqColChangeOutDate) safeSetCellWithValidationFallback(sheet.getRange(mut.row, eqColChangeOutDate), 'N/A');
-                    if (eqColPicked) safeSetCellWithValidationFallback(sheet.getRange(mut.row, eqColPicked), '');
+                    if (eqColAssignedTo) safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColAssignedTo), 'Lost');
+                    if (eqColLocation) safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColLocation), 'Lost');
+                    if (eqColChangeOutDate) safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColChangeOutDate), 'N/A');
+                    if (eqColPicked) safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColPicked), '');
                   }
                 }
 
                 // If Status or Assigned To was edited: if item is not Lost, clear highlighting and remove from Swaps sheet
                 if (isStatusEdit || isAssignedToEdit) {
-                  var curStat = String(sheet.getRange(mut.row, eqColStatus).getValue() || '').trim().toLowerCase();
-                  var curAssigned = String(sheet.getRange(mut.row, eqColAssignedTo).getValue() || '').trim().toLowerCase();
+                  var curStat = String(sheet.getRange(targetRow, eqColStatus).getValue() || '').trim().toLowerCase();
+                  var curAssigned = String(sheet.getRange(targetRow, eqColAssignedTo).getValue() || '').trim().toLowerCase();
                   if (curStat !== 'lost' && curAssigned !== 'lost') {
                     try {
-                      sheet.getRange(mut.row, 1, 1, sheet.getLastColumn()).setBackground(null);
+                      sheet.getRange(targetRow, 1, 1, sheet.getLastColumn()).setBackground(null);
                       if (eqColNotes) {
-                        sheet.getRange(mut.row, eqColNotes).setFontWeight('normal').setFontColor(null);
-                        var curNotes = String(sheet.getRange(mut.row, eqColNotes).getValue() || '').trim().toUpperCase();
+                        sheet.getRange(targetRow, eqColNotes).setFontWeight('normal').setFontColor(null);
+                        var curNotes = String(sheet.getRange(targetRow, eqColNotes).getValue() || '').trim().toUpperCase();
                         if (curNotes.indexOf('LOST-LOCATE') !== -1 || curNotes.indexOf('LOST LOCATE') !== -1 || curNotes === 'LOCATE') {
-                          safeSetCellWithValidationFallback(sheet.getRange(mut.row, eqColNotes), '');
+                          safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColNotes), '');
                         }
                       }
                     } catch (clrErr) { /* ignore */ }
 
                     // Remove from companion swap sheet's Lost section
-                    var itemNum = String(sheet.getRange(mut.row, 1).getValue() || '').trim();
+                    var itemNum = String(sheet.getRange(targetRow, 1).getValue() || '').trim();
                     var swapSheetName = '';
                     if (sheetName.toLowerCase().includes('glove')) swapSheetName = typeof SHEET_GLOVE_SWAPS !== 'undefined' ? SHEET_GLOVE_SWAPS : 'Glove Swaps';
                     else if (sheetName.toLowerCase().includes('sleeve')) swapSheetName = typeof SHEET_SLEEVE_SWAPS !== 'undefined' ? SHEET_SLEEVE_SWAPS : 'Sleeve Swaps';
@@ -2240,14 +2286,14 @@ function applyBatchSyncMutations(mutations, returnSnapshot, options) {
                 }
 
                 // If Date Assigned or Test Date or Calibration Date was edited directly
-                var isDateAssignedEdit = (mut.col === eqColDateAssigned || hLower.includes('date assigned') || hLower === 'date assigned');
-                var isTestDateEdit = (mut.col === eqColTestDate || hLower.includes('test date') || hLower.includes('calibration') || hLower.includes('pad expiration'));
+                var isDateAssignedEdit = (colToWrite === eqColDateAssigned || hLower.includes('date assigned') || hLower === 'date assigned');
+                var isTestDateEdit = (colToWrite === eqColTestDate || hLower.includes('test date') || hLower.includes('calibration') || hLower.includes('pad expiration'));
 
                 if ((isDateAssignedEdit || isTestDateEdit) && eqColChangeOutDate) {
-                  var curLoc = eqColLocation ? sheet.getRange(mut.row, eqColLocation).getValue() : 'Helena';
-                  var curAssigned = eqColAssignedTo ? sheet.getRange(mut.row, eqColAssignedTo).getValue() : 'On Shelf';
-                  var curDateAssigned = eqColDateAssigned ? sheet.getRange(mut.row, eqColDateAssigned).getValue() : '';
-                  var curTestDate = eqColTestDate ? sheet.getRange(mut.row, eqColTestDate).getValue() : '';
+                  var curLoc = eqColLocation ? sheet.getRange(targetRow, eqColLocation).getValue() : 'Helena';
+                  var curAssigned = eqColAssignedTo ? sheet.getRange(targetRow, eqColAssignedTo).getValue() : 'On Shelf';
+                  var curDateAssigned = eqColDateAssigned ? sheet.getRange(targetRow, eqColDateAssigned).getValue() : '';
+                  var curTestDate = eqColTestDate ? sheet.getRange(targetRow, eqColTestDate).getValue() : '';
                   
                   var chgOut = null;
                   if (isBlanket && typeof calculateBlanketChangeOutDate === 'function') {
@@ -2296,7 +2342,7 @@ function applyBatchSyncMutations(mutations, returnSnapshot, options) {
                     }
                   }
                   if (chgOut && chgOut !== 'N/A') {
-                    safeSetCellWithValidationFallback(sheet.getRange(mut.row, eqColChangeOutDate), chgOut);
+                    safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColChangeOutDate), chgOut);
                   }
                 }
               }
@@ -2565,12 +2611,12 @@ function applyBatchSyncMutations(mutations, returnSnapshot, options) {
                   var pVal = String(mut.value || '').trim();
                   var isManual = (pVal !== '' && pVal !== '—' && pVal !== '-');
                   try {
-                    sheet.getRange(mut.row, mut.col).setBackground(isManual ? '#e3f2fd' : null);
+                    sheet.getRange(targetRow, colToWrite).setBackground(isManual ? '#e3f2fd' : null);
                     var statCol = (isMack || sheetLower.includes('hv') || sheetLower.includes('phasing')) ? 10 : (sheetLower.includes('ground') ? 11 : (sheetLower.includes('hot stick') ? 9 : (sheetLower.includes('aed') ? 7 : 8)));
                     if (isManual) {
-                      var curStatCell = sheet.getRange(mut.row, statCol).getValue();
+                      var curStatCell = sheet.getRange(targetRow, statCol).getValue();
                       if (String(curStatCell).includes('Need to Purchase') || String(curStatCell).includes('Ordered')) {
-                        sheet.getRange(mut.row, statCol).setValue('In Stock ✅');
+                        sheet.getRange(targetRow, statCol).setValue('In Stock ✅');
                       }
                     }
                   } catch (bgErr) {
@@ -2582,7 +2628,7 @@ function applyBatchSyncMutations(mutations, returnSnapshot, options) {
               if (sheetLower === 'expiring certs' || sheetLower.indexOf('expiring cert') !== -1) {
                 try {
                   if (typeof handleExpiringCertDateChange === 'function') {
-                    handleExpiringCertDateChange(ss, sheet, mut.row, mut.col);
+                    handleExpiringCertDateChange(ss, sheet, targetRow, colToWrite);
                   }
                 } catch (certErr) {
                   Logger.log('applyBatchSyncMutations Expiring Certs handler error: ' + certErr);
@@ -2623,16 +2669,19 @@ function applyBatchSyncMutations(mutations, returnSnapshot, options) {
               var updateDupRowsToDelete = [];
               if (targetRowIdx === -1 && idStr) {
                 var cleanId = idStr.replace(/^[#bBsS\-_]+/, '').trim();
+                var normId = normalizeEquipmentKey(idStr);
                 for (var r = 1; r < data.length; r++) {
                   var c0 = String(data[r][0] || '').trim().toLowerCase();
                   var c0Clean = c0.replace(/^[#bBsS\-_]+/, '').trim();
-                  var isMatch = (c0 === idStr || (cleanId && c0Clean === cleanId));
+                  var c0Norm = normalizeEquipmentKey(c0);
+                  var isMatch = (c0 === idStr || (cleanId && c0Clean === cleanId) || (normId && c0Norm === normId));
                   // For non-employees sheets (like Job Tracking or inventory), check secondary identifiers
                   if (!isMatch && !isEmpSheet) {
                     var c1 = String(data[r][1] || '').trim().toLowerCase();
                     var c3 = (data[r].length > 3) ? String(data[r][3] || '').trim().toLowerCase() : '';
                     var c3Clean = c3.replace(/^[#\-_]+/, '').trim();
-                    if (c1 === idStr || c3 === idStr || (cleanId && c3Clean === cleanId)) {
+                    var c3Norm = normalizeEquipmentKey(c3);
+                    if (c1 === idStr || c3 === idStr || (cleanId && c3Clean === cleanId) || (normId && c3Norm === normId)) {
                       isMatch = true;
                     }
                   }
@@ -2859,6 +2908,14 @@ function applyBatchSyncMutations(mutations, returnSnapshot, options) {
                 break;
               }
             }
+          }
+          break;
+
+        case 'SAVE_FLOATING_HOLIDAY_ASSIGNMENTS':
+          if (mut.assignments && typeof saveFloatingHolidayAssignments === 'function') {
+            saveFloatingHolidayAssignments(mut.assignments);
+            appliedCount++;
+            configsModified = true;
           }
           break;
 
@@ -4267,6 +4324,17 @@ function getRecentSafetyLogs(limit) {
  */
 function executeSyncApiRecalculateCompliance(options) {
   options = options || {};
+  var floatingAssignOpt = options.floatingAssignments;
+  if (typeof floatingAssignOpt === 'string') {
+    try {
+      floatingAssignOpt = JSON.parse(floatingAssignOpt);
+    } catch (parseErr) {
+      floatingAssignOpt = null;
+    }
+  }
+  if (floatingAssignOpt && typeof floatingAssignOpt === 'object' && typeof saveFloatingHolidayAssignments === 'function') {
+    saveFloatingHolidayAssignments(floatingAssignOpt);
+  }
   var targetWeek = options.targetWeek || 'both';
   var ss = typeof getActiveSpreadsheetSafe === 'function' ? getActiveSpreadsheetSafe() : SpreadsheetApp.getActiveSpreadsheet();
   var tz = (ss && ss.getSpreadsheetTimeZone()) || Session.getScriptTimeZone() || 'America/Denver';
@@ -6098,7 +6166,7 @@ function scanCertRenewalEmails(options) {
           var isPrev = (
             eLoc === 'previous employee' || eLoc.indexOf('previous') !== -1 ||
             eStat === 'previous employee' || eStat.indexOf('inactive') !== -1 || eStat.indexOf('terminated') !== -1 ||
-            eJob.indexOf('previous') !== -1 || eJob.indexOf('002-') === 0 ||
+            eJob.indexOf('previous') !== -1 || (eJob.indexOf('002-') === 0 && (eName.toLowerCase().indexOf('lost') !== -1 || eName.toLowerCase().indexOf('destroyed') !== -1)) ||
             previousEmployeesSet[eName.toLowerCase()]
           );
 

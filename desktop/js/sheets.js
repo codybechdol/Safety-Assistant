@@ -1909,6 +1909,15 @@ class SheetNavigator {
     const hasPrevWeek = currentWeekIdx < weeks.length - 1;
     const hasNextWeek = currentWeekIdx > 0;
 
+    const floatingHolidaysThisWeek = this.getFloatingHolidaysForWeek(this.selectedComplianceWeek);
+    const activeFloatingHoliday = floatingHolidaysThisWeek.length > 0 ? floatingHolidaysThisWeek[0] : null;
+
+    if (floatingHolidaysThisWeek.length > 0) {
+      floatingHolidaysThisWeek.forEach(fh => {
+        this.applyFloatingHolidayAssignmentsLocally(fh.dateKey, this.getFloatingHolidayAssignments());
+      });
+    }
+
     const weekRows = (tableData.rows || []).filter(r => String(r['Week Start'] || r['Week'] || '').trim() === this.selectedComplianceWeek);
 
     const jtTable = this.db ? this.db.getTable('job_tracking') : null;
@@ -1980,6 +1989,21 @@ class SheetNavigator {
       <div class="cards-view-container">
         <!-- Week Navigator Banner -->
         <div class="cards-filter-toolbar" style="background: linear-gradient(90deg, #1e293b 0%, #0f172a 100%);">
+          ${activeFloatingHoliday ? `
+            <!-- Floating Holiday Alert Banner -->
+            <div style="width: 100%; margin-bottom: 8px; padding: 9px 14px; background: rgba(59, 130, 246, 0.14); border: 1px solid rgba(59, 130, 246, 0.4); border-radius: 8px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;">
+              <div style="display: flex; align-items: center; gap: 10px; font-size: 12px; color: #93c5fd;">
+                <span style="font-size: 18px;">🏖️</span>
+                <span>
+                  <strong>Floating Holiday: ${this.escapeHtml(activeFloatingHoliday.name)} (${this.escapeHtml(activeFloatingHoliday.dayName)})</strong> — Crews take their last regular working day off by default (M-Th take Thursday, M-F take Friday).
+                </span>
+              </div>
+              <button class="btn btn-primary" style="font-size: 11.5px; padding: 5px 12px; font-weight: 700; background: #3b82f6; border: none; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; box-shadow: 0 2px 6px rgba(59, 130, 246, 0.35); border-radius: 6px;"
+                      onclick="window.sheetNavigator.openFloatingHolidayModal('${this.escapeJs(activeFloatingHoliday.dateKey)}')">
+                ⚙️ Assign Crew Days Off
+              </button>
+            </div>
+          ` : ''}
           <!-- Week Selector Controls -->
           <div style="display: flex; align-items: center; gap: 8px;">
             <button class="btn btn-secondary" style="font-size: 11px; padding: 4px 9px;" ${hasPrevWeek ? `onclick="window.sheetNavigator.setComplianceWeek('${this.escapeJs(weeks[currentWeekIdx + 1])}')"` : 'disabled style="opacity: 0.5;"'}>
@@ -2112,19 +2136,43 @@ class SheetNavigator {
       { key: 'Sat', label: 'Sa' }
     ];
 
+    const fHols = this.getFloatingHolidaysForWeek(weekVal);
+    const jtTable = this.db ? this.db.getTable('job_tracking') : null;
+    let crewHolidayDay = null;
+    let activeHol = null;
+    if (fHols && fHols.length > 0) {
+      activeHol = fHols[0];
+      crewHolidayDay = this.getCrewFloatingHolidayDayOff(activeHol.dateKey, jobNum, jtTable);
+    }
+
     const renderPill = (dayKey, label) => {
       const v = String(crewRow[dayKey] || '').trim();
       let pillClass = 'pill-na';
       let icon = '—';
       let title = `${dayKey}: Not Applicable / Scheduled Off`;
       let canClickPdf = false;
+      let isHolidayPill = false;
+
+      const isAssignedHoliday = Boolean(
+        (crewHolidayDay && crewHolidayDay.dayShort === dayKey) ||
+        v.includes('🏖️') || v.toLowerCase().includes('holiday') || v.toLowerCase().includes('vet')
+      );
 
       if (v === '✅' || v === '✅L' || v.startsWith('✅')) {
         const isLate = v.includes('L');
         pillClass = isLate ? 'pill-late' : 'pill-ok';
         icon = isLate ? '✓<span style="font-size: 8px; font-weight: 800; color: #f59e0b;">L</span>' : '✓';
-        title = `${dayKey}: Submitted on time · Click to view PDF document`;
+        title = isAssignedHoliday
+          ? `${dayKey}: Submitted JHA on Holiday (${activeHol ? activeHol.name : 'Holiday'}) · Click to view PDF document`
+          : `${dayKey}: Submitted on time · Click to view PDF document`;
         canClickPdf = true;
+      } else if (isAssignedHoliday) {
+        isHolidayPill = true;
+        pillClass = 'pill-holiday';
+        const holName = (activeHol && activeHol.name) || v.replace(/^🏖️\s*/, '').trim() || "Veteran's Day";
+        const shortHolName = this.getShortHolidayName(holName);
+        icon = `<span style="font-size: 11px; line-height: 1;">🏖️</span><span style="font-size: 7.5px; font-weight: 900; color: #93c5fd; display: block; line-height: 1; margin-top: 1px; letter-spacing: -0.2px;">${this.escapeHtml(shortHolName)}</span>`;
+        title = `${dayKey}: 🏖️ Holiday — ${this.escapeHtml(holName)} (Assigned Day Off for ${this.escapeHtml(foreman || jobNum)}) · Click to adjust day off`;
       } else if (v === '❌' || v.startsWith('❌')) {
         pillClass = 'pill-missing';
         const letter = v.replace('❌', '').trim();
@@ -2140,9 +2188,10 @@ class SheetNavigator {
       }
 
       return `
-        <div class="comp-day-pill ${pillClass}" title="${title}" ${canClickPdf ? `onclick="if(window.safetyComplianceEngine){window.safetyComplianceEngine.openPdfForComplianceCell('${this.escapeJs(jobNum)}', '${this.escapeJs(dayKey)}', '${this.escapeJs(weekVal)}', '${this.escapeJs(foreman)}');}"` : ''}>
-          <span style="font-size: 9px; color: var(--text-muted); margin-bottom: 1px;">${label}</span>
-          <span style="font-size: 13px; font-weight: 800; display: flex; align-items: center; justify-content: center; gap: 1px;">${icon}</span>
+        <div class="comp-day-pill ${pillClass}" title="${title}"
+             ${canClickPdf ? `onclick="if(window.safetyComplianceEngine){window.safetyComplianceEngine.openPdfForComplianceCell('${this.escapeJs(jobNum)}', '${this.escapeJs(dayKey)}', '${this.escapeJs(weekVal)}', '${this.escapeJs(foreman)}');}"` : (isHolidayPill && activeHol ? `onclick="window.sheetNavigator.openFloatingHolidayModal('${this.escapeJs(activeHol.dateKey)}', '${this.escapeJs(jobNum)}');"` : '')}>
+          <span style="font-size: 9px; color: ${isHolidayPill ? '#a5b4fc; font-weight: 700;' : 'var(--text-muted);'} margin-bottom: 1px;">${label}</span>
+          <span style="font-size: 13px; font-weight: 800; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0px;">${icon}</span>
         </div>
       `;
     };
@@ -2205,6 +2254,26 @@ class SheetNavigator {
               <span class="badge" style="background: rgba(14, 165, 233, 0.15); color: #38bdf8; border: 1px solid rgba(14, 165, 233, 0.35); font-size: 9.5px; font-weight: 700; padding: 1px 5px; border-radius: 4px;">
                 ⚡ ${this.escapeHtml(discipline)}
               </span>
+              ${(() => {
+                const fHols = this.getFloatingHolidaysForWeek(weekVal);
+                if (!fHols || fHols.length === 0) return '';
+                const fh = fHols[0];
+                const jtTable = this.db ? this.db.getTable('job_tracking') : null;
+                const crewDay = this.getCrewFloatingHolidayDayOff(fh.dateKey, jobNum, jtTable);
+                if (crewDay.isAllOff) return '';
+                const isCustom = crewDay.isCustom;
+                const badgeColor = isCustom ? '#c084fc' : '#60a5fa';
+                const badgeBg = isCustom ? 'rgba(192, 132, 252, 0.15)' : 'rgba(96, 165, 250, 0.12)';
+                const badgeBorder = isCustom ? 'rgba(192, 132, 252, 0.4)' : 'rgba(96, 165, 250, 0.35)';
+                const customLabel = isCustom ? 'Custom' : 'Default';
+                return `
+                  <button class="btn btn-secondary" style="padding: 1px 7px; font-size: 10px; color: ${badgeColor}; border-color: ${badgeBorder}; background: ${badgeBg}; cursor: pointer; font-weight: 700; display: inline-flex; align-items: center; gap: 3px;"
+                          onclick="window.sheetNavigator.openFloatingHolidayModal('${this.escapeJs(fh.dateKey)}', '${this.escapeJs(jobNum)}')"
+                          title="Floating Holiday: ${this.escapeHtml(fh.name)} (${this.escapeHtml(fh.dayShort)}). Assigned Day Off: ${this.escapeHtml(crewDay.dayShort)} (${customLabel}). Click to adjust for this crew.">
+                    🏖️ Off: ${this.escapeHtml(crewDay.dayShort)} (${customLabel}) ▾
+                  </button>
+                `;
+              })()}
               ${hasMissing ? (notifDate ? `
                 <button class="btn btn-secondary" style="padding: 1px 6px; font-size: 10px; color: #34d399; border-color: rgba(52, 211, 153, 0.4); background: rgba(52, 211, 153, 0.12); cursor: pointer; font-weight: 700; display: inline-flex; align-items: center; gap: 3px;" onclick="if(window.smsDialogEngine){window.smsDialogEngine.openSafetyMissingSms('${this.escapeJs(foreman)}', '${this.escapeJs(jobNum)}', '${this.escapeJs(weekVal)}');}" title="Foreman notified on ${this.escapeHtml(notifDate)}. Click to text again.">
                   💬 Notified ${this.escapeHtml(cleanNotifDate)}
@@ -2279,6 +2348,605 @@ class SheetNavigator {
         </div>
       </div>
     `;
+  }
+
+  /**
+   * Identifies floating holidays in the given week (e.g. Veteran's Day 11/11).
+   * @param {string|Date} weekVal Week start date (Sunday)
+   * @returns {Array<{ dateKey: string, name: string, dayName: string, dayShort: string, dayIdx: number }>}
+   */
+  getFloatingHolidaysForWeek(weekVal) {
+    if (!weekVal) return [];
+    try {
+      let wDate = null;
+      if (weekVal instanceof Date) {
+        wDate = new Date(weekVal.getTime());
+      } else if (typeof weekVal === 'string') {
+        const parts = weekVal.split(/[-/]/);
+        if (parts.length === 3) {
+          if (parts[0].length === 4) {
+            wDate = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10), 12, 0, 0);
+          } else {
+            wDate = new Date(parseInt(parts[2], 10), parseInt(parts[0], 10) - 1, parseInt(parts[1], 10), 12, 0, 0);
+          }
+        }
+      }
+      if (!wDate || isNaN(wDate.getTime())) return [];
+
+      // Align to Sunday of the week
+      const dayOfWeek = wDate.getDay();
+      wDate.setDate(wDate.getDate() - dayOfWeek);
+
+      const snap = (this.db && typeof this.db.getSnapshot === 'function') ? this.db.getSnapshot() : null;
+      const rawCfg = snap?.configs?.holidays;
+      const rawLs = localStorage.getItem('sa_holidays');
+      const holidaysSource = (window.tripPlannerEngine && window.tripPlannerEngine.holidaysMap) || rawCfg || (rawLs ? JSON.parse(rawLs) : null) || {
+        '2026-11-11': { name: "Veteran's Day", isFloating: true }
+      };
+
+      const holidayMap = {};
+      if (Array.isArray(holidaysSource)) {
+        holidaysSource.forEach(h => {
+          if (h && h.date) holidayMap[h.date] = { name: h.name || 'Holiday', isFloating: !!h.isFloating };
+        });
+      } else if (holidaysSource && typeof holidaysSource === 'object') {
+        Object.keys(holidaysSource).forEach(k => {
+          if (/^\d{4}-\d{2}-\d{2}$/.test(k)) {
+            const val = holidaysSource[k];
+            holidayMap[k] = (val && typeof val === 'object')
+              ? { name: val.name || 'Holiday', isFloating: !!val.isFloating }
+              : { name: String(val || 'Holiday'), isFloating: false };
+          }
+        });
+      }
+
+      // Hardcode fallback seed for Veteran's Day 2026 if missing
+      if (!holidayMap['2026-11-11']) {
+        holidayMap['2026-11-11'] = { name: "Veteran's Day", isFloating: true };
+      }
+
+      const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+      const dayShorts = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+      const found = [];
+
+      for (let d = 0; d < 7; d++) {
+        const cur = new Date(wDate.getFullYear(), wDate.getMonth(), wDate.getDate() + d, 12, 0, 0);
+        const y = cur.getFullYear();
+        const m = String(cur.getMonth() + 1).padStart(2, '0');
+        const day = String(cur.getDate()).padStart(2, '0');
+        const dateKey = `${y}-${m}-${day}`;
+        const item = holidayMap[dateKey];
+        if (item && item.isFloating) {
+          found.push({
+            dateKey: dateKey,
+            name: item.name,
+            dayName: dayNames[cur.getDay()],
+            dayShort: dayShorts[cur.getDay()],
+            dayIdx: cur.getDay()
+          });
+        }
+      }
+      return found;
+    } catch (e) {
+      console.warn('getFloatingHolidaysForWeek error:', e);
+      return [];
+    }
+  }
+
+  /**
+   * Helper that returns a compact short name for holidays to fit neatly in pill badges.
+   */
+  getShortHolidayName(name) {
+    if (!name) return 'HOL';
+    const n = String(name).toLowerCase();
+    if (n.includes('vet')) return 'VET';
+    if (n.includes('labor')) return 'LABOR';
+    if (n.includes('memorial')) return 'MEM';
+    if (n.includes('thanks')) return 'THX';
+    if (n.includes('christ') || n.includes('xmas')) return 'XMAS';
+    if (n.includes('new year')) return 'NY';
+    if (n.includes('july') || n.includes('independ')) return 'JUL 4';
+    if (n.includes('presid')) return 'PRES';
+    if (n.includes('mlk') || n.includes('luther')) return 'MLK';
+    return name.slice(0, 4).toUpperCase();
+  }
+
+  /**
+   * Retrieves saved floating holiday crew assignments from snapshot / localStorage.
+   */
+  getFloatingHolidayAssignments() {
+    try {
+      const snap = (this.db && typeof this.db.getSnapshot === 'function') ? this.db.getSnapshot() : null;
+      const rawCfg = snap?.configs?.floating_holiday_assignments;
+      const rawLs = localStorage.getItem('sa_floating_holiday_assignments');
+      const val = rawCfg || (rawLs ? JSON.parse(rawLs) : null);
+      return (val && typeof val === 'object') ? val : {};
+    } catch {
+      return {};
+    }
+  }
+
+  /**
+   * Saves floating holiday crew assignments locally and queues outbox mutation for sheets backend.
+   */
+  saveFloatingHolidayAssignments(assignments) {
+    if (!assignments || typeof assignments !== 'object') assignments = {};
+    try {
+      localStorage.setItem('sa_floating_holiday_assignments', JSON.stringify(assignments));
+      if (this.db && this.db.snapshot) {
+        if (!this.db.snapshot.configs) this.db.snapshot.configs = {};
+        this.db.snapshot.configs.floating_holiday_assignments = assignments;
+      }
+      if (this.db && typeof this.db.addMutation === 'function') {
+        this.db.addMutation({
+          action: 'SAVE_FLOATING_HOLIDAY_ASSIGNMENTS',
+          sheetName: 'Safety Compliance',
+          assignments: assignments
+        });
+      }
+    } catch (e) {
+      console.warn('saveFloatingHolidayAssignments error:', e);
+    }
+  }
+
+  /**
+   * Immediately updates local Safety Compliance table rows for floating holiday days off.
+   * Excuses the assigned crew day off (e.g. Thu for M-Th, Fri for M-F) and restores the calendar holiday (Wed).
+   */
+  applyFloatingHolidayAssignmentsLocally(holidayDateKey, assignments) {
+    if (!this.db || !this.db.snapshot || !this.db.snapshot.tables) return;
+    const scTable = this.db.getTable('safety_compliance');
+    if (!scTable || !scTable.rows || scTable.rows.length === 0) return;
+
+    const jtTable = this.db.getTable('job_tracking');
+    const overrides = (assignments && assignments[holidayDateKey] && assignments[holidayDateKey].crewOverrides) ||
+                      (assignments && assignments[holidayDateKey]) || {};
+
+    const dayShorts = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+    let holidayDayIdx = 3; // Default Wed for Nov 11
+    try {
+      const p = holidayDateKey.split(/[-/]/);
+      const hDate = new Date(parseInt(p[0], 10), parseInt(p[1], 10) - 1, parseInt(p[2], 10), 12, 0, 0);
+      if (!isNaN(hDate.getTime())) holidayDayIdx = hDate.getDay();
+    } catch (_) {}
+    const calHolidayCol = dayShorts[holidayDayIdx];
+
+    const p = holidayDateKey.split(/[-/]/);
+    const hDate = new Date(parseInt(p[0], 10), parseInt(p[1], 10) - 1, parseInt(p[2], 10), 12, 0, 0);
+    const sunDate = new Date(hDate.getTime());
+    sunDate.setDate(sunDate.getDate() - holidayDayIdx);
+    const sunTime = sunDate.getTime();
+
+    const jhaTable = this.db.getTable('jha_log');
+    const jhaRows = (jhaTable && jhaTable.rows) || [];
+
+    const snap = (this.db && typeof this.db.getSnapshot === 'function') ? this.db.getSnapshot() : null;
+    const rawCfg = snap?.configs?.holidays;
+    const rawLs = localStorage.getItem('sa_holidays');
+    const holidaysSource = (window.tripPlannerEngine && window.tripPlannerEngine.holidaysMap) || rawCfg || (rawLs ? JSON.parse(rawLs) : null) || {
+      '2026-11-11': { name: "Veteran's Day", isFloating: true }
+    };
+    let holName = "Veteran's Day";
+    if (holidaysSource && holidaysSource[holidayDateKey]) {
+      const hEntry = holidaysSource[holidayDateKey];
+      holName = (hEntry && typeof hEntry === 'object') ? (hEntry.name || holName) : String(hEntry);
+    }
+
+    scTable.rows.forEach(r => {
+      const wVal = String(r['Week Start'] || r['Week'] || '').trim();
+      let rSunDate = null;
+      if (wVal) {
+        const wp = wVal.split(/[-/]/);
+        if (wp.length === 3) {
+          const wd = wp[0].length === 4
+            ? new Date(parseInt(wp[0], 10), parseInt(wp[1], 10) - 1, parseInt(wp[2], 10), 12, 0, 0)
+            : new Date(parseInt(wp[2], 10), parseInt(wp[0], 10) - 1, parseInt(wp[1], 10), 12, 0, 0);
+          if (!isNaN(wd.getTime())) {
+            wd.setDate(wd.getDate() - wd.getDay());
+            rSunDate = wd;
+          }
+        }
+      }
+      if (!rSunDate || Math.abs(rSunDate.getTime() - sunTime) > 86400000 * 3.5) return;
+
+      const jn = String(r['Job Number'] || r['Job #'] || r['Crew'] || '').trim();
+      const fm = String(r['Foreman'] || '').trim();
+      const def = this.getDefaultDayOffForCrew(jn, jtTable);
+
+      let assignedVal = overrides[jn] || overrides[jn.toLowerCase()] || overrides[jn.split('.')[0]] || overrides[fm];
+      if (!assignedVal || assignedVal === 'default') {
+        assignedVal = def.dayShort;
+      }
+
+      // 1. Calendar Holiday day (e.g. Wednesday)
+      if (assignedVal !== calHolidayCol) {
+        const isSkipDay = def.skipDays && def.skipDays[holidayDayIdx];
+        if (isSkipDay) {
+          r[calHolidayCol] = 'N/A';
+        } else {
+          const hasJha = jhaRows.some(j => {
+            const jJob = String(j['Credited To'] || j['Job Number'] || '').trim().toLowerCase();
+            const jDate = String(j['Date Created'] || j['Work Date'] || j.date || '').trim();
+            const isMatch = (jJob === jn.toLowerCase() || jJob === jn.split('.')[0].toLowerCase());
+            return isMatch && (jDate.includes('11/11') || jDate.includes('2026-11-11'));
+          });
+          if (hasJha) {
+            r[calHolidayCol] = '✅';
+          } else {
+            if (r[calHolidayCol] === 'N/A' || r[calHolidayCol] === '—' || !r[calHolidayCol] || String(r[calHolidayCol]).includes('🏖️')) {
+              r[calHolidayCol] = '⏳';
+            }
+          }
+        }
+      } else {
+        r[calHolidayCol] = '🏖️ ' + holName;
+      }
+
+      // 2. Assigned Day Off (e.g. Thursday or Friday)
+      if (assignedVal && assignedVal !== 'none' && assignedVal !== 'None' && assignedVal !== calHolidayCol) {
+        r[assignedVal] = '🏖️ ' + holName;
+      }
+
+      // 3. Recalculate row status
+      let hasMissing = false;
+      let hasPending = false;
+      dayShorts.forEach(d => {
+        const val = String(r[d] || '');
+        if (val.startsWith('❌')) hasMissing = true;
+        else if (val.includes('⏳')) hasPending = true;
+      });
+      const wm = String(r['Weekly Meeting'] || '');
+      if (wm.startsWith('❌')) hasMissing = true;
+      else if (wm.includes('⏳')) hasPending = true;
+
+      const mc = String(r['Monthly Checklist'] || '');
+      if (mc.startsWith('❌')) hasMissing = true;
+      else if (mc.includes('⏳')) hasPending = true;
+
+      if (hasMissing) r['Status'] = 'Missing Reports';
+      else if (hasPending) r['Status'] = 'Pending';
+      else r['Status'] = 'Complete';
+
+      r['Updated'] = new Date().toLocaleDateString('en-US') + ' ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    });
+
+    if (typeof this.db.persistSnapshot === 'function') {
+      this.db.persistSnapshot();
+    }
+  }
+
+  /**
+   * Determines the default day off for a crew based on their work schedule in Job Tracking.
+   * e.g., M-Th crews take Thursday off; M-F crews take Friday off.
+   */
+  getDefaultDayOffForCrew(jobNum, jtTable = null) {
+    if (!jtTable) jtTable = this.db ? this.db.getTable('job_tracking') : null;
+    let sched = 'Mon-Thu';
+    let skipDays = [true, false, false, false, false, true, true]; // Default Mon-Thu
+
+    if (jtTable && jtTable.rows) {
+      const row = jtTable.rows.find(r => String(r['Job Number'] || r['Job #'] || '').trim() === String(jobNum).trim());
+      if (row) {
+        sched = String(row['Work Schedule'] || row['Schedule'] || 'Mon-Thu').trim();
+        const parseBool = (v) => v === true || v === 'true' || v === 'TRUE' || v === 1 || v === '1';
+        skipDays = [
+          parseBool(row['Skip Sun']),
+          parseBool(row['Skip Mon']),
+          parseBool(row['Skip Tue']),
+          parseBool(row['Skip Wed']),
+          parseBool(row['Skip Thu']),
+          parseBool(row['Skip Fri']),
+          parseBool(row['Skip Sat'])
+        ];
+      }
+    }
+
+    // Check if crew has no working days scheduled (all 7 days skipped or marked 'Off')
+    const isAllOff = skipDays.every(Boolean);
+    if (isAllOff || sched.toLowerCase() === 'off') {
+      return { dayShort: 'none', dayIdx: -1, sched: sched || 'Off', skipDays: skipDays, isAllOff: true };
+    }
+
+    // Scan backwards from Saturday down to Monday for the crew's last working day
+    const dayShorts = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    for (let d = 6; d >= 1; d--) {
+      if (!skipDays[d]) {
+        return { dayShort: dayShorts[d], dayIdx: d, sched: sched, skipDays: skipDays, isAllOff: false };
+      }
+    }
+    return { dayShort: 'Thu', dayIdx: 4, sched: sched, skipDays: skipDays, isAllOff: false };
+  }
+
+  /**
+   * Gets the assigned day off for a specific crew for a floating holiday, checking overrides first.
+   */
+  getCrewFloatingHolidayDayOff(holidayDateKey, jobNum, jtTable = null) {
+    const assignments = this.getFloatingHolidayAssignments();
+    const overrides = (assignments[holidayDateKey] && assignments[holidayDateKey].crewOverrides) || assignments[holidayDateKey] || {};
+    const assigned = overrides[jobNum] || overrides[String(jobNum).split('.')[0]];
+
+    const def = this.getDefaultDayOffForCrew(jobNum, jtTable);
+    if (def.isAllOff) {
+      return {
+        dayShort: 'none',
+        isCustom: false,
+        defaultDayShort: 'none',
+        sched: def.sched,
+        isAllOff: true
+      };
+    }
+    if (assigned !== undefined && assigned !== null && assigned !== '' && assigned !== 'default') {
+      return {
+        dayShort: assigned,
+        isCustom: true,
+        defaultDayShort: def.dayShort,
+        sched: def.sched,
+        isAllOff: false
+      };
+    }
+
+    return {
+      dayShort: def.dayShort,
+      isCustom: false,
+      defaultDayShort: def.dayShort,
+      sched: def.sched,
+      isAllOff: false
+    };
+  }
+
+  /**
+   * Opens the Floating Holiday Crew Assignments Modal dialog.
+   * Lets user assign which specific day off each crew takes for floating holidays (e.g. Veteran's Day).
+   */
+  openFloatingHolidayModal(holidayDateKey, highlightJobNum = null) {
+    const modalId = 'modal-floating-holiday-assignments';
+    let overlay = document.getElementById(modalId);
+    if (overlay) overlay.remove();
+
+    const snap = (this.db && typeof this.db.getSnapshot === 'function') ? this.db.getSnapshot() : null;
+    const rawCfg = snap?.configs?.holidays;
+    const rawLs = localStorage.getItem('sa_holidays');
+    const holidaysSource = (window.tripPlannerEngine && window.tripPlannerEngine.holidaysMap) || rawCfg || (rawLs ? JSON.parse(rawLs) : null) || {
+      '2026-11-11': { name: "Veteran's Day", isFloating: true }
+    };
+    let holName = "Veteran's Day";
+    if (holidaysSource && holidaysSource[holidayDateKey]) {
+      const hEntry = holidaysSource[holidayDateKey];
+      holName = (hEntry && typeof hEntry === 'object') ? (hEntry.name || holName) : String(hEntry);
+    }
+
+    const assignments = this.getFloatingHolidayAssignments();
+    const overrides = (assignments[holidayDateKey] && assignments[holidayDateKey].crewOverrides) || assignments[holidayDateKey] || {};
+
+    // Get active crews for this compliance week
+    const compTable = this.db ? this.db.getTable('safety_compliance') : null;
+    const jtTable = this.db ? this.db.getTable('job_tracking') : null;
+
+    const crewList = [];
+    const seenJobs = new Set();
+
+    if (compTable && compTable.rows) {
+      compTable.rows.forEach(r => {
+        const w = String(r['Week Start'] || r['Week'] || '').trim();
+        if (w === this.selectedComplianceWeek) {
+          const jn = String(r['Job Number'] || r['Crew'] || '').trim();
+          const fm = String(r['Foreman'] || '').trim();
+          if (jn && !seenJobs.has(jn)) {
+            seenJobs.add(jn);
+            crewList.push({ jobNum: jn, foreman: fm });
+          }
+        }
+      });
+    }
+
+    // Fallback to active crews in Job Tracking if compliance week had no rows yet
+    if (crewList.length === 0 && jtTable && jtTable.rows) {
+      jtTable.rows.forEach(r => {
+        const status = String(r['Status'] || '').toLowerCase();
+        const jn = String(r['Job Number'] || r['Job #'] || '').trim();
+        const fm = String(r['Foreman'] || '').trim();
+        if ((status === 'active' || status === '') && jn && !seenJobs.has(jn)) {
+          seenJobs.add(jn);
+          crewList.push({ jobNum: jn, foreman: fm });
+        }
+      });
+    }
+
+    // Sort crews by job number
+    crewList.sort((a, b) => a.jobNum.localeCompare(b.jobNum));
+
+    overlay = document.createElement('div');
+    overlay.id = modalId;
+    overlay.className = 'modal-overlay active';
+    overlay.style.cssText = 'position: fixed; inset: 0; background: rgba(0,0,0,0.8) !important; display: flex; align-items: center; justify-content: center; z-index: 15000 !important; pointer-events: auto !important; padding: 20px;';
+
+    overlay.innerHTML = `
+      <div class="modal-box" style="background: var(--bg-secondary, #0f172a); border: 1px solid rgba(59, 130, 246, 0.45); border-radius: 12px; max-width: 820px; width: 100%; max-height: 90vh; display: flex; flex-direction: column; box-shadow: 0 20px 50px rgba(0,0,0,0.8); overflow: hidden; color: #fff;">
+        <!-- Header -->
+        <div style="padding: 16px 22px; border-bottom: 1px solid rgba(255,255,255,0.1); display: flex; justify-content: space-between; align-items: center; background: rgba(30, 41, 59, 0.5);">
+          <div>
+            <div style="font-size: 16px; font-weight: 800; color: #60a5fa; display: flex; align-items: center; gap: 8px;">
+              <span>🏖️</span> Assign Floating Holiday Days Off — ${this.escapeHtml(holName)}
+            </div>
+            <div style="font-size: 11.5px; color: #94a3b8; margin-top: 3px;">
+              Week of ${this.escapeHtml(this.selectedComplianceWeek || holidayDateKey)} · Calendar Date: <strong>${this.escapeHtml(holidayDateKey)}</strong>
+            </div>
+          </div>
+          <button id="btn-floating-modal-close" style="background: transparent; border: none; color: #94a3b8; font-size: 20px; cursor: pointer; padding: 4px 8px; line-height: 1;">✕</button>
+        </div>
+
+        <!-- Policy Description Banner -->
+        <div style="padding: 12px 22px; background: rgba(59, 130, 246, 0.08); border-bottom: 1px solid rgba(59, 130, 246, 0.2); font-size: 12px; color: #cbd5e1; line-height: 1.5;">
+          💡 <strong>Floating Holiday Rules:</strong> Because <strong>${this.escapeHtml(holName)}</strong> is marked floating, crews do not take the actual calendar day off. By default, crews take their last regular working day of the week off (<strong>M-Th take Thursday</strong>, <strong>M-F take Friday</strong>). You can customize specific crew days off below.
+        </div>
+
+        <!-- Filter & Bulk Actions Bar -->
+        <div style="padding: 10px 22px; background: rgba(0,0,0,0.2); border-bottom: 1px solid rgba(255,255,255,0.06); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+          <input type="text" id="floating-crew-search" placeholder="🔍 Filter foreman, job #, schedule..." style="padding: 6px 12px; font-size: 12px; background: #1e293b; color: #f8fafc; border: 1px solid #334155; border-radius: 6px; width: 260px;" />
+          <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+            <button type="button" class="btn btn-secondary" id="btn-floating-bulk-defaults" style="font-size: 11px; padding: 5px 10px; color: #60a5fa; border-color: rgba(96, 165, 250, 0.4); background: rgba(96, 165, 250, 0.1); cursor: pointer; font-weight: 700;">
+              ⚡ Set All to Last Working Day (Thu / Fri)
+            </button>
+            <button type="button" class="btn btn-secondary" id="btn-floating-bulk-actual" style="font-size: 11px; padding: 5px 10px; color: #facc15; border-color: rgba(250, 204, 21, 0.4); background: rgba(250, 204, 21, 0.1); cursor: pointer; font-weight: 700;">
+              📅 Set All to Wednesday (Actual Date)
+            </button>
+          </div>
+        </div>
+
+        <!-- Crew List Container (Scrollable) -->
+        <div id="floating-crews-scroll" style="padding: 16px 22px; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 8px;">
+          ${crewList.map(crew => {
+            const jn = crew.jobNum;
+            const fm = crew.foreman;
+            const def = this.getDefaultDayOffForCrew(jn, jtTable);
+            const curVal = overrides[jn] || overrides[jn.split('.')[0]] || 'default';
+            const isHighlighted = highlightJobNum && (jn === highlightJobNum || jn.startsWith(highlightJobNum));
+
+            return `
+              <div class="floating-crew-row" data-crew="${this.escapeHtml(jn.toLowerCase())}" data-foreman="${this.escapeHtml(fm.toLowerCase())}" data-sched="${this.escapeHtml(def.sched.toLowerCase())}"
+                   style="display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; background: ${isHighlighted ? 'rgba(59, 130, 246, 0.22)' : 'rgba(30, 41, 59, 0.5)'}; border: 1px solid ${isHighlighted ? '#3b82f6' : 'rgba(255,255,255,0.08)'}; border-radius: 8px; gap: 12px; transition: all 0.2s ease;">
+                <div style="flex: 1; min-width: 0;">
+                  <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                    <span style="font-weight: 800; font-size: 13px; color: #f472b6;">👑 ${this.escapeHtml(fm || 'Unassigned')}</span>
+                    <span style="font-family: monospace; font-weight: 800; font-size: 12px; color: #60a5fa; background: #0f172a; border: 1px solid #334155; padding: 1px 6px; border-radius: 4px;">${this.escapeHtml(jn)}</span>
+                    <span class="badge" style="background: rgba(100, 116, 139, 0.2); color: #cbd5e1; border: 1px solid rgba(100, 116, 139, 0.4); font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 4px;">
+                      ⏱️ ${this.escapeHtml(def.sched)}
+                    </span>
+                  </div>
+                  <div style="font-size: 11px; color: #94a3b8; margin-top: 3px;">
+                    Last Working Day: <strong style="${def.isAllOff ? 'color: #94a3b8;' : 'color: #4ade80;'}">${def.isAllOff ? 'None (Scheduled Off)' : (def.dayShort === 'Thu' ? 'Thursday' : (def.dayShort === 'Fri' ? 'Friday' : def.dayShort))}</strong>
+                  </div>
+                </div>
+
+                <div style="display: flex; align-items: center; gap: 10px;">
+                  <select class="floating-day-select" data-job="${this.escapeHtml(jn)}" style="font-size: 12px; font-weight: 700; padding: 6px 10px; background: #1e293b; color: #f8fafc; border: 1px solid #475569; border-radius: 6px; cursor: pointer; min-width: 210px;">
+                    <option value="default" ${curVal === 'default' ? 'selected' : ''}>✨ ${def.isAllOff ? 'Scheduled Off (Auto: None)' : `Last Working Day (Auto: ${def.dayShort})`}</option>
+                    <option value="Thu" ${curVal === 'Thu' ? 'selected' : ''}>Thursday (M-Th Default)</option>
+                    <option value="Fri" ${curVal === 'Fri' ? 'selected' : ''}>Friday (M-F Default)</option>
+                    <option value="Wed" ${curVal === 'Wed' ? 'selected' : ''}>Wednesday (Actual Holiday Date)</option>
+                    <option value="Mon" ${curVal === 'Mon' ? 'selected' : ''}>Monday</option>
+                    <option value="Tue" ${curVal === 'Tue' ? 'selected' : ''}>Tuesday</option>
+                    <option value="Sat" ${curVal === 'Sat' ? 'selected' : ''}>Saturday</option>
+                    <option value="Sun" ${curVal === 'Sun' ? 'selected' : ''}>Sunday</option>
+                    <option value="none" ${curVal === 'none' ? 'selected' : ''}>🚫 None (Crew Works Full Week)</option>
+                  </select>
+                </div>
+              </div>
+            `;
+          }).join('')}
+        </div>
+
+        <!-- Footer -->
+        <div style="padding: 14px 22px; border-top: 1px solid rgba(255,255,255,0.1); background: rgba(30, 41, 59, 0.4); display: flex; justify-content: space-between; align-items: center;">
+          <span style="font-size: 11.5px; color: #94a3b8;">
+            * Changes take effect immediately and recalculate Safety Compliance for this week.
+          </span>
+          <div style="display: flex; gap: 10px;">
+            <button type="button" class="btn btn-secondary" id="btn-floating-modal-cancel" style="padding: 7px 16px; font-size: 12px; font-weight: 600;">Cancel</button>
+            <button type="button" class="btn btn-primary" id="btn-floating-modal-save" style="padding: 7px 20px; font-size: 12.5px; font-weight: 800; background: #10b981; border: none; box-shadow: 0 2px 8px rgba(16, 185, 129, 0.35);">
+              💾 Save & Recalculate Compliance
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(overlay);
+
+    // Wire up events
+    const closeBtn = document.getElementById('btn-floating-modal-close');
+    const cancelBtn = document.getElementById('btn-floating-modal-cancel');
+    const saveBtn = document.getElementById('btn-floating-modal-save');
+    const searchInput = document.getElementById('floating-crew-search');
+    const bulkDefaultsBtn = document.getElementById('btn-floating-bulk-defaults');
+    const bulkActualBtn = document.getElementById('btn-floating-bulk-actual');
+
+    const closeModal = () => { if (overlay) overlay.remove(); };
+    if (closeBtn) closeBtn.onclick = closeModal;
+    if (cancelBtn) cancelBtn.onclick = closeModal;
+
+    // Filter functionality
+    if (searchInput) {
+      searchInput.oninput = (e) => {
+        const query = (e.target.value || '').toLowerCase().trim();
+        const rows = overlay.querySelectorAll('.floating-crew-row');
+        rows.forEach(r => {
+          const crew = r.getAttribute('data-crew') || '';
+          const fm = r.getAttribute('data-foreman') || '';
+          const sched = r.getAttribute('data-sched') || '';
+          if (!query || crew.includes(query) || fm.includes(query) || sched.includes(query)) {
+            r.style.display = 'flex';
+          } else {
+            r.style.display = 'none';
+          }
+        });
+      };
+    }
+
+    // Bulk buttons
+    if (bulkDefaultsBtn) {
+      bulkDefaultsBtn.onclick = () => {
+        const selects = overlay.querySelectorAll('.floating-day-select');
+        selects.forEach(s => { s.value = 'default'; });
+      };
+    }
+
+    if (bulkActualBtn) {
+      bulkActualBtn.onclick = () => {
+        const selects = overlay.querySelectorAll('.floating-day-select');
+        selects.forEach(s => { s.value = 'Wed'; });
+      };
+    }
+
+    // Save functionality
+    if (saveBtn) {
+      saveBtn.onclick = async () => {
+        saveBtn.disabled = true;
+        saveBtn.textContent = 'Saving & Recalculating...';
+
+        const updatedAssignments = this.getFloatingHolidayAssignments();
+        if (!updatedAssignments[holidayDateKey]) {
+          updatedAssignments[holidayDateKey] = { default: 'last_work_day', crewOverrides: {} };
+        }
+        if (!updatedAssignments[holidayDateKey].crewOverrides) {
+          updatedAssignments[holidayDateKey].crewOverrides = {};
+        }
+
+        const selects = overlay.querySelectorAll('.floating-day-select');
+        selects.forEach(s => {
+          const jn = s.getAttribute('data-job');
+          const val = s.value;
+          if (jn) {
+            if (val === 'default') {
+              delete updatedAssignments[holidayDateKey].crewOverrides[jn];
+            } else {
+              updatedAssignments[holidayDateKey].crewOverrides[jn] = val;
+            }
+          }
+        });
+
+        this.saveFloatingHolidayAssignments(updatedAssignments);
+        this.applyFloatingHolidayAssignmentsLocally(holidayDateKey, updatedAssignments);
+        this.renderSafetyCompliance();
+
+        closeModal();
+
+        if (window.safetyComplianceEngine && typeof window.safetyComplianceEngine.runRecalculateCompliance === 'function') {
+          await window.safetyComplianceEngine.runRecalculateCompliance(updatedAssignments, true);
+        }
+      };
+    }
+
+    // Scroll to highlighted crew if requested
+    if (highlightJobNum) {
+      setTimeout(() => {
+        const highlightedEl = overlay.querySelector('.floating-crew-row[data-crew="' + highlightJobNum.toLowerCase() + '"]');
+        if (highlightedEl) {
+          highlightedEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }, 100);
+    }
   }
 
   /**
@@ -4698,7 +5366,7 @@ class SheetNavigator {
         const binaryStr = atob(rawB64);
         const bytes = new Uint8Array(binaryStr.length);
         for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
-        window.pdfjsLib.getDocument({ data: bytes }).promise.then(pdf => {
+        window.pdfjsLib.getDocument({ data: bytes.slice() }).promise.then(pdf => {
           const numPages = pdf.numPages;
           item.totalPdfPages = numPages;
           const extBtn = document.getElementById('cert-pdf-btn-extract-all');
@@ -4825,7 +5493,7 @@ class SheetNavigator {
         bytes[i] = binaryStr.charCodeAt(i);
       }
 
-      const loadingTask = window.pdfjsLib.getDocument({ data: bytes });
+      const loadingTask = window.pdfjsLib.getDocument({ data: bytes.slice() });
       const pdf = await loadingTask.promise;
       const numPages = pdf.numPages;
 
@@ -5346,7 +6014,7 @@ class SheetNavigator {
         const eJob = String(e['Job Number'] || e['Job #'] || '').toLowerCase().trim();
         if (eLoc === 'previous employee' || eLoc.includes('previous') ||
             eStat === 'previous employee' || eStat.includes('inactive') || eStat.includes('terminated') ||
-            eJob.includes('previous') || eJob.startsWith('002-') || eName.includes('former')) {
+            eJob.includes('previous') || (eJob.startsWith('002-') && (eName.includes('lost') || eName.includes('destroyed'))) || eName.includes('former')) {
           prevEmpNames.add(eName);
         } else {
           activeNames.add(eName);
@@ -5404,7 +6072,7 @@ class SheetNavigator {
     const job = String(r['Job Number'] || r['Job #'] || '').toLowerCase().trim();
     if (loc === 'previous employee' || loc.includes('previous') ||
         (!loc && (stat === 'previous employee' || stat.includes('inactive') || stat.includes('terminated'))) ||
-        job.includes('previous') || job.startsWith('002-') || eName.includes('former')) {
+        job.includes('previous') || (job.startsWith('002-') && (eName.includes('lost') || eName.includes('destroyed'))) || eName.includes('former')) {
       return true;
     }
     return false;
@@ -6412,7 +7080,7 @@ class SheetNavigator {
       // Skip previous/inactive employees
       if (locLower === 'previous employee' || locLower.includes('previous') ||
           status === 'previous employee' || status.includes('inactive') || status.includes('terminated') ||
-          jobLower.startsWith('002-') || jobLower.includes('previous')) {
+          (jobLower.startsWith('002-') && (empLower.includes('lost') || empLower.includes('destroyed'))) || jobLower.includes('previous')) {
         continue;
       }
 
@@ -6694,7 +7362,7 @@ class SheetNavigator {
                      stat === 'previous employee' || stat.includes('inactive') ||
                      stat.includes('terminated') || last;
 
-      if (!name || isPrev || !job || job.startsWith('002-')) return;
+      if (!name || isPrev || !job || (job.startsWith('002-') && (name.toLowerCase().includes('lost') || name.toLowerCase().includes('destroyed')))) return;
 
       const base = job.split('.')[0].trim();
       if (!base) return;
@@ -13037,9 +13705,24 @@ class SheetNavigator {
           const gIdx = tableData.rawGrid.findIndex((gr, idx) => idx > 0 && String(gr[0] || '').trim().toLowerCase() === empVal && String(gr[1] || '').trim().toLowerCase() === certVal);
           if (gIdx !== -1) sheetRowIdx = gIdx + 1;
         } else {
-          const itemVal = String(row['Serial #'] || row['Item #'] || row['Glove'] || row['Sleeve'] || row['Blanket'] || row['MACK'] || row['Name'] || row['Employee Name'] || row['Job Number'] || Object.values(row)[0] || '').trim().toLowerCase();
-          if (itemVal) {
-            const gIdx = tableData.rawGrid.findIndex((gr, idx) => idx > 0 && String(gr[0] || '').trim().toLowerCase() === itemVal);
+          const rawItemVal = String(
+            row['HVT #'] || row['HV Tester'] || row['Phasing Set'] || row['PS #'] || row['AED #'] ||
+            row['Serial #'] || row['Item #'] || row['Glove'] || row['Sleeve'] || row['Blanket'] ||
+            row['MACK'] || row['Name'] || row['Employee Name'] || row['Job Number'] || Object.values(row)[0] || ''
+          ).trim();
+          const itemVal = rawItemVal.toLowerCase();
+          const itemNorm = typeof this.normalizeEquipmentIdentifier === 'function' ? this.normalizeEquipmentIdentifier(rawItemVal) : itemVal.replace(/[\s\u00A0]+/g, '').replace(/[–—]/g, '-');
+          if (itemNorm || itemVal) {
+            const gIdx = tableData.rawGrid.findIndex((gr, idx) => {
+              if (idx === 0) return false;
+              const g0 = String(gr[0] || '').trim();
+              if (g0.toLowerCase() === itemVal) return true;
+              if (itemNorm) {
+                const g0Norm = typeof this.normalizeEquipmentIdentifier === 'function' ? this.normalizeEquipmentIdentifier(g0) : g0.toLowerCase().replace(/[\s\u00A0]+/g, '').replace(/[–—]/g, '-');
+                if (g0Norm === itemNorm) return true;
+              }
+              return false;
+            });
             if (gIdx !== -1) sheetRowIdx = gIdx + 1;
           }
         }
@@ -13226,12 +13909,30 @@ class SheetNavigator {
         // Safety Compliance Formatting
         if (this.currentSheetKey === 'safety_compliance') {
           const vStr = String(val).trim();
+          const jobVal = String(row['Job Number'] || row['Job #'] || row['Crew'] || '').trim();
+          const weekVal = String(row['Week Start'] || row['Week'] || this.selectedComplianceWeek || '').trim();
+          const foremanVal = String(row['Foreman'] || row['Crew Lead'] || row['Lead'] || '').trim();
+
+          const isDayCol = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].includes(h);
+          let isAssignedHoliday = false;
+          let activeHol = null;
+          if (isDayCol) {
+            const fHols = this.getFloatingHolidaysForWeek(weekVal);
+            const jtTable = this.db ? this.db.getTable('job_tracking') : null;
+            if (fHols && fHols.length > 0) {
+              activeHol = fHols[0];
+              const crewDay = this.getCrewFloatingHolidayDayOff(activeHol.dateKey, jobVal, jtTable);
+              if (crewDay && crewDay.dayShort === h) {
+                isAssignedHoliday = true;
+              }
+            }
+            if (vStr.includes('🏖️') || vStr.toLowerCase().includes('holiday') || vStr.toLowerCase().includes('vet')) {
+              isAssignedHoliday = true;
+            }
+          }
+
           if (vStr === '✅' || vStr === '✅L' || vStr.startsWith('✅')) {
             const isLate = vStr.includes('L');
-            const jobVal = String(row['Job Number'] || row['Job #'] || row['Crew'] || '').trim();
-            const weekVal = String(row['Week Start'] || row['Week'] || '').trim();
-            const foremanVal = String(row['Foreman'] || row['Crew Lead'] || row['Lead'] || '').trim();
-
             let countLabel = '';
             if (h === 'Monthly Checklist' && window.safetyComplianceEngine && typeof window.safetyComplianceEngine.getMonthlyChecklistsForCrew === 'function') {
               const chks = window.safetyComplianceEngine.getMonthlyChecklistsForCrew(jobVal, weekVal, foremanVal);
@@ -13241,6 +13942,9 @@ class SheetNavigator {
             }
 
             customCellHtml = `<span style="font-size: 14px; display: inline-flex; align-items: center; justify-content: center; gap: 2px; cursor: pointer;" title="${isLate ? 'Completed Late (Received after deadline)' : 'Submitted on time'}${countLabel ? ` · ${countLabel.trim()} checklists turned in` : ''} · Click to view PDF document" onclick="event.stopPropagation(); if (window.safetyComplianceEngine) window.safetyComplianceEngine.openPdfForComplianceCell('${this.escapeJs(jobVal)}', '${this.escapeJs(h)}', '${this.escapeJs(weekVal)}', '${this.escapeJs(foremanVal)}');">✅${isLate ? '<span style="font-size: 9.5px; font-weight: 800; color: #f59e0b;">L</span>' : ''}${countLabel ? `<span style="font-size: 11px; font-weight: 700; color: #34d399; margin-left: 2px;">${this.escapeHtml(countLabel)}</span>` : ''}</span>`;
+          } else if (isAssignedHoliday) {
+            const holName = (activeHol && activeHol.name) || vStr.replace(/^🏖️\s*/, '').trim() || "Veteran's Day";
+            customCellHtml = `<span class="badge" style="background: rgba(59, 130, 246, 0.18); color: #93c5fd; border: 1px solid rgba(99, 102, 241, 0.45); font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 4px; display: inline-flex; align-items: center; gap: 4px; cursor: pointer;" ${activeHol ? `onclick="window.sheetNavigator.openFloatingHolidayModal('${this.escapeJs(activeHol.dateKey)}', '${this.escapeJs(jobVal)}');"` : ''} title="🏖️ Holiday: ${this.escapeHtml(holName)} (Assigned Day Off for this crew)">🏖️ ${this.escapeHtml(holName)}</span>`;
           } else if (vStr === '❌' || vStr.startsWith('❌')) {
             const letter = vStr.replace('❌', '').trim();
             const badgeColor = letter === 'A' ? '#38bdf8' : (letter === 'W' ? '#fbbf24' : (letter === 'D' ? '#ef4444' : '#c084fc'));
@@ -13831,18 +14535,44 @@ class SheetNavigator {
 
             // 3. For single-key sheets (inventory by item#, employees by name), use itemIdentifier fallback
             const isMultiRowSheet = ['expiring_certs', 'training_tracking', 'safety_compliance', 'dot_drug_tests'].includes(this.currentSheetKey);
+            const isEquipmentKey = ['gloves', 'sleeves', 'blankets', 'macks', 'hv_testers', 'phasing_sets', 'aed', 'grounds', 'hot_sticks'].includes(this.currentSheetKey);
+            const normItem = (isEquipmentKey && typeof this.normalizeEquipmentIdentifier === 'function') ? this.normalizeEquipmentIdentifier(itemIdentifier) : '';
+
             if (!tableRow && !isMultiRowSheet) {
               if (itemIdentifier && tableData.rows) {
                 tableRow = tableData.rows.find(r => {
-                  const id = String(r['Serial #'] || r['Item #'] || r['Glove'] || r['Sleeve'] || r['Blanket'] || r['MACK'] || r['Name'] || r['Employee Name'] || r['Job Number'] || Object.values(r)[0] || '').trim();
-                  return id.toLowerCase() === itemIdentifier.toLowerCase();
+                  const rawId = String(r['HVT #'] || r['HV Tester'] || r['Phasing Set'] || r['PS #'] || r['AED #'] || r['Serial #'] || r['Item #'] || r['Glove'] || r['Sleeve'] || r['Blanket'] || r['MACK'] || r['Name'] || r['Employee Name'] || r['Job Number'] || Object.values(r)[0] || '').trim();
+                  if (rawId.toLowerCase() === itemIdentifier.toLowerCase()) return true;
+                  if (normItem && typeof this.normalizeEquipmentIdentifier === 'function' && this.normalizeEquipmentIdentifier(rawId) === normItem) return true;
+                  return false;
                 });
               }
               if (itemIdentifier && tableData.rawGrid) {
-                const gIdx = tableData.rawGrid.findIndex((gr, idx) => idx > 0 && String(gr[0] || '').trim().toLowerCase() === itemIdentifier.toLowerCase());
+                const gIdx = tableData.rawGrid.findIndex((gr, idx) => {
+                  if (idx === 0) return false;
+                  const g0 = String(gr[0] || '').trim();
+                  if (g0.toLowerCase() === itemIdentifier.toLowerCase()) return true;
+                  if (normItem && typeof this.normalizeEquipmentIdentifier === 'function' && this.normalizeEquipmentIdentifier(g0) === normItem) return true;
+                  return false;
+                });
                 if (gIdx !== -1) {
                   actualRowIdx = gIdx + 1;
                 }
+              }
+            }
+
+            // For equipment sheets, verify and snap actualRowIdx to rawGrid to guarantee 1:1 match with Google Sheets row
+            if (isEquipmentKey && itemIdentifier && tableData.rawGrid) {
+              const gIdx = tableData.rawGrid.findIndex((gr, idx) => {
+                if (idx === 0) return false;
+                const g0 = String(gr[0] || '').trim();
+                if (g0.toLowerCase() === itemIdentifier.toLowerCase()) return true;
+                if (normItem && typeof this.normalizeEquipmentIdentifier === 'function' && this.normalizeEquipmentIdentifier(g0) === normItem) return true;
+                return false;
+              });
+              if (gIdx !== -1) {
+                actualRowIdx = gIdx + 1;
+                if (tableRow) tableRow._rowIdx = actualRowIdx;
               }
             }
 

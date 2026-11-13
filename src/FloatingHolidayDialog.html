@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <style>
+    * { box-sizing: border-box; font-family: 'Google Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+    body { margin: 0; padding: 20px; background: #0f172a; color: #f8fafc; font-size: 13px; }
+    h2 { margin: 0 0 6px 0; font-size: 18px; color: #60a5fa; display: flex; align-items: center; gap: 8px; }
+    .subtitle { font-size: 12px; color: #94a3b8; margin-bottom: 14px; }
+    .banner { padding: 10px 14px; background: rgba(59, 130, 246, 0.12); border: 1px solid rgba(59, 130, 246, 0.35); border-radius: 8px; margin-bottom: 14px; font-size: 12px; line-height: 1.4; color: #cbd5e1; }
+    .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; gap: 10px; flex-wrap: wrap; }
+    .search-input { padding: 6px 12px; background: #1e293b; border: 1px solid #334155; border-radius: 6px; color: #f8fafc; font-size: 12px; width: 220px; }
+    .btn { padding: 6px 12px; border-radius: 6px; font-size: 11.5px; font-weight: 700; cursor: pointer; border: 1px solid transparent; }
+    .btn-secondary { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.15); color: #cbd5e1; }
+    .btn-secondary:hover { background: rgba(255,255,255,0.12); }
+    .btn-primary { background: #10b981; color: white; border: none; font-size: 12px; padding: 8px 18px; }
+    .btn-primary:hover { background: #059669; }
+    .crew-list { max-height: 380px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding-right: 4px; }
+    .crew-row { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; background: rgba(30, 41, 59, 0.6); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; }
+    .crew-info { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .foreman { font-weight: 700; color: #f472b6; font-size: 13px; }
+    .job-badge { font-family: monospace; font-weight: 700; background: #0f172a; padding: 2px 6px; border-radius: 4px; border: 1px solid #334155; color: #60a5fa; }
+    .sched-badge { font-size: 10px; font-weight: 700; background: rgba(100, 116, 139, 0.2); color: #94a3b8; border: 1px solid rgba(100, 116, 139, 0.4); padding: 1px 6px; border-radius: 4px; }
+    .select-day { padding: 5px 8px; background: #1e293b; color: #f8fafc; border: 1px solid #475569; border-radius: 6px; font-size: 11.5px; font-weight: 600; min-width: 190px; }
+    .footer { margin-top: 16px; padding-top: 14px; border-top: 1px solid rgba(255,255,255,0.1); display: flex; justify-content: space-between; align-items: center; }
+    .loading { text-align: center; padding: 40px; font-size: 14px; color: #94a3b8; }
+  </style>
+</head>
+<body>
+  <div id="loading" class="loading">⏳ Loading floating holiday configuration and active crews...</div>
+
+  <div id="content" style="display: none;">
+    <h2><span>🏖️</span> <span id="title">Assign Floating Holiday Days Off</span></h2>
+    <div class="subtitle" id="subtitle"></div>
+
+    <div class="banner">
+      💡 <strong>Floating Holiday Rules:</strong> Because this holiday is floating, crews take their last regular working day of the week off by default (<strong>M-Th take Thursday</strong>, <strong>M-F take Friday</strong>). You can customize specific crew days off below.
+    </div>
+
+    <div class="toolbar">
+      <input type="text" id="crew-filter" class="search-input" placeholder="🔍 Search foreman or job #..." oninput="filterCrews(this.value)">
+      <div style="display: flex; gap: 8px;">
+        <button type="button" class="btn btn-secondary" onclick="applyBulk('default')">⚡ Set All to Last Working Day</button>
+        <button type="button" class="btn btn-secondary" onclick="applyBulk('Wed')">📅 Set All to Wednesday</button>
+      </div>
+    </div>
+
+    <div class="crew-list" id="crews-container"></div>
+
+    <div class="footer">
+      <div style="font-size: 11px; color: #94a3b8;">* Recalculates Safety Compliance on save.</div>
+      <div style="display: flex; gap: 10px;">
+        <button type="button" class="btn btn-secondary" onclick="google.script.host.close()">Cancel</button>
+        <button type="button" class="btn btn-primary" id="btn-save" onclick="saveAssignments()">💾 Save & Recalculate</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let holidayData = null;
+
+    window.onload = function() {
+      google.script.run
+        .withSuccessHandler(renderData)
+        .withFailureHandler(function(err) {
+          document.getElementById('loading').innerHTML = '❌ Failed to load: ' + err;
+        })
+        .getFloatingHolidayDialogData();
+    };
+
+    function renderData(data) {
+      holidayData = data;
+      document.getElementById('loading').style.display = 'none';
+      document.getElementById('content').style.display = 'block';
+
+      const fh = data.floatingHoliday;
+      document.getElementById('title').textContent = 'Assign Floating Holiday Days Off — ' + fh.name;
+      document.getElementById('subtitle').textContent = 'Week of ' + data.weekStart + ' · Calendar Date: ' + fh.dateKey + ' (' + fh.dayName + ')';
+
+      const container = document.getElementById('crews-container');
+      container.innerHTML = data.crews.map(function(c) {
+        return `
+          <div class="crew-row" data-search="${(c.foreman + ' ' + c.jobNum).toLowerCase()}">
+            <div>
+              <div class="crew-info">
+                <span class="foreman">👑 ${escapeHtml(c.foreman || 'Unassigned')}</span>
+                <span class="job-badge">${escapeHtml(c.jobNum)}</span>
+                <span class="sched-badge">${escapeHtml(c.schedule)}</span>
+              </div>
+              <div style="font-size: 11px; color: #94a3b8; margin-top: 2px;">
+                Last Working Day: <strong style="color: #4ade80;">${c.defaultDay === 'Thu' ? 'Thursday' : (c.defaultDay === 'Fri' ? 'Friday' : c.defaultDay)}</strong>
+              </div>
+            </div>
+            <div>
+              <select class="select-day" data-job="${escapeHtml(c.jobNum)}">
+                <option value="default" ${c.currentVal === 'default' ? 'selected' : ''}>✨ Last Working Day (Auto: ${c.defaultDay})</option>
+                <option value="Thu" ${c.currentVal === 'Thu' ? 'selected' : ''}>Thursday (M-Th Default)</option>
+                <option value="Fri" ${c.currentVal === 'Fri' ? 'selected' : ''}>Friday (M-F Default)</option>
+                <option value="Wed" ${c.currentVal === 'Wed' ? 'selected' : ''}>Wednesday (Actual Holiday Date)</option>
+                <option value="Mon" ${c.currentVal === 'Mon' ? 'selected' : ''}>Monday</option>
+                <option value="Tue" ${c.currentVal === 'Tue' ? 'selected' : ''}>Tuesday</option>
+                <option value="Sat" ${c.currentVal === 'Sat' ? 'selected' : ''}>Saturday</option>
+                <option value="Sun" ${c.currentVal === 'Sun' ? 'selected' : ''}>Sunday</option>
+                <option value="none" ${c.currentVal === 'none' ? 'selected' : ''}>🚫 None (Crew Works Full Week)</option>
+              </select>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function filterCrews(query) {
+      query = (query || '').toLowerCase().trim();
+      const rows = document.querySelectorAll('.crew-row');
+      rows.forEach(function(r) {
+        const text = r.getAttribute('data-search') || '';
+        r.style.display = (!query || text.includes(query)) ? 'flex' : 'none';
+      });
+    }
+
+    function applyBulk(val) {
+      const selects = document.querySelectorAll('.select-day');
+      selects.forEach(function(s) { s.value = val; });
+    }
+
+    function saveAssignments() {
+      const btn = document.getElementById('btn-save');
+      btn.disabled = true;
+      btn.textContent = 'Saving & Recalculating...';
+
+      const overrides = {};
+      const selects = document.querySelectorAll('.select-day');
+      selects.forEach(function(s) {
+        const jn = s.getAttribute('data-job');
+        if (jn) overrides[jn] = s.value;
+      });
+
+      google.script.run
+        .withSuccessHandler(function() {
+          google.script.host.close();
+        })
+        .withFailureHandler(function(err) {
+          alert('Error saving assignments: ' + err);
+          btn.disabled = false;
+          btn.textContent = '💾 Save & Recalculate';
+        })
+        .saveFloatingHolidayDialogData({
+          holidayDateKey: holidayData.floatingHoliday.dateKey,
+          overrides: overrides
+        });
+    }
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+  </script>
+</body>
+</html>

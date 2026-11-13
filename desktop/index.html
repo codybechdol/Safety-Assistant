@@ -2688,36 +2688,36 @@
 
   <!-- Safety PDF Document Viewer Modal -->
   <div id="safety-pdf-modal" class="modal-overlay" style="display: none; align-items: center; justify-content: center; z-index: 13500;">
-    <div class="modal-box" style="max-width: 95vw; width: 1100px; height: 92vh; display: flex; flex-direction: column; background: #0f172a; border: 1px solid #334155; border-radius: 12px; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7); overflow: hidden; pointer-events: auto;">
-      <div class="modal-header wm-draggable-header" style="background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); color: white; padding: 12px 18px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155;">
-        <div style="display: flex; align-items: center; gap: 10px; overflow: hidden;">
-          <span style="font-size: 20px;">📄</span>
-          <div style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-            <div id="safety-pdf-modal-title" style="font-weight: 800; font-size: 14px; color: #f8fafc;">Safety Document PDF</div>
-            <div id="safety-pdf-modal-subtitle" style="font-size: 11px; color: #94a3b8;">Loading document preview...</div>
+    <div class="modal-box" style="max-width: 96vw; width: 1280px; height: 94vh; display: flex; flex-direction: column; background: #0f172a; border: 1px solid #334155; border-radius: 12px; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7); overflow: hidden; pointer-events: auto;">
+      <div class="modal-header wm-draggable-header" style="background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); color: white; padding: 10px 16px; display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: nowrap; flex-shrink: 0; border-bottom: 1px solid #334155;">
+        <div style="display: flex; align-items: center; gap: 10px; flex: 1 1 220px; min-width: 150px; overflow: hidden;">
+          <span style="font-size: 20px; flex-shrink: 0;">📄</span>
+          <div style="min-width: 0; overflow: hidden;">
+            <div id="safety-pdf-modal-title" style="font-weight: 800; font-size: 14px; color: #f8fafc; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Safety Document PDF</div>
+            <div id="safety-pdf-modal-subtitle" style="font-size: 11px; color: #94a3b8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Loading document preview...</div>
           </div>
         </div>
         <!-- Revision / Version Switcher for modified documents -->
-        <div id="safety-pdf-version-selector" style="display: none; align-items: center; gap: 6px; margin: 0 12px;"></div>
-        <div style="display: flex; align-items: center; gap: 8px;">
-          <button id="safety-pdf-btn-action-items" type="button" class="btn btn-secondary" style="display: none; font-size: 11px; padding: 4px 10px; align-items: center; gap: 5px; border-color: rgba(245, 158, 11, 0.4); background: rgba(245, 158, 11, 0.12); color: #fbbf24; cursor: pointer; font-weight: 700;" onclick="if(window.safetyComplianceEngine) window.safetyComplianceEngine.toggleActionItemsDrawer();" title="View or add equipment action items for this checklist">
+        <div id="safety-pdf-version-selector" style="display: none; align-items: center; gap: 6px; margin: 0 4px; flex: 0 1 340px; min-width: 0; overflow-x: auto; white-space: nowrap;"></div>
+        <div style="display: flex; align-items: center; gap: 6px; flex-shrink: 0; white-space: nowrap;">
+          <button id="safety-pdf-btn-action-items" type="button" class="btn btn-secondary" style="display: none; font-size: 11px; padding: 4px 10px; align-items: center; gap: 5px; border-color: rgba(245, 158, 11, 0.4); background: rgba(245, 158, 11, 0.12); color: #fbbf24; cursor: pointer; font-weight: 700; white-space: nowrap; flex-shrink: 0;" onclick="if(window.safetyComplianceEngine) window.safetyComplianceEngine.toggleActionItemsDrawer();" title="View or add equipment action items for this checklist">
             <span>🔧</span> Action Items
           </button>
-          <a id="safety-pdf-btn-newtab" href="#" target="_blank" class="btn btn-secondary" style="font-size: 11px; padding: 4px 10px; display: inline-flex; align-items: center; gap: 4px; text-decoration: none;" title="Open in New Browser Tab">
+          <a id="safety-pdf-btn-newtab" href="#" target="_blank" class="btn btn-secondary" style="font-size: 11px; padding: 4px 10px; display: inline-flex; align-items: center; gap: 4px; text-decoration: none; white-space: nowrap; flex-shrink: 0;" title="Open in New Browser Tab">
             ↗️ Pop Out
           </a>
-          <a id="safety-pdf-btn-download" href="#" download class="btn btn-secondary" style="font-size: 11px; padding: 4px 10px; display: inline-flex; align-items: center; gap: 4px; text-decoration: none;" title="Download PDF directly">
+          <a id="safety-pdf-btn-download" href="#" download class="btn btn-secondary" style="font-size: 11px; padding: 4px 10px; display: inline-flex; align-items: center; gap: 4px; text-decoration: none; white-space: nowrap; flex-shrink: 0;" title="Download PDF directly">
             💾 Download
           </a>
-          <a id="safety-pdf-btn-gmail" href="#" target="_blank" class="btn btn-secondary" style="font-size: 11px; padding: 4px 10px; display: inline-flex; align-items: center; gap: 4px; text-decoration: none;" title="Open email thread in Gmail">
+          <a id="safety-pdf-btn-gmail" href="#" target="_blank" class="btn btn-secondary" style="font-size: 11px; padding: 4px 10px; display: inline-flex; align-items: center; gap: 4px; text-decoration: none; white-space: nowrap; flex-shrink: 0;" title="Open email thread in Gmail">
             ✉️ Open in Gmail
           </a>
-          <button class="btn btn-secondary" style="padding: 3px 8px; font-size: 13px; background: rgba(255,255,255,0.1); border: none; color: white; cursor: pointer;" onclick="if (window.incidentReportsEngine && window.incidentReportsEngine.closePdfModal) window.incidentReportsEngine.closePdfModal(); else if (window.safetyComplianceEngine && window.safetyComplianceEngine.closePdfModal) window.safetyComplianceEngine.closePdfModal(); else { var m = document.getElementById('safety-pdf-modal'); if (m) { m.style.display='none'; m.classList.add('hidden'); } }">✕</button>
+          <button class="btn btn-secondary" style="padding: 3px 8px; font-size: 13px; background: rgba(255,255,255,0.1); border: none; color: white; cursor: pointer; white-space: nowrap; flex-shrink: 0;" onclick="if (window.incidentReportsEngine && window.incidentReportsEngine.closePdfModal) window.incidentReportsEngine.closePdfModal(); else if (window.safetyComplianceEngine && window.safetyComplianceEngine.closePdfModal) window.safetyComplianceEngine.closePdfModal(); else { var m = document.getElementById('safety-pdf-modal'); if (m) { m.style.display='none'; m.classList.add('hidden'); } }">✕</button>
         </div>
       </div>
       <!-- Action Items & Equipment Defect Management Drawer -->
-      <div id="safety-pdf-action-items-drawer" style="display: none; background: #0b1329; border-bottom: 1px solid #334155; padding: 10px 18px; font-size: 12px; color: #cbd5e1;"></div>
-      <div class="modal-body" id="safety-pdf-modal-body" style="flex: 1; padding: 0; position: relative; background: #1e293b; overflow: hidden; display: flex; align-items: center; justify-content: center;">
+      <div id="safety-pdf-action-items-drawer" style="display: none; flex-shrink: 0; background: #0b1329; border-bottom: 1px solid #334155; padding: 10px 18px; font-size: 12px; color: #cbd5e1;"></div>
+      <div class="modal-body" id="safety-pdf-modal-body" style="flex: 1; min-height: 0; padding: 0; position: relative; background: #1e293b; overflow: hidden; display: flex; flex-direction: column;">
         <!-- Embedded PDF iframe / spinner -->
       </div>
     </div>
