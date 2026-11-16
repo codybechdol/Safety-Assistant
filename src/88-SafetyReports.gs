@@ -3694,6 +3694,38 @@ function getIconExplanation(icon, cellType, details) {
 
 
 
+/**
+ * Resolves the target crew key to credit in crewCompliance, prioritizing explicit
+ * CreditedTo overrides/sub-crews over the raw job number written on the form.
+ */
+function resolveCrewToCreditFromLog_(crewCompliance, creditedTo, originalJobNumber, foremanName, dayOfWeek) {
+  if (!crewCompliance) return null;
+  if (creditedTo && crewCompliance[creditedTo] && (creditedTo.indexOf('(') !== -1 || creditedTo.indexOf(' -') !== -1)) {
+    return creditedTo;
+  }
+  var baseKey = (creditedTo && crewCompliance[creditedTo])
+    ? creditedTo
+    : ((originalJobNumber && crewCompliance[originalJobNumber]) ? originalJobNumber : null);
+  if (!baseKey) return null;
+
+  var cleanForeman = foremanName ? String(foremanName).toLowerCase().trim() : '';
+  var subCrewKey = null;
+  for (var ck in crewCompliance) {
+    if (ck !== baseKey && (ck.indexOf(baseKey + ' (') === 0 || ck.indexOf(baseKey + ' -') === 0)) {
+      var subCrew = crewCompliance[ck];
+      var baseCrew = crewCompliance[baseKey];
+      var foremanMatch = Boolean(cleanForeman && subCrew.foreman && cleanForeman === String(subCrew.foreman).toLowerCase().trim());
+      var subWorksDay = dayOfWeek && subCrew.skipDays && !subCrew.skipDays[dayOfWeek];
+      var baseWorksDay = dayOfWeek && baseCrew && baseCrew.skipDays && !baseCrew.skipDays[dayOfWeek];
+      if (foremanMatch || (subWorksDay && !baseWorksDay)) {
+        subCrewKey = ck;
+        break;
+      }
+    }
+  }
+  return subCrewKey || baseKey;
+}
+
 function calculateComplianceFromLogs(weekStartDate, options) {
 
   var ignoreResolved = (options && options.ignoreResolved) || false;
@@ -4377,55 +4409,7 @@ function calculateComplianceFromLogs(weekStartDate, options) {
 
 
 
-      if (creditedTo && crewCompliance[creditedTo] && creditedTo.indexOf('(') !== -1) {
-
-        // CreditedTo is an explicit sub-crew (e.g. 040-26 (Fri-Sat))
-
-        crewToCredit = creditedTo;
-
-      } else if (originalJobNumber && crewCompliance[originalJobNumber]) {
-
-        // Check if originalJobNumber has sub-crews sharing this base job
-
-        var subCrewKey = null;
-
-        for (var ck in crewCompliance) {
-
-          if (ck !== originalJobNumber && (ck.indexOf(originalJobNumber + ' (') === 0 || ck.indexOf(originalJobNumber + ' -') === 0)) {
-
-            var subCrew = crewCompliance[ck];
-
-            var origCrew = crewCompliance[originalJobNumber];
-
-            var foremanMatch = (jhaForeman && subCrew.foreman && jhaForeman.toLowerCase().trim() === subCrew.foreman.toLowerCase().trim());
-
-            var subWorksDay = subCrew.skipDays && !subCrew.skipDays[dayOfWeek];
-
-            var origWorksDay = origCrew.skipDays && !origCrew.skipDays[dayOfWeek];
-
-
-
-            if (foremanMatch || (subWorksDay && !origWorksDay)) {
-
-              subCrewKey = ck;
-
-              break;
-
-            }
-
-          }
-
-        }
-
-        crewToCredit = subCrewKey || originalJobNumber;
-
-      } else if (creditedTo && crewCompliance[creditedTo]) {
-
-        // Original job not tracked, but creditedTo is - use that (for typo/reassignment cases)
-
-        crewToCredit = creditedTo;
-
-      }
+      crewToCredit = resolveCrewToCreditFromLog_(crewCompliance, creditedTo, originalJobNumber, jhaForeman, dayOfWeek);
 
 
 
@@ -4671,39 +4655,7 @@ function calculateComplianceFromLogs(weekStartDate, options) {
 
 
 
-        if (creditedTo && crewCompliance[creditedTo] && creditedTo.indexOf('(') !== -1) {
-
-          crewToCredit = creditedTo;
-
-        } else if (originalJobNumber && crewCompliance[originalJobNumber]) {
-
-          var subCrewKey = null;
-
-          for (var ck in crewCompliance) {
-
-            if (ck !== originalJobNumber && (ck.indexOf(originalJobNumber + ' (') === 0 || ck.indexOf(originalJobNumber + ' -') === 0)) {
-
-              var subCrew = crewCompliance[ck];
-
-              if (weeklyForeman && subCrew.foreman && weeklyForeman.toLowerCase().trim() === subCrew.foreman.toLowerCase().trim()) {
-
-                subCrewKey = ck;
-
-                break;
-
-              }
-
-            }
-
-          }
-
-          crewToCredit = subCrewKey || originalJobNumber;
-
-        } else if (creditedTo && crewCompliance[creditedTo]) {
-
-          crewToCredit = creditedTo;
-
-        }
+        crewToCredit = resolveCrewToCreditFromLog_(crewCompliance, creditedTo, originalJobNumber, weeklyForeman, null);
 
 
 
@@ -33861,6 +33813,20 @@ function updateLogEntriesForAssignedJobs(assignments) {
 
  */
 
+/**
+ * Computes target crew and whether Credited To needs updating in fixAllLogEntryCreditedTo,
+ * preserving any existing active tracked Credited To override.
+ */
+function resolveFixLogCreditedTarget_(currentCreditedTo, primaryCrew, trackedCrewSet) {
+  if (currentCreditedTo && trackedCrewSet[currentCreditedTo]) {
+    return { targetCrew: currentCreditedTo, needsUpdate: false };
+  }
+  if (primaryCrew && trackedCrewSet[primaryCrew]) {
+    return { targetCrew: primaryCrew, needsUpdate: primaryCrew !== currentCreditedTo };
+  }
+  return null;
+}
+
 function fixAllLogEntryCreditedTo() {
 
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -33981,7 +33947,9 @@ function fixAllLogEntryCreditedTo() {
 
 
 
-      var targetCrew = primaryCrew || (trackedCrewSet[currentCreditedTo] ? currentCreditedTo : null);
+      var fixTarget = resolveFixLogCreditedTarget_(currentCreditedTo, primaryCrew, trackedCrewSet);
+
+      var targetCrew = fixTarget ? fixTarget.targetCrew : null;
 
 
 
@@ -33989,7 +33957,7 @@ function fixAllLogEntryCreditedTo() {
 
         var rowNum = i + 1;
 
-        var needsCreditedToUpdate = (primaryCrew && primaryCrew !== currentCreditedTo);
+        var needsCreditedToUpdate = fixTarget.needsUpdate;
 
         var needsStatusUpdate = (status !== 'Credited' && (status === 'Unknown Job' || status === 'Skipped' || !status));
 
@@ -33999,7 +33967,7 @@ function fixAllLogEntryCreditedTo() {
 
           if (needsCreditedToUpdate) {
 
-            jhaSheet.getRange(rowNum, 9).setValue(primaryCrew); // Column I - Credited To
+            jhaSheet.getRange(rowNum, 9).setValue(targetCrew); // Column I - Credited To
 
           }
 
@@ -34095,7 +34063,9 @@ function fixAllLogEntryCreditedTo() {
 
 
 
-      var targetCrew = primaryCrew || (trackedCrewSet[currentCreditedTo] ? currentCreditedTo : null);
+      var fixTarget = resolveFixLogCreditedTarget_(currentCreditedTo, primaryCrew, trackedCrewSet);
+
+      var targetCrew = fixTarget ? fixTarget.targetCrew : null;
 
 
 
@@ -34103,7 +34073,7 @@ function fixAllLogEntryCreditedTo() {
 
         var rowNum = j + 1;
 
-        var needsCreditedToUpdate = (primaryCrew && primaryCrew !== currentCreditedTo);
+        var needsCreditedToUpdate = fixTarget.needsUpdate;
 
         var needsStatusUpdate = (status !== 'Credited' && (status === 'Unknown Job' || status === 'Skipped' || !status));
 
@@ -34113,7 +34083,7 @@ function fixAllLogEntryCreditedTo() {
 
           if (needsCreditedToUpdate) {
 
-            weeklySheet.getRange(rowNum, 8).setValue(primaryCrew); // Column H - Credited To
+            weeklySheet.getRange(rowNum, 8).setValue(targetCrew); // Column H - Credited To
 
           }
 
@@ -34179,7 +34149,9 @@ function fixAllLogEntryCreditedTo() {
 
       var primaryCrew = findForemanPrimaryCrew(foreman, employeeData);
 
-      var targetCrew = primaryCrew || (trackedCrewSet[currentCreditedTo] ? currentCreditedTo : null);
+      var fixTarget = resolveFixLogCreditedTarget_(currentCreditedTo, primaryCrew, trackedCrewSet);
+
+      var targetCrew = fixTarget ? fixTarget.targetCrew : null;
 
 
 
@@ -34187,7 +34159,7 @@ function fixAllLogEntryCreditedTo() {
 
         var rowNum = k + 1;
 
-        var needsCreditedToUpdate = (primaryCrew && primaryCrew !== currentCreditedTo);
+        var needsCreditedToUpdate = fixTarget.needsUpdate;
 
         var needsStatusUpdate = (status !== 'Credited' && (status === 'Unknown Job' || status === 'Skipped' || !status));
 
@@ -34197,7 +34169,7 @@ function fixAllLogEntryCreditedTo() {
 
           if (needsCreditedToUpdate) {
 
-            monthlySheet.getRange(rowNum, 9).setValue(primaryCrew); // Column I - Credited To
+            monthlySheet.getRange(rowNum, 9).setValue(targetCrew); // Column I - Credited To
 
           }
 

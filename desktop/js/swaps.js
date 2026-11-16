@@ -88,13 +88,44 @@ class SwapGenerationEngine {
 
     // 1. Load from persistent DB and localStorage registry (highest authority)
     const persistentPicks = {};
+    const ambiguousSimpleKeys = new Set();
     if (this.db && typeof this.db.getManualPicks === 'function') {
       const storedPicks = this.db.getManualPicks(swapTableKey);
       if (storedPicks) {
         Object.assign(persistentPicks, storedPicks);
         Object.assign(manualPicks, storedPicks);
+        const curItemsByEmp = {};
+        Object.entries(storedPicks).forEach(([k, val]) => {
+          if (!val || !k.includes('|')) return;
+          const empPart = k.split('|')[0];
+          const curNorm = String(val.currentItemNum || '').trim().toLowerCase();
+          if (!curItemsByEmp[empPart]) curItemsByEmp[empPart] = new Set();
+          curItemsByEmp[empPart].add(curNorm);
+        });
+        Object.entries(curItemsByEmp).forEach(([empPart, set]) => {
+          if (set.size > 1) {
+            ambiguousSimpleKeys.add(empPart);
+            delete manualPicks[empPart];
+          }
+        });
       }
     }
+
+    const recordManualEntry = (emp, curItem, entry) => {
+      const sKey = emp.toLowerCase();
+      const cKey = `${sKey}|${String(curItem || '').trim().toLowerCase()}`;
+      manualPicks[cKey] = entry;
+      if (ambiguousSimpleKeys.has(sKey)) return;
+      const curNorm = String(curItem || '').trim().toLowerCase();
+      if (!manualPicks[sKey]) {
+        manualPicks[sKey] = entry;
+      } else if (String(manualPicks[sKey].currentItemNum || '').trim().toLowerCase() !== curNorm) {
+        delete manualPicks[sKey];
+        ambiguousSimpleKeys.add(sKey);
+      } else {
+        manualPicks[sKey] = entry;
+      }
+    };
 
     const table = this.db.getTable(swapTableKey);
     if (!table) return manualPicks;
@@ -130,7 +161,7 @@ class SwapGenerationEngine {
         const simpleKey = empName.toLowerCase();
 
         // If existing persistent pick is already explicitly picked and current is not, keep persistent
-        const existingPersist = persistentPicks[compositeKey] || (persistentPicks[simpleKey] && (!persistentPicks[simpleKey].currentItemNum || persistentPicks[simpleKey].currentItemNum.toLowerCase() === currentItemNum.toLowerCase()) ? persistentPicks[simpleKey] : null);
+        const existingPersist = persistentPicks[compositeKey] || (persistentPicks[simpleKey] && String(persistentPicks[simpleKey].currentItemNum || '').trim().toLowerCase() === currentItemNum.toLowerCase() ? persistentPicks[simpleKey] : null);
         if (existingPersist && existingPersist.isPicked && !isPicked) return;
 
         if ((isManual || isPicked) && pickListNum && pickListNum !== '—' && pickListNum !== '-') {
@@ -164,12 +195,7 @@ class SwapGenerationEngine {
             isPicked: isPicked,
             isManualPick: isManual
           };
-          manualPicks[compositeKey] = entry;
-          if (!manualPicks[simpleKey]) {
-            manualPicks[simpleKey] = entry;
-          } else if (manualPicks[simpleKey].currentItemNum && manualPicks[simpleKey].currentItemNum.toLowerCase() !== currentItemNum.toLowerCase()) {
-            delete manualPicks[simpleKey];
-          }
+          recordManualEntry(empName, currentItemNum, entry);
 
           if (isPicked && this.db && typeof this.db.saveManualPick === 'function') {
             this.db.saveManualPick(swapTableKey, empName, currentItemNum, pickListNum, entry.status, true);
@@ -210,7 +236,7 @@ class SwapGenerationEngine {
         const compositeKey = `${emp.toLowerCase()}|${curIt.toLowerCase()}`;
         const simpleKey = emp.toLowerCase();
 
-        const existing = manualPicks[compositeKey] || (manualPicks[simpleKey] && (!manualPicks[simpleKey].currentItemNum || manualPicks[simpleKey].currentItemNum.toLowerCase() === curIt.toLowerCase()) ? manualPicks[simpleKey] : null);
+        const existing = manualPicks[compositeKey] || (manualPicks[simpleKey] && String(manualPicks[simpleKey].currentItemNum || '').trim().toLowerCase() === curIt.toLowerCase() ? manualPicks[simpleKey] : null);
         if (existing && existing.isPicked && !isPicked) return;
 
         if (pNum && pNum !== '—' && pNum !== '-') {
@@ -245,12 +271,7 @@ class SwapGenerationEngine {
               isPicked: isPicked,
               isManualPick: isManual
             };
-            manualPicks[compositeKey] = entry;
-            if (!manualPicks[simpleKey]) {
-              manualPicks[simpleKey] = entry;
-            } else if (manualPicks[simpleKey].currentItemNum && manualPicks[simpleKey].currentItemNum.toLowerCase() !== curIt.toLowerCase()) {
-              delete manualPicks[simpleKey];
-            }
+            recordManualEntry(emp, curIt, entry);
 
             if (isPicked && this.db && typeof this.db.saveManualPick === 'function') {
               this.db.saveManualPick(swapTableKey, emp, curIt, pNum, entry.status, true);
@@ -598,6 +619,7 @@ class SwapGenerationEngine {
     const classes = isGloves ? [0, 2, 3] : [2, 3];
     const classNames = { 0: 'Class 0', 2: 'Class 2', 3: 'Class 3' };
     const assignedItemNums = new Set();
+    const emittedItemNums = new Set();
 
     const allHeaders = [
       'Employee', `Current ${itemLabel} #`, 'Size', 'Date Assigned', 'Change Out Date', 'Days Left', 'Pick List Item #', 'Status', 'Picked', 'Date Changed',
@@ -1105,15 +1127,15 @@ class SwapGenerationEngine {
         const fallbackOld = oldAssignedLower ? manualPicks[oldAssignedLower] : null;
         const manual = manualPicks[manualKey] ||
                        (manualKeyOld ? manualPicks[manualKeyOld] : null) ||
-                       (fallback && (!fallback.currentItemNum || String(fallback.currentItemNum).toLowerCase() === String(meta.itemNum).toLowerCase()) ? fallback : null) ||
-                       (fallbackOld && (!fallbackOld.currentItemNum || String(fallbackOld.currentItemNum).toLowerCase() === String(meta.itemNum).toLowerCase()) ? fallbackOld : null);
+                       (this._isManualPickCompatible(fallback, meta.itemNum, itemClass, inventoryData) ? fallback : null) ||
+                       (this._isManualPickCompatible(fallbackOld, meta.itemNum, itemClass, inventoryData) ? fallbackOld : null);
         let isManualSelected = false;
 
         if (manual && manual.pickListNum && manual.pickListNum !== '—' && manual.pickListNum !== '-') {
           const matchManual = inventoryData.find(it => {
             const itm = String(it['Item #'] || it['Glove'] || it['Sleeve'] || it['ESL ID'] || '').trim();
             const classMatch = parseClassNum(it['Class']) === meta.itemClass;
-            return itm.toLowerCase() === manual.pickListNum.toLowerCase() && classMatch;
+            return itm.toLowerCase() === manual.pickListNum.toLowerCase() && classMatch && !emittedItemNums.has(itm);
           });
           if (matchManual) {
             pickListValue = manual.pickListNum;
@@ -1146,6 +1168,7 @@ class SwapGenerationEngine {
               pickListStatus = pickListSizeUp ? 'In Stock (Size Up) ⚠️' : (manual.status || 'In Stock ✅');
             }
             assignedItemNums.add(pickListValue);
+            emittedItemNums.add(pickListValue);
           } else {
             // Invalid manual pick or Rubber Class mismatch!
             // Reject and purge to protect life-safety
@@ -1166,6 +1189,8 @@ class SwapGenerationEngine {
         // Tier 1: Existing Picked For match (for items already packed/ready for delivery)
         if (!pickListItemData) {
           const pickedForMatch = inventoryData.find(it => {
+            const itNum = String(it['Item #'] || it['Glove'] || it['Sleeve'] || it['ESL ID'] || '').trim();
+            if (!itNum || emittedItemNums.has(itNum)) return false;
             const pickedFor = String(it['Picked For'] || '').trim().toLowerCase();
             const classMatch = parseClassNum(it['Class']) === meta.itemClass;
             const forEmp = pickedFor.includes(employeeName.toLowerCase()) || (oldAssignedLower && pickedFor.includes(oldAssignedLower));
@@ -1179,6 +1204,7 @@ class SwapGenerationEngine {
             pickListItemData = pickedForMatch;
             isAlreadyPicked = true;
             assignedItemNums.add(pickListValue);
+            emittedItemNums.add(pickListValue);
 
             const pickedSize = isGloves ? parseFloat(pickedForMatch['Size']) : pickedForMatch['Size'];
             if (isGloves && !isNaN(pickedSize) && !isNaN(useSize) && pickedSize > useSize) {
@@ -1208,6 +1234,7 @@ class SwapGenerationEngine {
             pickListStatusRaw = 'on shelf';
             pickListItemData = match;
             assignedItemNums.add(pickListValue);
+            emittedItemNums.add(pickListValue);
           }
         }
 
@@ -1233,6 +1260,7 @@ class SwapGenerationEngine {
             pickListSizeUp = true;
             pickListItemData = match;
             assignedItemNums.add(pickListValue);
+            emittedItemNums.add(pickListValue);
           }
         }
 
@@ -1258,6 +1286,7 @@ class SwapGenerationEngine {
             pickListStatusRaw = String(match['Status'] || '').trim().toLowerCase();
             pickListItemData = match;
             assignedItemNums.add(pickListValue);
+            emittedItemNums.add(pickListValue);
           }
         }
 
@@ -1283,6 +1312,7 @@ class SwapGenerationEngine {
             pickListSizeUp = true;
             pickListItemData = match;
             assignedItemNums.add(pickListValue);
+            emittedItemNums.add(pickListValue);
           }
         }
 
@@ -1353,8 +1383,103 @@ class SwapGenerationEngine {
         });
       });
 
-      // Process "Needs Equipment" candidates for this class (active unassigned personnel)
+      // Process "Needs Equipment" and new staged "Ready For Delivery" assignments for this class
+      if (itemClass === classes[0]) {
+        // Realign unassignedNeedsEquipment targetClass when an unassigned employee already has
+        // staged Ready For Delivery item(s) in a different approved class (e.g., Class 3 or Class 0)
+        unassignedNeedsEquipment.forEach(u => {
+          const packedClasses = new Set();
+          inventoryData.forEach(it => {
+            if (isLostLocate(it)) return;
+            const stLower = String(it['Status'] || '').trim().toLowerCase();
+            const asgLower = String(it['Assigned To'] || '').trim().toLowerCase();
+            const isStaged = stLower === 'ready for delivery' || stLower === 'packed for delivery' ||
+              (asgLower === 'packed for delivery' && !['on shelf', 'available', 'in stock', 'in testing', 'packed for testing', 'ready for test'].includes(stLower));
+            if (!isStaged) return;
+            const res = this._resolveEmployeeFromPickedFor(it['Picked For'], empMap, previousEmployeeNames);
+            if (!res || res.canonicalLower !== u.nameLower) return;
+            const itCls = parseClassNum(it['Class']);
+            if (classes.includes(itCls)) packedClasses.add(itCls);
+          });
+          if (packedClasses.size > 0 && !packedClasses.has(u.targetClass)) {
+            u.targetClass = Array.from(packedClasses)[0];
+          }
+        });
+      }
+
       const classUnassigned = unassignedNeedsEquipment.filter(u => u.targetClass === itemClass);
+
+      // Include any unclaimed Ready For Delivery / Packed For Delivery items for active employees
+      // (including employees who already keep active Class 2 rubber at CL2 & CL3 locations,
+      // or additional New Assignment items across approved classes).
+      inventoryData.forEach(it => {
+        if (parseClassNum(it['Class']) !== itemClass || isLostLocate(it)) return;
+        const itNum = String(it['Item #'] || it['Glove'] || it['Sleeve'] || it['ESL ID'] || '').trim();
+        if (!itNum || emittedItemNums.has(itNum)) return;
+
+        const stLower = String(it['Status'] || '').trim().toLowerCase();
+        const asgLower = String(it['Assigned To'] || '').trim().toLowerCase();
+        const isStaged = stLower === 'ready for delivery' || stLower === 'packed for delivery' ||
+          (asgLower === 'packed for delivery' && !['on shelf', 'available', 'in stock', 'in testing', 'packed for testing', 'ready for test'].includes(stLower));
+        if (!isStaged) return;
+
+        const res = this._resolveEmployeeFromPickedFor(it['Picked For'], empMap, previousEmployeeNames);
+        if (!res) return;
+
+        const existingWithoutForced = classUnassigned.find(cu => cu.nameLower === res.canonicalLower && !cu._forcedPickItemNum);
+        if (existingWithoutForced) {
+          existingWithoutForced._forcedPickItemNum = itNum;
+          return;
+        }
+        const alreadyListedForItem = classUnassigned.some(cu => cu.nameLower === res.canonicalLower && cu._forcedPickItemNum === itNum);
+        if (alreadyListedForItem) return;
+
+        const meta = this._getEmployeeSwapMetadata(res.empRow, isGloves, it['Size'] || '');
+        classUnassigned.push({
+          empName: res.canonicalName,
+          nameLower: res.canonicalLower,
+          targetClass: itemClass,
+          rawSize: meta.rawSize,
+          location: meta.location,
+          foreman: meta.foreman,
+          _forcedPickItemNum: itNum
+        });
+      });
+
+      // Also honor any preserved empty-Current-Item manual/unpicked New Assignment overrides for this class
+      Object.values(manualPicks || {}).forEach(mp => {
+        if (!mp || String(mp.currentItemNum || '').trim() !== '') return;
+        const pNum = String(mp.pickListNum || '').trim();
+        if (!pNum || pNum === '—' || pNum === '-' || emittedItemNums.has(pNum)) return;
+
+        const invMatch = inventoryData.find(it => {
+          const n = String(it['Item #'] || it['Glove'] || it['Sleeve'] || it['ESL ID'] || '').trim();
+          return n === pNum;
+        });
+        if (!invMatch || parseClassNum(invMatch['Class']) !== itemClass || isLostLocate(invMatch)) return;
+
+        const invSt = String(invMatch['Status'] || '').trim().toLowerCase();
+        if (['assigned', 'in service', 'lost', 'destroyed', 'failed rubber', 'not repairable', 'retired', 'out of service'].includes(invSt)) {
+          return;
+        }
+
+        const res = this._resolveEmployeeFromPickedFor(mp.empName, empMap, previousEmployeeNames);
+        if (!res) return;
+
+        const alreadyListed = classUnassigned.some(cu => cu.nameLower === res.canonicalLower && (!cu._forcedPickItemNum || cu._forcedPickItemNum === pNum));
+        if (alreadyListed) return;
+
+        const meta = this._getEmployeeSwapMetadata(res.empRow, isGloves, invMatch['Size'] || '');
+        classUnassigned.push({
+          empName: res.canonicalName,
+          nameLower: res.canonicalLower,
+          targetClass: itemClass,
+          rawSize: meta.rawSize,
+          location: meta.location,
+          foreman: meta.foreman,
+          _forcedPickItemNum: pNum
+        });
+      });
 
       classUnassigned.forEach(u => {
         const employeeName = u.empName;
@@ -1370,13 +1495,20 @@ class SwapGenerationEngine {
         let isAlreadyPicked = false;
         let isManualSelected = false;
 
-        // Check if manual pick override exists
-        const manual = manualPicks[empLower];
+        // Check if manual pick override exists for New Assignment (empty Current Item)
+        const manualComposite = manualPicks[`${empLower}|`];
+        const manualSimple = manualPicks[empLower];
+        const isAllowedManual = (cand) => {
+          if (!this._isManualPickCompatible(cand, '', itemClass, inventoryData)) return false;
+          if (u._forcedPickItemNum && String(cand.pickListNum || '').trim() !== u._forcedPickItemNum) return false;
+          return true;
+        };
+        const manual = isAllowedManual(manualComposite) ? manualComposite : (isAllowedManual(manualSimple) ? manualSimple : null);
         if (manual && manual.pickListNum && manual.pickListNum !== '—' && manual.pickListNum !== '-') {
           const matchManual = inventoryData.find(it => {
             const itm = String(it['Item #'] || it['Glove'] || it['Sleeve'] || it['ESL ID'] || '').trim();
             const classMatch = parseClassNum(it['Class']) === itemClass;
-            return itm.toLowerCase() === manual.pickListNum.toLowerCase() && classMatch;
+            return itm.toLowerCase() === manual.pickListNum.toLowerCase() && classMatch && !emittedItemNums.has(itm);
           });
           if (matchManual) {
             pickListValue = manual.pickListNum;
@@ -1398,6 +1530,7 @@ class SwapGenerationEngine {
               pickListStatus = manual.status || 'Needs Equipment';
             }
             assignedItemNums.add(pickListValue);
+            emittedItemNums.add(pickListValue);
           }
         }
 
@@ -1408,12 +1541,23 @@ class SwapGenerationEngine {
         } else if (!pickListItemData) {
           const useSize = isGloves ? parseFloat(rawSizeClean) : rawSizeClean;
 
-          // Tier 1: Existing Picked For match
-          const pickedForMatch = inventoryData.find(it => {
-            const pf = String(it['Picked For'] || '').trim().toLowerCase();
-            const classMatch = parseClassNum(it['Class']) === itemClass;
-            return classMatch && pf.includes(empLower) && !isLostLocate(it);
-          });
+          // Tier 1: Forced item match (multi-item / staged delivery) or Existing Picked For match
+          let pickedForMatch = null;
+          if (u._forcedPickItemNum) {
+            pickedForMatch = inventoryData.find(it => {
+              const itNum = String(it['Item #'] || it['Glove'] || it['Sleeve'] || it['ESL ID'] || '').trim();
+              return itNum === u._forcedPickItemNum && parseClassNum(it['Class']) === itemClass && !emittedItemNums.has(itNum) && !isLostLocate(it);
+            });
+          }
+          if (!pickedForMatch) {
+            pickedForMatch = inventoryData.find(it => {
+              const itNum = String(it['Item #'] || it['Glove'] || it['Sleeve'] || it['ESL ID'] || '').trim();
+              if (!itNum || emittedItemNums.has(itNum) || isLostLocate(it)) return false;
+              const pf = String(it['Picked For'] || '').trim().toLowerCase();
+              const classMatch = parseClassNum(it['Class']) === itemClass;
+              return classMatch && pf.includes(empLower);
+            });
+          }
 
           if (pickedForMatch) {
             pickListValue = String(pickedForMatch['Item #'] || pickedForMatch['Glove'] || pickedForMatch['Sleeve'] || pickedForMatch['ESL ID'] || '').trim();
@@ -1421,6 +1565,7 @@ class SwapGenerationEngine {
             pickListItemData = pickedForMatch;
             isAlreadyPicked = true;
             assignedItemNums.add(pickListValue);
+            emittedItemNums.add(pickListValue);
           }
 
           // Tier 2: Exact Size On Shelf
@@ -1443,6 +1588,7 @@ class SwapGenerationEngine {
               pickListStatusRaw = 'on shelf';
               pickListItemData = match;
               assignedItemNums.add(pickListValue);
+              emittedItemNums.add(pickListValue);
             }
           }
 
@@ -1467,6 +1613,7 @@ class SwapGenerationEngine {
               pickListSizeUp = true;
               pickListItemData = match;
               assignedItemNums.add(pickListValue);
+              emittedItemNums.add(pickListValue);
             }
           }
 
@@ -1663,6 +1810,415 @@ class SwapGenerationEngine {
   }
 
   /**
+   * Resolves canonical employee size, physical location, and foreman using Job Tracking.
+   */
+  _getEmployeeSwapMetadata(empRow, isGloves, fallbackSize = '') {
+    const rawSize = empRow
+      ? String(empRow[isGloves ? 'Glove Size' : 'Sleeve Size'] || fallbackSize || '').trim()
+      : String(fallbackSize || '').trim();
+
+    let location = empRow ? String(empRow['Location'] || 'Helena').trim() : 'Helena';
+    if (!location || location.toLowerCase() === 'light duty') location = 'Helena';
+    location = location.replace(/\s*\([^)]*\)\s*/g, '').trim() || 'Helena';
+
+    const jobTable = this.db ? this.db.getTable('job_tracking') : null;
+    const jobRows = (jobTable && Array.isArray(jobTable.rows)) ? jobTable.rows : [];
+    const jobLeadMap = {};
+    jobRows.forEach(j => {
+      const jNum = String(j['Job Number'] || j['Job #'] || '').trim();
+      const lead = String(j['Crew Lead'] || j['Foreman'] || '').trim();
+      if (jNum && lead) jobLeadMap[this.extractCrewNum(jNum)] = lead;
+    });
+
+    let foreman = 'General Crew';
+    if (empRow) {
+      const empJob = String(empRow['Job Number'] || empRow['Job #'] || '').trim();
+      const crewId = this.extractCrewNum(empJob);
+      const explicitLead = String(empRow['Foreman'] || empRow['Crew Lead'] || '').trim();
+      if (crewId && jobLeadMap[crewId]) {
+        foreman = jobLeadMap[crewId];
+      } else if (explicitLead) {
+        foreman = explicitLead;
+      }
+    }
+
+    return { rawSize, location, foreman };
+  }
+
+  /**
+   * Resolves an active employee record from an inventory item's "Picked For" field
+   * (e.g. "Dillion Hofmann Picked On 2026-11-13").
+   */
+  _resolveEmployeeFromPickedFor(pickedForRaw, empMap, previousEmployeeNames = null) {
+    const raw = String(pickedForRaw || '').trim();
+    if (!raw) return null;
+    const rawLower = raw.toLowerCase();
+    if (rawLower.includes('reclaim') || rawLower === 'packed for testing' || rawLower === 'ready for test') {
+      return null;
+    }
+
+    const stripped = raw
+      .replace(/\s+picked\s+on\s+.*$/i, '')
+      .replace(/\s*\([^)]*\)\s*$/, '')
+      .trim();
+    if (!stripped) return null;
+
+    const ignoreList = [
+      'on shelf', 'available', 'in stock', 'in testing', 'packed for testing',
+      'ready for test', 'packed for delivery', 'ready for delivery',
+      'previous employee', 'lost', 'destroyed', 'failed rubber', 'not repairable',
+      'retired', 'out of service', 'unassigned', 'n/a', '—', '-'
+    ];
+    const cleanLower = stripped.toLowerCase();
+    if (ignoreList.includes(cleanLower)) return null;
+
+    let empKey = null;
+    let empRow = empMap[cleanLower] || null;
+
+    if (!empRow && typeof window !== 'undefined' && window.employeeResolver && typeof window.employeeResolver.resolve === 'function') {
+      const res = window.employeeResolver.resolve(stripped);
+      if (res && res.employeeName && empMap[res.employeeName.toLowerCase()]) {
+        empKey = res.employeeName.toLowerCase();
+        empRow = empMap[empKey];
+      }
+    }
+
+    if (!empRow) {
+      for (const k of Object.keys(empMap)) {
+        if (cleanLower === k || rawLower.startsWith(k + ' ')) {
+          empKey = k;
+          empRow = empMap[k];
+          break;
+        }
+      }
+    }
+
+    if (!empRow) return null;
+
+    const canonicalName = String(empRow['Name'] || empRow['Employee Name'] || Object.values(empRow)[0] || stripped).trim();
+    const canonicalLower = canonicalName.toLowerCase();
+    if (previousEmployeeNames && previousEmployeeNames.has(canonicalLower)) {
+      return null;
+    }
+
+    return {
+      empKey: empKey || canonicalLower,
+      canonicalName,
+      canonicalLower,
+      empRow
+    };
+  }
+
+  /**
+   * Checks whether a manual/preserved pick override applies cleanly to a specific item class
+   * and current-item state (preventing Class 2 vs Class 3 cross-contamination).
+   */
+  _isManualPickCompatible(manualEntry, targetCurrentItemNum, targetItemClass, inventoryData) {
+    if (!manualEntry) return false;
+    const entryCur = String(manualEntry.currentItemNum || '').trim().toLowerCase();
+    const targetCur = String(targetCurrentItemNum || '').trim().toLowerCase();
+    if (entryCur !== targetCur) return false;
+
+    const pickNum = String(manualEntry.pickListNum || '').trim().toLowerCase();
+    if (!pickNum || pickNum === '—' || pickNum === '-') return true;
+
+    if (Array.isArray(inventoryData) && targetItemClass !== undefined && targetItemClass !== null) {
+      const invItem = inventoryData.find(it => {
+        const itNum = String(it['Item #'] || it['Glove'] || it['Sleeve'] || it['ESL ID'] || '').trim().toLowerCase();
+        return itNum === pickNum;
+      });
+      if (invItem) {
+        const invClassStr = String(invItem['Class'] || invItem['Rubber Class'] || '').trim();
+        if (invClassStr) {
+          const m = invClassStr.match(/\d+/);
+          const invClass = m ? parseInt(m[0], 10) : 0;
+          if (invClass !== parseInt(targetItemClass, 10)) return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Inserts or updates a New Assignment swap row (blank Current Item #) in glove_swaps or sleeve_swaps
+   * when an item is staged Ready For Delivery (e.g. from Receive Order) for an active employee
+   * who keeps their existing rubber in another approved class or is receiving a first assignment.
+   */
+  async upsertNewAssignmentSwapRow(swapKey, { empName, itemNum, itemClass = null, size = '', invItemData = null } = {}) {
+    if (!this.db || !empName || !itemNum) return false;
+    if (swapKey !== 'glove_swaps' && swapKey !== 'sleeve_swaps') return false;
+
+    const isGloves = swapKey === 'glove_swaps';
+    const invKey = isGloves ? 'gloves' : 'sleeves';
+    const itemLabel = isGloves ? 'Glove' : 'Sleeve';
+
+    let swapTable = this.db.getTable(swapKey);
+    if (!swapTable || !Array.isArray(swapTable.rawGrid) || swapTable.rawGrid.length === 0) {
+      await this.generateSwaps(isGloves ? 'Gloves' : 'Sleeves');
+      return true;
+    }
+
+    const invTable = this.db.getTable(invKey);
+    const invRows = (invTable && Array.isArray(invTable.rows)) ? invTable.rows : [];
+    const empTable = this.db.getTable('employees');
+    const empRows = (empTable && Array.isArray(empTable.rows)) ? empTable.rows : [];
+    const jobTable = this.db.getTable('job_tracking');
+    const jobRows = (jobTable && Array.isArray(jobTable.rows)) ? jobTable.rows : [];
+
+    const resolveInvItem = (num) => {
+      const clean = String(num || '').trim().toLowerCase();
+      if (!clean) return null;
+      return invRows.find(it => {
+        const n = String(it['Item #'] || it['Glove'] || it['Sleeve'] || it['ESL ID'] || '').trim().toLowerCase();
+        return n === clean;
+      }) || null;
+    };
+
+    const parseCls = (c) => {
+      if (c === undefined || c === null || c === '') return null;
+      const m = String(c).match(/\d+/);
+      return m ? parseInt(m[0], 10) : null;
+    };
+
+    const matchedInv = invItemData || resolveInvItem(itemNum);
+    const parsedTargetClass = parseCls(itemClass !== null && itemClass !== undefined && itemClass !== '' ? itemClass : (matchedInv ? (matchedInv['Class'] || matchedInv['Rubber Class']) : ''));
+
+    // Find canonical employee info for size, location, foreman grouping
+    const empTargetLower = String(empName).trim().toLowerCase();
+    const empRow = empRows.find(e => {
+      const n = String(e['Name'] || e['Employee Name'] || Object.values(e)[0] || '').trim().toLowerCase();
+      if (n === empTargetLower) return true;
+      return (typeof window !== 'undefined' && window.employeeResolver && typeof window.employeeResolver.areSameEmployee === 'function' && window.employeeResolver.areSameEmployee(n, empTargetLower));
+    }) || null;
+
+    const canonicalName = empRow
+      ? String(empRow['Name'] || empRow['Employee Name'] || Object.values(empRow)[0] || empName).trim()
+      : String(empName).trim();
+
+    let empLocation = empRow ? String(empRow['Location'] || 'Helena').trim() : 'Helena';
+    if (!empLocation || empLocation.toLowerCase() === 'light duty') empLocation = 'Helena';
+    empLocation = empLocation.replace(/\s*\([^)]*\)\s*/g, '').trim() || 'Helena';
+
+    // Determine foreman using Job Tracking or Crew Lead Hierarchy
+    const jobLeadMap = {};
+    jobRows.forEach(j => {
+      const jNum = String(j['Job Number'] || j['Job #'] || '').trim();
+      const lead = String(j['Crew Lead'] || j['Foreman'] || '').trim();
+      if (jNum && lead) jobLeadMap[this.extractCrewNum(jNum)] = lead;
+    });
+
+    let foreman = 'General Crew';
+    if (empRow) {
+      const empJob = String(empRow['Job Number'] || empRow['Job #'] || '').trim();
+      const crewId = this.extractCrewNum(empJob);
+      const explicitLead = String(empRow['Foreman'] || empRow['Crew Lead'] || '').trim();
+      if (crewId && jobLeadMap[crewId]) {
+        foreman = jobLeadMap[crewId];
+      } else if (explicitLead) {
+        foreman = explicitLead;
+      }
+    }
+
+    // Check preferred size and Size-Up flag
+    const prefSizeRaw = empRow ? String(empRow[isGloves ? 'Glove Size' : 'Sleeve Size'] || '').trim() : '';
+    const displaySize = (prefSizeRaw && prefSizeRaw !== '—' && prefSizeRaw !== '-') ? prefSizeRaw : (size || (matchedInv && matchedInv['Size']) || '');
+    let isSizeUp = false;
+    if (isGloves && prefSizeRaw && matchedInv && matchedInv['Size']) {
+      const pNum = parseFloat(prefSizeRaw);
+      const iNum = parseFloat(matchedInv['Size']);
+      if (!isNaN(pNum) && !isNaN(iNum) && iNum > pNum) {
+        isSizeUp = true;
+      }
+    }
+    const pickStatus = isSizeUp ? 'Ready For Delivery (Size Up) ⚠️' : 'Ready For Delivery 🚚';
+
+    if (typeof this.db.saveManualPick === 'function') {
+      this.db.saveManualPick(swapKey, canonicalName, '', itemNum, pickStatus, true);
+    }
+
+    // Check if swapTable already contains a matching-class or exact Pick List Item row for this employee
+    const grid = swapTable.rawGrid;
+    const rows = swapTable.rows || [];
+    const targetItemClean = String(itemNum).trim().toLowerCase();
+
+    let targetRow = rows.find(r => {
+      const rPick = String(r['Pick List Item #'] || r[`Pick List ${itemLabel} #`] || '').trim().toLowerCase();
+      return rPick && rPick === targetItemClean;
+    });
+
+    if (!targetRow) {
+      targetRow = rows.find(r => {
+        const rEmp = String(r['Employee'] || r['Crew Lead / Employee'] || '').trim().toLowerCase();
+        const empMatch = rEmp === canonicalName.toLowerCase() || rEmp === empTargetLower ||
+          (typeof window !== 'undefined' && window.employeeResolver && typeof window.employeeResolver.areSameEmployee === 'function' && window.employeeResolver.areSameEmployee(rEmp, canonicalName));
+        if (!empMatch) return false;
+        const rChanged = String(r['Date Changed'] || '').trim();
+        if (rChanged) return false;
+        const rStatLower = String(r['Status'] || '').toLowerCase();
+        if (rStatLower.includes('return') || rStatLower.includes('reclaim') || rStatLower.includes('locate')) return false;
+
+        // Verify class compatibility so we NEVER overwrite a Class 2 swap row with a Class 3 order item!
+        const rCur = String(r[`Current ${itemLabel} #`] || r['Current Item #'] || '').trim();
+        const rCurInv = rCur ? resolveInvItem(rCur) : null;
+        const rClass = rCurInv ? parseCls(rCurInv['Class']) : parseCls(r['Class']);
+        if (parsedTargetClass !== null && rClass !== null && rClass !== parsedTargetClass) {
+          return false;
+        }
+        return !rCur || rCur === '—' || rCur === '-' || rStatLower.includes('ordered') || rStatLower.includes('purchase');
+      });
+    }
+
+    const stage2PickedFor = (matchedInv && matchedInv['Picked For']) ? String(matchedInv['Picked For']) : `${canonicalName} Picked On ${new Date().toISOString().split('T')[0]}`;
+    const stage2DateAssigned = matchedInv ? this.formatDate(matchedInv['Date Assigned']) : '';
+
+    if (targetRow && targetRow._rowIdx && grid[targetRow._rowIdx - 1]) {
+      const gr = grid[targetRow._rowIdx - 1];
+      while (gr.length < 23) gr.push('');
+      gr[6] = itemNum;
+      gr[7] = pickStatus;
+      gr[8] = true;
+      gr[10] = 'On Shelf';
+      gr[11] = 'On Shelf';
+      gr[16] = (matchedInv && matchedInv['Status']) || 'Ready For Delivery';
+      gr[17] = (matchedInv && matchedInv['Assigned To']) || 'Packed For Delivery';
+      gr[18] = stage2DateAssigned;
+      gr[19] = stage2PickedFor;
+      targetRow['Pick List Item #'] = itemNum;
+      targetRow['Status'] = pickStatus;
+      targetRow['Picked'] = true;
+    } else {
+      const newGridRow = [
+        canonicalName,
+        '',
+        displaySize,
+        '',
+        '',
+        '',
+        itemNum,
+        pickStatus,
+        true,
+        '',
+        'On Shelf', 'On Shelf', '',
+        '', '', '',
+        (matchedInv && matchedInv['Status']) || 'Ready For Delivery',
+        (matchedInv && matchedInv['Assigned To']) || 'Packed For Delivery',
+        stage2DateAssigned,
+        stage2PickedFor,
+        '', '', ''
+      ];
+
+      // Locate appropriate Class -> Location -> Foreman section inside rawGrid to insert cleanly
+      const classLabel = parsedTargetClass !== null ? `CLASS ${parsedTargetClass} ${isGloves ? 'GLOVE' : 'SLEEVE'} SWAPS` : null;
+      let insertIdx = grid.length;
+      const empLocLower = empLocation.toLowerCase();
+      const foremanLower = foreman.toLowerCase();
+
+      if (classLabel) {
+        let classStart = -1;
+        let classEnd = grid.length;
+        for (let i = 0; i < grid.length; i++) {
+          const c0 = String(grid[i]?.[0] || '').trim();
+          const c0Upper = c0.toUpperCase();
+          if (classStart === -1) {
+            if (c0Upper.startsWith(`CLASS ${parsedTargetClass} `)) {
+              classStart = i;
+            }
+          } else if (/^CLASS \d+ /i.test(c0) || c0Upper.includes('PREVIOUS EMPLOYEE') || c0Upper.includes('RETEST') || c0Upper.includes('RECLAIM')) {
+            classEnd = i;
+            break;
+          }
+        }
+
+        if (classStart !== -1) {
+          // Search within classStart..classEnd for matching Location and Foreman
+          let locStart = -1;
+          let locEnd = classEnd;
+          let foremanInsert = -1;
+          for (let i = classStart + 1; i < classEnd; i++) {
+            const c0 = String(grid[i]?.[0] || '').trim();
+            const c0Clean = c0.replace(/^[📍🔍👷👤\s]+/u, '').replace(/^foreman:\s*/i, '').trim().toLowerCase();
+            if (c0.startsWith('📍') || c0.startsWith('🔍')) {
+              if (locStart !== -1) {
+                locEnd = i;
+                break;
+              }
+              if (c0Clean === empLocLower) {
+                locStart = i;
+              }
+            } else if (locStart !== -1 && (c0.includes('👤') || c0.includes('👷') || c0.toLowerCase().startsWith('foreman:'))) {
+              if (foremanInsert !== -1) {
+                break; // end of matched foreman block
+              }
+              if (c0Clean === foremanLower) {
+                foremanInsert = i + 1;
+              }
+            } else if (foremanInsert !== -1 && c0) {
+              foremanInsert = i + 1;
+            }
+          }
+
+          const emptyFiller = new Array(23).fill('');
+          if (foremanInsert !== -1) {
+            insertIdx = foremanInsert;
+            grid.splice(insertIdx, 0, newGridRow);
+          } else if (locStart !== -1) {
+            insertIdx = locEnd;
+            grid.splice(insertIdx, 0,
+              [ `👤 ${foreman}`, ...emptyFiller.slice(1) ],
+              newGridRow
+            );
+          } else {
+            insertIdx = classEnd;
+            grid.splice(insertIdx, 0,
+              [ `📍 ${empLocation}`, ...emptyFiller.slice(1) ],
+              [ `👤 ${foreman}`, ...emptyFiller.slice(1) ],
+              newGridRow
+            );
+          }
+        } else {
+          // Class banner doesn't exist yet in rawGrid — insert before Previous Employee / Retest / end
+          let beforeBannerIdx = grid.length;
+          for (let i = 0; i < grid.length; i++) {
+            const c0Upper = String(grid[i]?.[0] || '').trim().toUpperCase();
+            if (c0Upper.includes('PREVIOUS EMPLOYEE') || c0Upper.includes('ON SHELF') || c0Upper.includes('RETEST') || c0Upper.includes('RECLAIM')) {
+              beforeBannerIdx = i;
+              break;
+            }
+          }
+          const emptyFiller = new Array(23).fill('');
+          const allHeaders = swapTable.headers && swapTable.headers.length >= 10
+            ? swapTable.headers
+            : [
+                'Employee', `Current ${itemLabel} #`, 'Size', 'Date Assigned', 'Change Out Date',
+                'Days Left', 'Pick List Item #', 'Status', 'Picked', 'Date Changed',
+                'Stage 1 Pick Status', 'Stage 1 Pick Assigned', 'Stage 1 Pick Date',
+                'Stage 1 Old Status', 'Stage 1 Old Assigned', 'Stage 1 Old Date',
+                'Stage 2 Status', 'Stage 2 Assigned', 'Stage 2 Date', 'Stage 2 Picked For',
+                'Stage 3 Assigned', 'Stage 3 Date', 'Stage 3 Change Out Date'
+              ];
+          grid.splice(beforeBannerIdx, 0,
+            [ classLabel, ...emptyFiller.slice(1) ],
+            [ 'STAGE 1', '', '', '', '', '', '', '', '', '', 'Pick List Before', '', '', 'Old Assignment', '', '', 'STAGE 2', '', '', '', 'STAGE 3', '', '' ],
+            allHeaders,
+            [ `📍 ${empLocation}`, ...emptyFiller.slice(1) ],
+            [ `👤 ${foreman}`, ...emptyFiller.slice(1) ],
+            newGridRow
+          );
+        }
+      } else {
+        grid.push(newGridRow);
+      }
+    }
+
+    if (typeof this.db.reconstructSwapRowsFromRawGrid === 'function') {
+      this.db.reconstructSwapRowsFromRawGrid(swapTable, swapKey);
+    }
+    const headers = swapTable.headers && swapTable.headers.length > 0 ? swapTable.headers : [];
+    await this.db.replaceSwapTable(swapKey, grid, headers, swapTable.rows || []);
+    return true;
+  }
+
+  /**
    * Generates Blanket Swaps (Class 2 & Class 4, 1-year test interval)
    */
   async generateBlanketSwaps() {
@@ -1731,7 +2287,7 @@ class SwapGenerationEngine {
     blanketsNeedingSwap.forEach(b => {
       const manualPickKey = `${b.assignedTo.toLowerCase()}|${b.itemNum.toLowerCase()}`;
       const fallbackEntry = manualPicks[b.assignedTo.toLowerCase()];
-      const manualEntry = manualPicks[manualPickKey] || (fallbackEntry && (!fallbackEntry.currentItemNum || String(fallbackEntry.currentItemNum).toLowerCase() === b.itemNum.toLowerCase()) ? fallbackEntry : null);
+      const manualEntry = manualPicks[manualPickKey] || (fallbackEntry && String(fallbackEntry.currentItemNum || '').trim().toLowerCase() === b.itemNum.toLowerCase() ? fallbackEntry : null);
       let pickNum = '—';
       let pickStatus = 'Need to Purchase ❌';
       let isManualSelected = false;
@@ -2494,13 +3050,21 @@ class SwapGenerationEngine {
       return;
     }
 
-    const keyProp = table.headers[0];
-    const keyVal = String(rowObj[keyProp] || Object.values(rowObj)[0] || '').trim();
-    if (!keyVal) return;
+    const targetEmp = String(rowObj['Employee'] || rowObj['Crew Lead / Employee'] || Object.values(rowObj)[0] || '').trim();
+    const targetCur = String(rowObj['Current Glove #'] || rowObj['Current Sleeve #'] || rowObj['Current Blanket #'] || rowObj['Current MACK #'] || rowObj['Current Item #'] || rowObj['Serial #'] || '').trim();
+    const targetPick = String(rowObj['Pick List Item #'] || rowObj['Pick List Glove #'] || rowObj['Pick List Sleeve #'] || rowObj['Pick List Blanket #'] || rowObj['Pick List MACK #'] || '').trim();
+    if (!targetEmp && !targetCur) return;
 
     for (let i = 1; i < table.rawGrid.length; i++) {
       const gRow = table.rawGrid[i];
-      if (String(gRow[0] || '').trim() === keyVal || String(gRow[1] || '').trim() === keyVal) {
+      const gEmp = String(gRow[0] || '').trim();
+      const gCur = String(gRow[1] || '').trim();
+      const gPick = String(gRow[6] || gRow[8] || '').trim();
+      const matchesEmpAndItem = targetEmp && gEmp === targetEmp && (
+        (targetCur && gCur === targetCur) ||
+        (!targetCur && !gCur && (!targetPick || gPick === targetPick))
+      );
+      if (matchesEmpAndItem || (targetCur && gCur === targetCur && !targetEmp)) {
         table.headers.forEach((h, colIdx) => {
           if (rowObj[h] !== undefined) {
             gRow[colIdx] = rowObj[h];
@@ -2509,6 +3073,38 @@ class SwapGenerationEngine {
         break;
       }
     }
+  }
+
+  /**
+   * Resolves both table.rows object and table.rawGrid array by 0-based grid index without cross-row collisions.
+   */
+  _resolveSwapRowByGridIndex(swapTable, idx) {
+    let gridRow = null;
+    let row = null;
+    if (swapTable && swapTable.rawGrid && swapTable.rawGrid[idx]) {
+      gridRow = swapTable.rawGrid[idx];
+      const empNameInGrid = String(gridRow[0] || '').trim().toLowerCase();
+      const curItemInGrid = String(gridRow[1] || '').trim().toLowerCase();
+      const pickInGrid = String(gridRow[6] || gridRow[8] || '').trim().toLowerCase();
+      if (swapTable.rows) {
+        row = swapTable.rows.find(r => r._rowIdx === idx + 1) ||
+          swapTable.rows.find(r => {
+            const rEmp = String(r['Employee'] || r['Crew Lead / Employee'] || '').trim().toLowerCase();
+            if (rEmp !== empNameInGrid) return false;
+            const rCur = String(r['Current Glove #'] || r['Current Sleeve #'] || r['Current Blanket #'] || r['Current MACK #'] || r['Current Item #'] || r['Serial #'] || '').trim().toLowerCase();
+            const rPick = String(r['Pick List Item #'] || r['Pick List Glove #'] || r['Pick List Sleeve #'] || r['Pick List Blanket #'] || r['Pick List MACK #'] || r['Pick List'] || '').trim().toLowerCase();
+            if (curItemInGrid) return rCur === curItemInGrid;
+            return (!rCur || rCur === '—' || rCur === '-') && (!pickInGrid || rPick === pickInGrid);
+          }) ||
+          swapTable.rows.find(r =>
+            String(r['Employee'] || r['Crew Lead / Employee'] || '').trim().toLowerCase() === empNameInGrid
+          );
+      }
+    }
+    if (!row && swapTable && swapTable.rows && swapTable.rows[idx]) {
+      row = swapTable.rows[idx];
+    }
+    return { row, gridRow };
   }
 
   /**
@@ -2522,19 +3118,7 @@ class SwapGenerationEngine {
     let gridRow = null;
 
     if (typeof rowIdxOrObj === 'number') {
-      const idx = rowIdxOrObj;
-      if (swapTable.rawGrid && swapTable.rawGrid[idx]) {
-        gridRow = swapTable.rawGrid[idx];
-        const empNameInGrid = String(gridRow[0] || '').trim();
-        if (swapTable.rows) {
-          row = swapTable.rows.find(r => 
-            String(r['Employee'] || r['Crew Lead / Employee'] || '').trim().toLowerCase() === empNameInGrid.toLowerCase()
-          );
-        }
-      }
-      if (!row && swapTable.rows && swapTable.rows[idx]) {
-        row = swapTable.rows[idx];
-      }
+      ({ row, gridRow } = this._resolveSwapRowByGridIndex(swapTable, rowIdxOrObj));
     } else if (typeof rowIdxOrObj === 'object') {
       row = rowIdxOrObj;
     }
@@ -2755,19 +3339,7 @@ class SwapGenerationEngine {
     let gridRow = null;
 
     if (typeof rowIdxOrObj === 'number') {
-      const idx = rowIdxOrObj;
-      if (swapTable.rawGrid && swapTable.rawGrid[idx]) {
-        gridRow = swapTable.rawGrid[idx];
-        const empNameInGrid = String(gridRow[0] || '').trim();
-        if (swapTable.rows) {
-          row = swapTable.rows.find(r => 
-            String(r['Employee'] || r['Crew Lead / Employee'] || '').trim().toLowerCase() === empNameInGrid.toLowerCase()
-          );
-        }
-      }
-      if (!row && swapTable.rows && swapTable.rows[idx]) {
-        row = swapTable.rows[idx];
-      }
+      ({ row, gridRow } = this._resolveSwapRowByGridIndex(swapTable, rowIdxOrObj));
     } else if (typeof rowIdxOrObj === 'object') {
       row = rowIdxOrObj;
     }
@@ -2781,9 +3353,12 @@ class SwapGenerationEngine {
           const emp = String(r['Employee'] || r['Crew Lead / Employee'] || '').trim().toLowerCase();
           const matchEmp = emp === targetEmpClean || (window.employeeResolver && typeof window.employeeResolver.areSameEmployee === 'function' && window.employeeResolver.areSameEmployee(emp, targetEmpClean));
           if (!matchEmp) return false;
-          if (!targetItmClean) return true;
           const itm = String(r['Current Glove #'] || r['Current Sleeve #'] || r['Current Blanket #'] || r['Current Item #'] || r['Serial #'] || '').trim().toLowerCase();
+          if (!targetItmClean) return !itm || itm === '—' || itm === '-';
           return itm === targetItmClean;
+        }) || swapTable.rows.find(r => {
+          const emp = String(r['Employee'] || r['Crew Lead / Employee'] || '').trim().toLowerCase();
+          return emp === targetEmpClean || (window.employeeResolver && typeof window.employeeResolver.areSameEmployee === 'function' && window.employeeResolver.areSameEmployee(emp, targetEmpClean));
         });
       }
       if (!gridRow && swapTable.rawGrid) {
@@ -2792,9 +3367,13 @@ class SwapGenerationEngine {
           const emp = String(gr[0] || '').trim().toLowerCase();
           const matchEmp = emp === targetEmpClean || (window.employeeResolver && typeof window.employeeResolver.areSameEmployee === 'function' && window.employeeResolver.areSameEmployee(emp, targetEmpClean));
           if (!matchEmp) return false;
-          if (!targetItmClean) return true;
           const itm = String(gr[1] || '').trim().toLowerCase();
+          if (!targetItmClean) return !itm || itm === '—' || itm === '-';
           return itm === targetItmClean;
+        }) || swapTable.rawGrid.find((gr, gIdx) => {
+          if (gIdx === 0 || !Array.isArray(gr)) return false;
+          const emp = String(gr[0] || '').trim().toLowerCase();
+          return emp === targetEmpClean || (window.employeeResolver && typeof window.employeeResolver.areSameEmployee === 'function' && window.employeeResolver.areSameEmployee(emp, targetEmpClean));
         });
       }
     }

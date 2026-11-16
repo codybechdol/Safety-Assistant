@@ -177,14 +177,35 @@ class LocationApprovalsEngine {
   async updateApproval(locationName, newApproval) {
     if (!locationName || !newApproval) return;
     const locTable = (this.db && typeof this.db.getTable === 'function' ? this.db.getTable('locations') : null) || this.db?.snapshot?.tables?.['locations'];
-    if (!locTable || !locTable.rows) return;
 
-    const matches = locTable.rows.filter(r => {
-      const n = String(r['Location'] || Object.values(r)[0] || '').trim().toLowerCase();
-      return n === locationName.toLowerCase();
-    });
+    const targetLower = locationName.trim().toLowerCase();
+    const matches = (locTable && Array.isArray(locTable.rows))
+      ? locTable.rows.filter(r => {
+          const n = String(r['Location'] || r['City'] || Object.values(r)[0] || '').trim().toLowerCase();
+          return n === targetLower;
+        })
+      : [];
 
     if (!matches || matches.length === 0) {
+      if (this.db && typeof this.db.ensureLocationRow === 'function') {
+        const ensured = await this.db.ensureLocationRow(locationName, { 'Rubber Class Approval': newApproval });
+        if (ensured && ensured.row) {
+          this.render();
+          if (window.sheetNavigator && window.sheetNavigator.currentSheetKey === 'locations') {
+            window.sheetNavigator.renderCurrentSheet();
+          }
+          if (window.procurementEngine && typeof window.procurementEngine.buildPurchaseNeeds === 'function') {
+            window.procurementEngine.buildPurchaseNeeds();
+            if (document.getElementById('procurement-view')?.classList.contains('active') && typeof window.procurementEngine.render === 'function') {
+              window.procurementEngine.render();
+            }
+          }
+          if (window.showToast) {
+            window.showToast(`Updated ${locationName} to ${newApproval}`, 'success');
+          }
+          return;
+        }
+      }
       console.warn(`[LocationApprovals] Location not found: ${locationName}`);
       return;
     }

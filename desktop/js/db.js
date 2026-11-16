@@ -2362,10 +2362,24 @@ class LocalDatabase {
       let isPicked = (pVal === 'TRUE' || pVal === '1' || gr[pickedCol] === true || stat.toLowerCase().includes('ready for delivery'));
       const dateChanged = String(gr[dateChangedCol] || '').trim();
 
-      // Check manual picks overlay
+      // Check manual picks overlay (prevent cross-class / empty-currentItem bleed across rows)
       const compKey = `${c0.toLowerCase()}|${curItem.toLowerCase()}`;
       const simpKey = c0.toLowerCase();
-      const mpEntry = manualPicks[compKey] || (manualPicks[simpKey] && (!manualPicks[simpKey].currentItemNum || manualPicks[simpKey].currentItemNum.toLowerCase() === curItem.toLowerCase()) ? manualPicks[simpKey] : null);
+      const rawFallback = manualPicks[simpKey];
+      const fallbackMatch = rawFallback && String(rawFallback.currentItemNum || '').trim().toLowerCase() === curItem.toLowerCase() ? rawFallback : null;
+      let mpEntry = manualPicks[compKey] || fallbackMatch;
+      if (mpEntry && invTable && invTable.rows && mpEntry.pickListNum && pickItem && pickItem !== '—' && pickItem !== '-') {
+        const findClass = (num) => {
+          const it = invTable.rows.find(x => String(x['Item #'] || x['Glove'] || x['Sleeve'] || x['Blanket'] || x['MACK'] || x['Serial #'] || x['ESL ID'] || '').trim() === String(num).trim());
+          const m = it ? String(it['Class'] || it['Rubber Class'] || '').match(/\d+/) : null;
+          return m ? m[0] : '';
+        };
+        const rowPickClass = findClass(pickItem);
+        const mpPickClass = findClass(mpEntry.pickListNum);
+        if (rowPickClass && mpPickClass && rowPickClass !== mpPickClass) {
+          mpEntry = null;
+        }
+      }
       if (mpEntry) {
         if (mpEntry.pickListNum && mpEntry.pickListNum !== '—' && mpEntry.pickListNum !== '-') {
           pickItem = mpEntry.pickListNum;
@@ -2379,11 +2393,12 @@ class LocalDatabase {
       }
 
       let rowClass = curClass;
-      if (invTable && invTable.rows && curItem) {
-        const invMatch = invTable.rows.find(it => {
+      if (invTable && invTable.rows) {
+        const lookupNum = curItem || (pickItem && pickItem !== '—' && pickItem !== '-' ? pickItem : '');
+        const invMatch = lookupNum ? invTable.rows.find(it => {
           const num = String(it['Item #'] || it['Glove'] || it['Sleeve'] || it['Blanket'] || it['MACK'] || it['Serial #'] || it['ESL ID'] || Object.values(it)[0] || '').trim();
-          return num === curItem;
-        });
+          return num === lookupNum;
+        }) : null;
         if (invMatch) {
           const realClass = String(invMatch['Class'] || invMatch['Rubber Class'] || invMatch['KV'] || '').trim();
           if (realClass) {
@@ -2465,6 +2480,7 @@ class LocalDatabase {
       'employees': 'employees',
       'job tracking': 'job_tracking',
       'job_tracking': 'job_tracking',
+      'locations': 'locations',
       'safety compliance': 'safety_compliance',
       'safety_compliance': 'safety_compliance',
       'jha log': 'jha_log',
@@ -2584,7 +2600,8 @@ class LocalDatabase {
         grounds: 'Grounds',
         hot_sticks: 'Hot Sticks',
         employees: 'Employees',
-        job_tracking: 'Job Tracking'
+        job_tracking: 'Job Tracking',
+        locations: 'Locations'
       };
       const name = sheetNameMap[tableKey] || tableKey;
       table = { name: name, headers: Object.keys(rowObj), rows: [], rawGrid: [Object.keys(rowObj)], rowCount: 0, _normalized: true };
@@ -2598,6 +2615,17 @@ class LocalDatabase {
     if (!table.headers || table.headers.length === 0) {
       table.headers = Object.keys(rowObj);
       table.rawGrid[0] = table.headers;
+    }
+
+    // Uniqueness enforcement for Locations: prevent duplicate location rows
+    if (tableKey === 'locations' && table.rows && table.rows.length > 0) {
+      const locName = String(rowObj['Location'] || rowObj['City'] || '').trim().toLowerCase();
+      if (locName) {
+        const existingLoc = table.rows.find(r => String(r['Location'] || r['City'] || '').trim().toLowerCase() === locName);
+        if (existingLoc) {
+          return existingLoc;
+        }
+      }
     }
 
     // Uniqueness enforcement for inventory equipment: prevent inserting duplicate items
@@ -2620,31 +2648,45 @@ class LocalDatabase {
     if (table.headers && table.headers.length > 0) {
       const firstH = table.headers[0];
       if (rowObj[firstH] === undefined || rowObj[firstH] === '') {
-        const itemVal = rowObj['Item #'] || rowObj['Serial #'] || rowObj['HV Tester'] || rowObj['HVT #'] || rowObj['Phasing Set'] || rowObj['PS #'] || rowObj['AED'] || rowObj['AED #'] || rowObj['Glove'] || rowObj['Sleeve'] || rowObj['Blanket'] || rowObj['MACK'] || rowObj['Ground #'] || rowObj['Hot Stick #'] || '';
-        if (itemVal) {
+        const itemVal = rowObj['Location'] || rowObj['Item #'] || rowObj['Serial #'] || rowObj['HV Tester'] || rowObj['HVT #'] || rowObj['Phasing Set'] || rowObj['PS #'] || rowObj['AED'] || rowObj['AED #'] || rowObj['Glove'] || rowObj['Sleeve'] || rowObj['Blanket'] || rowObj['MACK'] || rowObj['Ground #'] || rowObj['Hot Stick #'] || '';
+        if (itemVal && (tableKey === 'locations' || !rowObj['Location'])) {
           rowObj[firstH] = itemVal;
         }
       }
     }
 
-    // Add to rows array (insert at the beginning so newly added items appear at the top)
-    rowObj._rowIdx = 2;
-    table.rows.unshift({ ...rowObj });
-    table.rows.forEach((r, idx) => {
-      r._rowIdx = idx + 2;
-    });
-    table.rowCount = table.rows.length;
-
-    // Add to rawGrid array right after header row (index 1) with alias fallback
+    // Add to rawGrid with alias fallback
+    const rowKeysLower = {};
+    Object.keys(rowObj).forEach(k => { rowKeysLower[String(k).trim().toLowerCase()] = rowObj[k]; });
     const gridRow = table.headers.map(h => {
       if (rowObj[h] !== undefined) return rowObj[h];
       const hLower = String(h || '').trim().toLowerCase();
+      if (rowKeysLower[hLower] !== undefined) return rowKeysLower[hLower];
       if (['item #', 'item', 'glove', 'sleeve', 'blanket', 'mack', 'hv tester', 'phasing set', 'aed', 'serial #', 'serial', 'item number', 'hvt #', 'hvt', 'ps #', 'aed #', 'ground', 'ground #', 'hot stick', 'hot stick #'].includes(hLower)) {
         return rowObj['Item #'] || rowObj['HV Tester'] || rowObj['HVT #'] || rowObj['Phasing Set'] || rowObj['PS #'] || rowObj['AED'] || rowObj['AED #'] || rowObj['Glove'] || rowObj['Sleeve'] || rowObj['Blanket'] || rowObj['MACK'] || rowObj['Ground #'] || rowObj['Hot Stick #'] || rowObj['Serial #'] || '';
       }
       return '';
     });
-    table.rawGrid.splice(1, 0, gridRow);
+
+    const newRowObj = { ...rowObj };
+    const appendToBottom = tableKey === 'locations';
+    if (appendToBottom) {
+      // Match 89-SyncAPI.gs ADD_ROW (appends at lastRow + 1) so existing location _rowIdx values stay aligned with Google Sheets
+      table.rawGrid.push(gridRow);
+      newRowObj._rowIdx = table.rawGrid.length;
+      rowObj._rowIdx = newRowObj._rowIdx;
+      table.rows.push(newRowObj);
+    } else {
+      // Insert at the beginning so newly added items appear at the top
+      newRowObj._rowIdx = 2;
+      rowObj._rowIdx = 2;
+      table.rows.unshift(newRowObj);
+      table.rows.forEach((r, idx) => {
+        r._rowIdx = idx + 2;
+      });
+      table.rawGrid.splice(1, 0, gridRow);
+    }
+    table.rowCount = table.rows.length;
     table.maxRows = table.rawGrid.length;
 
     // Queue ADD_ROW mutation for Google Sheets sync
@@ -2652,7 +2694,7 @@ class LocalDatabase {
       action: 'ADD_ROW',
       sheetName: table.name,
       tableKey: tableKey,
-      rowData: rowObj
+      rowData: { ...newRowObj }
     });
 
     // Auto-record initial History entry if this is an inventory sheet
@@ -2661,7 +2703,122 @@ class LocalDatabase {
       : (originReason || rowObj['Notes'] || 'New Purchase');
     await this.recordItemHistoryEvent(table.name, rowObj, histNote, originReason);
 
-    return rowObj;
+    return newRowObj;
+  }
+
+  /**
+   * Builds a normalized Locations row with master drive-time/direction defaults and optional field overrides.
+   */
+  buildLocationDefaults(locationName, overrides = {}, tableHeaders = null) {
+    const cleanName = String(locationName || '').trim();
+    let dt = 60;
+    let dir = 'Montana';
+    const master = (typeof window !== 'undefined' && window.tripPlannerEngine && window.tripPlannerEngine.masterLocations)
+      ? window.tripPlannerEngine.masterLocations
+      : null;
+    if (master && cleanName) {
+      let mInfo = master[cleanName];
+      if (!mInfo) {
+        const targetLower = cleanName.toLowerCase();
+        const matchedKey = Object.keys(master).find(k => k.toLowerCase() === targetLower);
+        if (matchedKey) mInfo = master[matchedKey];
+      }
+      if (mInfo) {
+        if (mInfo.mins !== undefined && mInfo.mins !== null && mInfo.mins !== '') dt = mInfo.mins;
+        if (mInfo.dir) dir = mInfo.dir;
+      }
+    }
+
+    const row = {
+      'Location': cleanName,
+      'Drive Time (min)': dt,
+      'Direction': dir,
+      'Overnight City': '',
+      'Base Time (min)': 15,
+      'Per Task (min)': 10,
+      'Rubber Class Approval': 'CL2'
+    };
+
+    const applyKeyAndAliases = (k, v) => {
+      if (v === undefined) return;
+      row[k] = v;
+      const kl = String(k).trim().toLowerCase();
+      if (kl === 'location' || kl === 'city') {
+        row['Location'] = v;
+      } else if (kl.includes('rubber class') || kl.includes('approval')) {
+        row['Rubber Class Approval'] = v;
+      } else if (kl.includes('drive time')) {
+        row['Drive Time (min)'] = v;
+      }
+    };
+
+    if (overrides && typeof overrides === 'object') {
+      Object.entries(overrides).forEach(([k, v]) => applyKeyAndAliases(k, v));
+    }
+
+    if (Array.isArray(tableHeaders)) {
+      tableHeaders.forEach(h => {
+        if (!h || row[h] !== undefined) return;
+        const hl = String(h).trim().toLowerCase();
+        if (hl === 'location' || hl === 'city') row[h] = row['Location'];
+        else if (hl.includes('drive time')) row[h] = row['Drive Time (min)'];
+        else if (hl === 'direction') row[h] = row['Direction'];
+        else if (hl.includes('overnight')) row[h] = row['Overnight City'];
+        else if (hl.includes('base time')) row[h] = row['Base Time (min)'];
+        else if (hl.includes('per task')) row[h] = row['Per Task (min)'];
+        else if (hl.includes('rubber class') || hl.includes('approval')) row[h] = row['Rubber Class Approval'];
+        else row[h] = '';
+      });
+    }
+
+    return row;
+  }
+
+  /**
+   * Ensures a real Locations row exists in the snapshot and outbox before applying or persisting edits.
+   */
+  async ensureLocationRow(locationName, overrides = {}) {
+    const cleanName = String(locationName || '').trim();
+    if (!cleanName) return null;
+
+    if (!this.snapshot) this.snapshot = { tables: {}, configs: {} };
+    if (!this.snapshot.tables) this.snapshot.tables = {};
+
+    let locTable = this.getTable('locations') || this.snapshot.tables['locations'];
+    const targetLower = cleanName.toLowerCase();
+    const locHeader = (locTable && Array.isArray(locTable.headers))
+      ? locTable.headers.find(h => {
+          const hl = String(h || '').trim().toLowerCase();
+          return hl === 'location' || hl === 'city';
+        })
+      : null;
+
+    const findExisting = (tbl) => {
+      if (!tbl || !Array.isArray(tbl.rows)) return null;
+      return tbl.rows.find(r => {
+        const val = String(r['Location'] || r['City'] || (locHeader ? r[locHeader] : '') || '').trim().toLowerCase();
+        return val === targetLower;
+      }) || null;
+    };
+
+    const existing = findExisting(locTable);
+    if (existing) {
+      if (overrides && typeof overrides === 'object') {
+        Object.entries(overrides).forEach(([k, v]) => {
+          if (v !== undefined) existing[k] = v;
+        });
+      }
+      this.syncRowToRawGrid(locTable, existing);
+      await this.persistSnapshot(this.snapshot);
+      return { row: existing, created: false, table: locTable };
+    }
+
+    const rowData = this.buildLocationDefaults(cleanName, overrides, locTable ? locTable.headers : null);
+    const added = await this.addRow('locations', rowData, 'Location Configuration');
+    locTable = this.getTable('locations') || this.snapshot.tables['locations'];
+    const persistedRow = findExisting(locTable) || added;
+    await this.persistSnapshot(this.snapshot);
+    return { row: persistedRow, created: true, table: locTable };
   }
 
   /**
@@ -2949,7 +3106,7 @@ class LocalDatabase {
 
     let assignedTo = String(itemRow['Assigned To'] || itemRow['Status'] || 'On Shelf').trim();
     const cleanLoc = window.getPhysicalLocation ? window.getPhysicalLocation(itemRow['Location']) : itemRow['Location'];
-    const location = String(cleanLoc || itemRow['Location'] || 'Helena').trim();
+    let location = String(cleanLoc || itemRow['Location'] || 'Helena').trim();
     let notes = reasonNote || itemRow['Notes'] || '';
 
     const isNum = /^\d+$/.test(itemNum);
@@ -3388,16 +3545,12 @@ class LocalDatabase {
     } catch { /* ignore */ }
     if (!localRegistry[cleanSheet]) localRegistry[cleanSheet] = {};
 
+    const compositeKey = `${cleanEmp}|${cleanItem}`;
     if (!cleanPick || cleanPick === '—' || cleanPick === '-') {
-      if (cleanItem) {
-        delete this.snapshot.manualPicks[cleanSheet][`${cleanEmp}|${cleanItem}`];
-        delete localRegistry[cleanSheet][`${cleanEmp}|${cleanItem}`];
-        const existingSimple = this.snapshot.manualPicks[cleanSheet][cleanEmp];
-        if (existingSimple && existingSimple.currentItemNum && String(existingSimple.currentItemNum).toLowerCase().trim() === cleanItem) {
-          delete this.snapshot.manualPicks[cleanSheet][cleanEmp];
-          delete localRegistry[cleanSheet][cleanEmp];
-        }
-      } else {
+      delete this.snapshot.manualPicks[cleanSheet][compositeKey];
+      delete localRegistry[cleanSheet][compositeKey];
+      const existingSimple = this.snapshot.manualPicks[cleanSheet][cleanEmp];
+      if (existingSimple && String(existingSimple.currentItemNum || '').toLowerCase().trim() === cleanItem) {
         delete this.snapshot.manualPicks[cleanSheet][cleanEmp];
         delete localRegistry[cleanSheet][cleanEmp];
       }
@@ -3410,20 +3563,15 @@ class LocalDatabase {
         isPicked: isPickedBool,
         timestamp: new Date().toISOString()
       };
-      if (cleanItem) {
-        this.snapshot.manualPicks[cleanSheet][`${cleanEmp}|${cleanItem}`] = entry;
-        localRegistry[cleanSheet][`${cleanEmp}|${cleanItem}`] = entry;
-        const existingSimple = this.snapshot.manualPicks[cleanSheet][cleanEmp];
-        if (!existingSimple || !existingSimple.currentItemNum || String(existingSimple.currentItemNum).toLowerCase().trim() === cleanItem) {
-          this.snapshot.manualPicks[cleanSheet][cleanEmp] = entry;
-          localRegistry[cleanSheet][cleanEmp] = entry;
-        } else {
-          delete this.snapshot.manualPicks[cleanSheet][cleanEmp];
-          delete localRegistry[cleanSheet][cleanEmp];
-        }
-      } else {
+      this.snapshot.manualPicks[cleanSheet][compositeKey] = entry;
+      localRegistry[cleanSheet][compositeKey] = entry;
+      const existingSimple = this.snapshot.manualPicks[cleanSheet][cleanEmp];
+      if (!existingSimple || String(existingSimple.currentItemNum || '').toLowerCase().trim() === cleanItem) {
         this.snapshot.manualPicks[cleanSheet][cleanEmp] = entry;
         localRegistry[cleanSheet][cleanEmp] = entry;
+      } else {
+        delete this.snapshot.manualPicks[cleanSheet][cleanEmp];
+        delete localRegistry[cleanSheet][cleanEmp];
       }
     }
 
@@ -4565,7 +4713,7 @@ class LocalDatabase {
               for (const k in r) {
                 const kl = k.toLowerCase();
                 const isNonGroundsSerial = !sheetNameLower.includes('ground') && kl.includes('serial');
-                if (!isNonGroundsSerial && (kl.includes('item') || kl.includes('serial') || kl.includes('glove') || kl.includes('sleeve') || kl.includes('blanket') || kl.includes('mack') || kl.includes('employee') || kl.includes('name'))) {
+                if (!isNonGroundsSerial && (kl.includes('item') || kl.includes('serial') || kl.includes('glove') || kl.includes('sleeve') || kl.includes('blanket') || kl.includes('mack') || kl.includes('employee') || kl.includes('name') || (sheetNameLower === 'locations' && (kl === 'location' || kl === 'city')))) {
                   if (String(r[k] || '').trim().toLowerCase() === idClean) return true;
                 }
               }
@@ -4898,6 +5046,8 @@ class LocalDatabase {
         const isHistoryTable = (mut.tableKey && mut.tableKey.endsWith('_history')) ||
                                (mut.sheetName && mut.sheetName.toLowerCase().includes('history'));
 
+        const isLocationsTable = (mut.tableKey === 'locations') || (String(mut.sheetName || '').trim().toLowerCase() === 'locations');
+
         let exists = false;
         if (isHistoryTable) {
           const mDate = String(mut.rowData['Date Assigned'] || mut.rowData['Date'] || Object.values(mut.rowData)[0] || '').trim();
@@ -4909,6 +5059,9 @@ class LocalDatabase {
             const rItem = String(r['Item #'] || r['Serial #'] || Object.values(r)[1] || '').trim().toLowerCase();
             return rItem === mItem && rDate === mDate && rAssigned === mAssigned;
           });
+        } else if (isLocationsTable) {
+          const mLoc = String(mut.rowData['Location'] || mut.rowData['City'] || '').trim().toLowerCase();
+          exists = !!mLoc && table.rows.some(r => String(r['Location'] || r['City'] || '').trim().toLowerCase() === mLoc);
         } else {
           // Find item identifier for primary key tables
           const firstKey = Object.keys(mut.rowData)[0] || 'Item #';
@@ -4925,12 +5078,10 @@ class LocalDatabase {
           if (table.headers && table.headers.length > 0) {
             const firstH = table.headers[0];
             if (newRowObj[firstH] === undefined || newRowObj[firstH] === '') {
-              const itemVal = newRowObj['Item #'] || newRowObj['Serial #'] || newRowObj['HV Tester'] || newRowObj['HVT #'] || newRowObj['Phasing Set'] || newRowObj['PS #'] || newRowObj['AED'] || newRowObj['AED #'] || newRowObj['Glove'] || newRowObj['Sleeve'] || newRowObj['Blanket'] || newRowObj['MACK'] || newRowObj['Ground #'] || newRowObj['Hot Stick #'] || '';
-              if (itemVal) newRowObj[firstH] = itemVal;
+              const itemVal = newRowObj['Location'] || newRowObj['Item #'] || newRowObj['Serial #'] || newRowObj['HV Tester'] || newRowObj['HVT #'] || newRowObj['Phasing Set'] || newRowObj['PS #'] || newRowObj['AED'] || newRowObj['AED #'] || newRowObj['Glove'] || newRowObj['Sleeve'] || newRowObj['Blanket'] || newRowObj['MACK'] || newRowObj['Ground #'] || newRowObj['Hot Stick #'] || '';
+              if (itemVal && (isLocationsTable || !newRowObj['Location'])) newRowObj[firstH] = itemVal;
             }
           }
-          table.rows.unshift(newRowObj);
-          table.rowCount = table.rows.length;
           const gridRow = table.headers.map(h => {
             if (newRowObj[h] !== undefined) return newRowObj[h];
             const hLower = String(h || '').trim().toLowerCase();
@@ -4939,7 +5090,15 @@ class LocalDatabase {
             }
             return '';
           });
-          table.rawGrid.splice(1, 0, gridRow);
+          if (isLocationsTable) {
+            table.rawGrid.push(gridRow);
+            newRowObj._rowIdx = table.rawGrid.length;
+            table.rows.push(newRowObj);
+          } else {
+            table.rows.unshift(newRowObj);
+            table.rawGrid.splice(1, 0, gridRow);
+          }
+          table.rowCount = table.rows.length;
           table.maxRows = table.rawGrid.length;
         }
       }

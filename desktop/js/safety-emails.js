@@ -1496,50 +1496,116 @@ class SafetyEmailsEngine {
       return { creditedTo: cred, status: status, notes: newNotes };
     };
 
+    const outbox = (window.localDB && typeof window.localDB.getOutbox === 'function')
+      ? (window.localDB.getOutbox() || [])
+      : [];
+
+    const hasPendingOutboxForLog = (sheetName, rowIdx, emailId) => {
+      return outbox.some(m => {
+        if (!m || m.sheetName !== sheetName) return false;
+        if (emailId && m.itemIdentifier && String(m.itemIdentifier).trim() === emailId) return true;
+        return Boolean(rowIdx && m.row === rowIdx);
+      });
+    };
+
+    const syncGridRowFromObj = (tbl, rowObj) => {
+      if (!tbl || !Array.isArray(tbl.rawGrid) || !Array.isArray(tbl.headers) || !rowObj) return;
+      const gIdx = (rowObj._rowIdx && rowObj._rowIdx > 1) ? (rowObj._rowIdx - 1) : -1;
+      if (gIdx > 0 && tbl.rawGrid[gIdx]) {
+        tbl.headers.forEach((h, cIdx) => {
+          if (rowObj[h] !== undefined) tbl.rawGrid[gIdx][cIdx] = rowObj[h];
+        });
+      }
+    };
+
+    const upsertLogRow = (tbl, sheetName, log, emailId, cleanFm, resolved, buildNewRow, extraFindFn) => {
+      let existsIdx = tbl.rows.findIndex(r => {
+        const rEmail = String(r['Email ID'] || r.email_id || '').trim();
+        return Boolean(emailId && rEmail && rEmail === emailId);
+      });
+      if (existsIdx === -1 && typeof extraFindFn === 'function') {
+        existsIdx = tbl.rows.findIndex(extraFindFn);
+      }
+
+      if (existsIdx === -1) {
+        const newRow = buildNewRow();
+        newRow._rowIdx = (Array.isArray(tbl.rawGrid) && tbl.rawGrid.length > 0)
+          ? (tbl.rawGrid.length + 1)
+          : (tbl.rows.length + 2);
+        tbl.rows.push(newRow);
+        if (Array.isArray(tbl.rawGrid) && Array.isArray(tbl.headers)) {
+          tbl.rawGrid.push(tbl.headers.map(h => newRow[h] !== undefined ? newRow[h] : ''));
+        }
+        modified = true;
+        return;
+      }
+
+      const existingRow = tbl.rows[existsIdx];
+      if (hasPendingOutboxForLog(sheetName, existingRow._rowIdx, emailId)) return;
+
+      const nextJob = String(log.jobNumber || '').trim();
+      const currJob = String(existingRow['Job Number'] || '').trim();
+      if (nextJob && currJob !== nextJob) {
+        existingRow['Job Number'] = nextJob;
+        modified = true;
+      }
+
+      const currFm = String(existingRow['Foreman'] || '');
+      const isBadCurrFm = !currFm || /^\d{3}-\d{2}/.test(currFm) || currFm.toLowerCase() === 'unknown';
+      const isValidNextFm = cleanFm && !/^\d{3}-\d{2}/.test(cleanFm) && cleanFm.toLowerCase() !== 'unknown';
+      if (isValidNextFm && (isBadCurrFm || currFm !== cleanFm)) {
+        existingRow['Foreman'] = cleanFm;
+        modified = true;
+      }
+
+      if (String(existingRow['Credited To'] || '').trim() !== String(resolved.creditedTo || '').trim()) {
+        existingRow['Credited To'] = resolved.creditedTo;
+        modified = true;
+      }
+      if (resolved.status && String(existingRow['Status'] || '').trim() !== String(resolved.status).trim()) {
+        existingRow['Status'] = resolved.status;
+        modified = true;
+      }
+      if (resolved.notes !== undefined && String(existingRow['Notes'] || '').trim() !== String(resolved.notes || '').trim()) {
+        existingRow['Notes'] = resolved.notes;
+        modified = true;
+      }
+      syncGridRowFromObj(tbl, existingRow);
+    };
+
     recentLogs.forEach(log => {
       const emailId = String(log.emailId || '').trim();
       const sheetName = log.sheetName;
+      const resolved = resolveJobAlias(log.jobNumber, log.creditedTo, log.status, log.notes);
+      let cleanFm = log.foreman || '';
+      if (!cleanFm || /^\d{3}-\d{2}/.test(cleanFm) || cleanFm.toLowerCase() === 'unknown') {
+        cleanFm = this.lookupForemanForCrew(resolved.creditedTo || log.jobNumber) || cleanFm;
+      }
 
       if (sheetName === 'JHA Log' || log.type === 'JHA') {
-        const resolved = resolveJobAlias(log.jobNumber, log.creditedTo, log.status, log.notes);
-        let cleanFm = log.foreman || '';
-        if (!cleanFm || /^\d{3}-\d{2}/.test(cleanFm) || cleanFm.toLowerCase() === 'unknown') {
-          cleanFm = this.lookupForemanForCrew(resolved.creditedTo || log.jobNumber) || cleanFm;
-        }
-        const exists = jhaTbl.rows.some(r => String(r['Email ID'] || r.email_id || '').trim() === emailId);
-        if (!exists) {
-          jhaTbl.rows.push({
-            'Date Received': log.dateReceived || '',
-            'Date Created': log.date || '',
-            'Job Number': log.jobNumber || '',
-            'Foreman': cleanFm,
-            'Email Subject': log.subject || '',
-            'Email ID': emailId,
-            'Source': log.source || '',
-            'Status': resolved.status,
-            'Credited To': resolved.creditedTo,
-            'Notes': resolved.notes
-          });
-          modified = true;
-        }
+        upsertLogRow(jhaTbl, 'JHA Log', log, emailId, cleanFm, resolved, () => ({
+          'Date Received': log.dateReceived || '',
+          'Date Created': log.date || '',
+          'Job Number': log.jobNumber || '',
+          'Foreman': cleanFm,
+          'Email Subject': log.subject || '',
+          'Email ID': emailId,
+          'Source': log.source || '',
+          'Status': resolved.status,
+          'Credited To': resolved.creditedTo,
+          'Notes': resolved.notes
+        }));
       } else if (sheetName === 'Weekly Safety Log' || log.type === 'Weekly Safety Meeting') {
-        const resolved = resolveJobAlias(log.jobNumber, log.creditedTo, log.status, log.notes);
-        let cleanFm = log.foreman || '';
-        if (!cleanFm || /^\d{3}-\d{2}/.test(cleanFm) || cleanFm.toLowerCase() === 'unknown') {
-          cleanFm = this.lookupForemanForCrew(resolved.creditedTo || log.jobNumber) || cleanFm;
-        }
         const targetCrew = (resolved.creditedTo || log.jobNumber || '').trim().toLowerCase();
         const weekOf = (log.date || '').trim();
-        const existsIdx = weeklyTbl.rows.findIndex(r => {
-          const rEmail = String(r['Email ID'] || r.email_id || '').trim();
-          if (emailId && rEmail && rEmail === emailId) return true;
-          const rWeek = String(r['Week Of'] || '').trim();
-          const rCrew = String(r['Credited To'] || r['Job Number'] || '').trim().toLowerCase();
-          return weekOf && rWeek === weekOf && targetCrew && rCrew === targetCrew;
-        });
-
-        if (existsIdx === -1) {
-          weeklyTbl.rows.push({
+        upsertLogRow(
+          weeklyTbl,
+          'Weekly Safety Log',
+          log,
+          emailId,
+          cleanFm,
+          resolved,
+          () => ({
             'Date Received': log.dateReceived || '',
             'Week Of': log.date || '',
             'Job Number': log.jobNumber || '',
@@ -1549,39 +1615,26 @@ class SafetyEmailsEngine {
             'Status': resolved.status,
             'Credited To': resolved.creditedTo,
             'Notes': resolved.notes
-          });
-          modified = true;
-        } else {
-          // If existing row has a job number as foreman and we have a real name, update it!
-          const existingRow = weeklyTbl.rows[existsIdx];
-          const currFm = String(existingRow['Foreman'] || '');
-          if ((!currFm || /^\d{3}-\d{2}/.test(currFm) || currFm.toLowerCase() === 'unknown') && cleanFm && !/^\d{3}-\d{2}/.test(cleanFm)) {
-            existingRow['Foreman'] = cleanFm;
-            modified = true;
+          }),
+          r => {
+            const rWeek = String(r['Week Of'] || '').trim();
+            const rCrew = String(r['Credited To'] || r['Job Number'] || '').trim().toLowerCase();
+            return weekOf && rWeek === weekOf && targetCrew && rCrew === targetCrew;
           }
-        }
+        );
       } else if (sheetName === 'Monthly Checklist Log' || log.type === 'Monthly Checklist') {
-        const resolved = resolveJobAlias(log.jobNumber, log.creditedTo, log.status, log.notes);
-        let cleanFm = log.foreman || '';
-        if (!cleanFm || /^\d{3}-\d{2}/.test(cleanFm) || cleanFm.toLowerCase() === 'unknown') {
-          cleanFm = this.lookupForemanForCrew(resolved.creditedTo || log.jobNumber) || cleanFm;
-        }
-        const exists = monthlyTbl.rows.some(r => String(r['Email ID'] || r.email_id || '').trim() === emailId);
-        if (!exists) {
-          monthlyTbl.rows.push({
-            'Date Received': log.dateReceived || '',
-            'Date Created': log.date || '',
-            'Job Number': log.jobNumber || '',
-            'Foreman': cleanFm,
-            'Equipment Number': log.equipmentNumber || '',
-            'Email Subject': log.subject || '',
-            'Email ID': emailId,
-            'Status': resolved.status,
-            'Credited To': resolved.creditedTo,
-            'Notes': resolved.notes
-          });
-          modified = true;
-        }
+        upsertLogRow(monthlyTbl, 'Monthly Checklist Log', log, emailId, cleanFm, resolved, () => ({
+          'Date Received': log.dateReceived || '',
+          'Date Created': log.date || '',
+          'Job Number': log.jobNumber || '',
+          'Foreman': cleanFm,
+          'Equipment Number': log.equipmentNumber || '',
+          'Email Subject': log.subject || '',
+          'Email ID': emailId,
+          'Status': resolved.status,
+          'Credited To': resolved.creditedTo,
+          'Notes': resolved.notes
+        }));
       }
     });
 
@@ -1614,6 +1667,37 @@ class SafetyEmailsEngine {
     window.syncEngine.updateStatusUI('syncing', 'Recalculating Compliance...');
 
     try {
+      // Flush any unpushed local edits on Safety Log / Job Tracking sheets first so
+      // Apps Script recalculates against the user's edited Credited To / schedule values.
+      if (window.localDB && typeof window.localDB.getOutbox === 'function') {
+        const SAFETY_INPUT_SHEETS = new Set(['JHA Log', 'Weekly Safety Log', 'Monthly Checklist Log', 'Job Tracking']);
+        const fullOutbox = window.localDB.getOutbox() || [];
+        const pendingLogMuts = fullOutbox.filter(m => m && SAFETY_INPUT_SHEETS.has(m.sheetName));
+        if (pendingLogMuts.length > 0) {
+          window.syncEngine.updateStatusUI('syncing', `Syncing ${pendingLogMuts.length} log edit(s) before recalculating...`);
+          const pushRes = await window.syncEngine.executeNetworkRequest(syncUrl, 'POST', {
+            action: 'applyMutations',
+            mutations: pendingLogMuts,
+            detectConflicts: false,
+            force: true,
+            skipPostProcessing: true,
+            returnSnapshot: false
+          }, 60000);
+          if (!pushRes || (pushRes.success !== true && pushRes.status !== 'ok')) {
+            throw new Error((pushRes && (pushRes.error || pushRes.message)) || 'Failed to sync pending safety log edits before recalculation.');
+          }
+          const flushedSet = new Set(pendingLogMuts);
+          const remaining = (window.localDB.getOutbox() || []).filter(m => !flushedSet.has(m));
+          if (typeof window.localDB.saveOutbox === 'function') {
+            await window.localDB.saveOutbox(remaining);
+          }
+          if (typeof window.syncEngine.renderOutboxBadge === 'function') {
+            window.syncEngine.renderOutboxBadge();
+          }
+          window.syncEngine.updateStatusUI('syncing', 'Recalculating Compliance...');
+        }
+      }
+
       const payload = {
         action: 'recalculateCompliance',
         targetWeek: 'both'
@@ -2379,6 +2463,48 @@ class SafetyEmailsEngine {
   /**
    * Retrieves all Monthly Checklist log entries for a crew within the calendar month of weekVal.
    */
+  /**
+   * Determines whether a safety log entry belongs to the target crew/foreman.
+   * When Credited To explicitly names a crew, it is authoritative so a misnumbered
+   * report reassigned to another crew will not match the wrong crew.
+   */
+  logMatchesCrew(log, cleanJob, cleanForeman) {
+    if (!log) return false;
+    const targetJob = String(cleanJob || '').trim();
+    const lCredited = String(log.creditedTo || '').trim();
+    const lJob = String(log.jobNumber || '').trim();
+    const lForeman = String(log.foreman || '').trim().toLowerCase();
+    const targetForeman = String(cleanForeman || '').trim().toLowerCase();
+    const aliasMap = (window.localDB && window.localDB.snapshot && window.localDB.snapshot.configs && window.localDB.snapshot.configs['FY_TRANSITION_ALIAS_MAP']) || {};
+
+    const matchesJobOrAlias = (val, target) => {
+      if (!val || !target) return false;
+      if (val === target) return true;
+      if (aliasMap[val] === target || aliasMap[target] === val) return true;
+      if (val.startsWith(target + ' (') || val.startsWith(target + ' -')) return true;
+      if (target.startsWith(val + ' (') || target.startsWith(val + ' -')) {
+        // When matching a parent job against a sub-crew like "040-26 (Fri-Sat)", require matching foreman if known
+        if (targetForeman && lForeman && !val.includes('(') && !val.includes(' -')) {
+          return lForeman === targetForeman;
+        }
+        return true;
+      }
+      return false;
+    };
+
+    const credLower = lCredited.toLowerCase();
+    const hasExplicitCredited = Boolean(lCredited && credLower !== 'unknown' && credLower !== 'none');
+    if (hasExplicitCredited) {
+      return matchesJobOrAlias(lCredited, targetJob);
+    }
+
+    return matchesJobOrAlias(lJob, targetJob) ||
+           Boolean(targetForeman && lForeman && lForeman === targetForeman);
+  }
+
+  /**
+   * Retrieves all Monthly Checklist log entries for a crew within the calendar month of weekVal.
+   */
   getMonthlyChecklistsForCrew(jobNum, weekVal, foreman) {
     if (!this.currentLogs || this.currentLogs.length === 0) {
       this.currentLogs = this.extractLogsFromLocalDB();
@@ -2401,10 +2527,7 @@ class SafetyEmailsEngine {
     const matches = (this.currentLogs || []).filter(l => {
       if (l.type !== 'Monthly Checklist' && l.sheetName !== 'Monthly Checklist Log') return false;
 
-      const jMatches = (l.jobNumber && l.jobNumber === cleanJob) || 
-                       (l.creditedTo && l.creditedTo === cleanJob) ||
-                       (cleanForeman && l.foreman && l.foreman.toLowerCase() === cleanForeman);
-      if (!jMatches) return false;
+      if (!this.logMatchesCrew(l, cleanJob, cleanForeman)) return false;
 
       if (targetMonth !== -1 && targetYear !== -1) {
         const itemDate = this.parseDateHelper(l.date || l.dateReceived);
@@ -3275,17 +3398,21 @@ class SafetyEmailsEngine {
       const weeklyLogs = (this.currentLogs || []).filter(l => {
         const isWeekly = l.type === 'Weekly Safety Meeting' || l.sheetName === 'Weekly Safety Log';
         if (!isWeekly) return false;
-        const jMatches = (l.jobNumber === cleanJob) || (l.creditedTo === cleanJob) ||
-                         (cleanJob && (String(l.jobNumber).startsWith(cleanJob) || cleanJob.startsWith(String(l.jobNumber)))) ||
-                         (cleanForeman && l.foreman && l.foreman.toLowerCase().trim() === cleanForeman.toLowerCase().trim());
-        return jMatches;
+        return this.logMatchesCrew(l, cleanJob, cleanForeman);
+      });
+      weeklyLogs.sort((a, b) => {
+        const aExact = String(a.creditedTo || '').trim() === cleanJob ? 1 : 0;
+        const bExact = String(b.creditedTo || '').trim() === cleanJob ? 1 : 0;
+        return bExact - aExact;
       });
 
       if (weeklyLogs.length > 0) {
         let bestMatch = null;
+        let hasValidWeek = false;
         if (cleanWeek) {
           const wStart = this.parseDateHelper(cleanWeek);
           if (wStart) {
+            hasValidWeek = true;
             // Sunday noon reference
             const startMs = wStart.getTime() - 24 * 60 * 60 * 1000;
             const endMs = wStart.getTime() + 7 * 24 * 60 * 60 * 1000;
@@ -3310,8 +3437,8 @@ class SafetyEmailsEngine {
             }
           }
         }
-        // Fallback to the newest weekly meeting for this crew
-        if (!bestMatch) {
+        // Fallback to newest weekly meeting only if no valid week filter was supplied
+        if (!bestMatch && !hasValidWeek) {
           bestMatch = weeklyLogs[0];
         }
         if (bestMatch) {
@@ -3340,10 +3467,12 @@ class SafetyEmailsEngine {
 
       const jhaLogs = (this.currentLogs || []).filter(l => {
         if (l.type !== 'JHA' && l.sheetName !== 'JHA Log') return false;
-        const jMatches = (l.jobNumber === cleanJob) || (l.creditedTo === cleanJob) ||
-                         (cleanJob && (String(l.jobNumber).startsWith(cleanJob) || cleanJob.startsWith(String(l.jobNumber)))) ||
-                         (cleanForeman && l.foreman && l.foreman.toLowerCase().trim() === cleanForeman.toLowerCase().trim());
-        return jMatches;
+        return this.logMatchesCrew(l, cleanJob, cleanForeman);
+      });
+      jhaLogs.sort((a, b) => {
+        const aExact = String(a.creditedTo || '').trim() === cleanJob ? 1 : 0;
+        const bExact = String(b.creditedTo || '').trim() === cleanJob ? 1 : 0;
+        return bExact - aExact;
       });
 
       let bestJha = null;
@@ -3480,7 +3609,101 @@ class SafetyEmailsEngine {
    * Immediately credits a report in the local Safety Compliance table and refreshes the UI.
    * Ensures UI cards (e.g. Chad Cliff 012-27) immediately show Received without waiting for cloud recalc.
    */
-  creditComplianceRecordLocally({ crew, originalJob, dateStr, reportType, status, foreman }) {
+  /**
+   * Parses date strings (including "Week of MM/DD/YYYY" prefixes) into a local noon Date.
+   */
+  parseComplianceDate_(dStr) {
+    if (!dStr) return null;
+    if (dStr instanceof Date) return isNaN(dStr.getTime()) ? null : dStr;
+    const cleaned = String(dStr).replace(/^week\s*of\s*/i, '').trim();
+    return this.parseDateHelper(cleaned);
+  }
+
+  /**
+   * Computes the Sunday-start Date (at noon) for the week containing d.
+   */
+  getWeekSundayNoon_(d) {
+    if (!d) return null;
+    const copy = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 12, 0, 0);
+    copy.setDate(copy.getDate() - copy.getDay());
+    return copy;
+  }
+
+  /**
+   * Checks whether two Dates fall in the same Sunday-Saturday compliance week.
+   */
+  isSameComplianceWeek_(d1, d2) {
+    const s1 = this.getWeekSundayNoon_(d1);
+    const s2 = this.getWeekSundayNoon_(d2);
+    if (!s1 || !s2) return false;
+    return Math.abs(s1.getTime() - s2.getTime()) < 86400000 * 3.5;
+  }
+
+  /**
+   * Checks whether this.currentLogs contains at least one Credited log entry matching
+   * targetCrew for the given period and reportType.
+   */
+  hasCreditedLogForPeriod(targetCrew, dateStr, reportType) {
+    const cleanCrew = String(targetCrew || '').trim();
+    const targetDate = this.parseComplianceDate_(dateStr);
+    if (!cleanCrew || !targetDate) return false;
+
+    if (!this.currentLogs || this.currentLogs.length === 0) {
+      this.currentLogs = this.extractLogsFromLocalDB();
+    }
+
+    const typeLower = String(reportType || '').toLowerCase();
+    const isWeekly = typeLower.includes('meeting') || typeLower.includes('weekly');
+    const isMonthly = typeLower.includes('checklist') || typeLower.includes('monthly');
+    const isJha = typeLower.includes('jha');
+
+    const targetMon = new Date(this.getWeekSundayNoon_(targetDate).getTime() + 86400000);
+
+    return (this.currentLogs || []).some(l => {
+      if (!l || String(l.status || '').trim() !== 'Credited') return false;
+      const lType = String(l.type || l.sheetName || '').toLowerCase();
+      if (isWeekly && !(lType.includes('meeting') || lType.includes('weekly'))) return false;
+      if (isMonthly && !(lType.includes('checklist') || lType.includes('monthly'))) return false;
+      if (isJha && !lType.includes('jha')) return false;
+
+      if (!this.logMatchesCrew(l, cleanCrew, '')) return false;
+
+      const lDate = this.parseComplianceDate_(l.date || l.dateReceived);
+      if (!lDate) return false;
+
+      if (isWeekly) {
+        return this.isSameComplianceWeek_(lDate, targetDate);
+      }
+      if (isMonthly) {
+        return lDate.getMonth() === targetMon.getMonth() && lDate.getFullYear() === targetMon.getFullYear();
+      }
+      if (isJha) {
+        return this.isSameComplianceWeek_(lDate, targetDate) && lDate.getDay() === targetDate.getDay();
+      }
+      return false;
+    });
+  }
+
+  /**
+   * Re-evaluates a crew's compliance cell for (targetCrew, dateStr, reportType) from current logs
+   * and updates safety_compliance immediately (either crediting or un-crediting stale checkmarks).
+   */
+  reconcileComplianceCellFromLogs(targetCrew, dateStr, reportType, foreman = '') {
+    const cleanCrew = String(targetCrew || '').trim();
+    if (!cleanCrew || !dateStr) return;
+    const stillCredited = this.hasCreditedLogForPeriod(cleanCrew, dateStr, reportType);
+    this.creditComplianceRecordLocally({
+      crew: cleanCrew,
+      originalJob: cleanCrew,
+      dateStr: dateStr,
+      reportType: reportType,
+      status: stillCredited ? 'Credited' : 'Uncredited',
+      foreman: foreman,
+      onlyUncreditIfChecked: !stillCredited
+    });
+  }
+
+  creditComplianceRecordLocally({ crew, originalJob, dateStr, reportType, status, foreman, onlyUncreditIfChecked = false }) {
     if (!window.localDB || !window.localDB.snapshot || !window.localDB.snapshot.tables) return;
     const snap = window.localDB.snapshot;
     const scTable = snap.tables.safety_compliance;
@@ -3489,66 +3712,54 @@ class SafetyEmailsEngine {
     const targetCrew = String(crew || originalJob || '').trim();
     if (!targetCrew) return;
 
-    const parseToNoon = (dStr) => {
-      if (!dStr) return null;
-      if (dStr instanceof Date) return dStr;
-      const parts = String(dStr).trim().split(/[-/]/);
-      if (parts.length === 3) {
-        if (parts[0].length === 4) {
-          return new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10), 12, 0, 0);
-        } else {
-          return new Date(parseInt(parts[2], 10), parseInt(parts[0], 10) - 1, parseInt(parts[1], 10), 12, 0, 0);
-        }
-      }
-      const d = new Date(dStr);
-      return isNaN(d.getTime()) ? null : d;
-    };
-
-    const reportDate = parseToNoon(dateStr) || new Date();
-    const repDay = reportDate.getDay();
-    const weekSunday = new Date(reportDate.getTime());
-    weekSunday.setDate(weekSunday.getDate() - repDay);
-    const weekSundayTime = weekSunday.getTime();
-
-    const isSameWeek = (wVal) => {
-      const wDate = parseToNoon(wVal);
-      if (!wDate) return false;
-      const wDay = wDate.getDay();
-      const wSun = new Date(wDate.getTime());
-      wSun.setDate(wSun.getDate() - wDay);
-      return Math.abs(wSun.getTime() - weekSundayTime) < 86400000 * 3.5;
-    };
+    const reportDate = this.parseComplianceDate_(dateStr) || new Date();
 
     const isMatchCrew = (r) => {
       const jn = String(r['Job Number'] || r['Job #'] || r['Crew'] || '').trim().toLowerCase();
       const tc = targetCrew.toLowerCase();
+      if (!jn || !tc) return false;
       if (jn === tc) return true;
       const jnBase = jn.split('.')[0].trim();
       const tcBase = tc.split('.')[0].trim();
-      if (jnBase === tcBase) return true;
+      if (jnBase && jnBase === tcBase) return true;
       const aliasMap = (snap.configs && snap.configs['FY_TRANSITION_ALIAS_MAP']) || {};
       if (aliasMap[tc] && aliasMap[tc].toLowerCase() === jn) return true;
       if (aliasMap[jn] && aliasMap[jn].toLowerCase() === tc) return true;
       return false;
     };
 
-    const matchingRow = scTable.rows.find(r => isMatchCrew(r) && isSameWeek(r['Week Start'] || r['Week']));
+    const matchingRow = scTable.rows.find(r => {
+      if (!isMatchCrew(r)) return false;
+      const wDate = this.parseComplianceDate_(r['Week Start'] || r['Week']);
+      return Boolean(wDate && this.isSameComplianceWeek_(wDate, reportDate));
+    });
+
     if (matchingRow) {
       const isCredited = (status === 'Credited');
-      const markValue = isCredited ? '✅' : '⏳';
+      const weekSun = this.getWeekSundayNoon_(this.parseComplianceDate_(matchingRow['Week Start'] || matchingRow['Week']) || reportDate);
+      const weekSatEnd = new Date(weekSun.getFullYear(), weekSun.getMonth(), weekSun.getDate() + 6, 23, 59, 59);
+      const uncreditedMark = (new Date() > weekSatEnd) ? '❌' : '⏳';
+      const markValue = isCredited ? '✅' : uncreditedMark;
       const typeLower = String(reportType || '').toLowerCase();
 
+      let cellKey = '';
       if (typeLower.includes('meeting') || typeLower.includes('weekly')) {
-        matchingRow['Weekly Meeting'] = markValue;
+        cellKey = 'Weekly Meeting';
       } else if (typeLower.includes('checklist') || typeLower.includes('monthly')) {
-        matchingRow['Monthly Checklist'] = markValue;
+        cellKey = 'Monthly Checklist';
       } else if (typeLower.includes('jha')) {
         const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-        const dayCol = days[reportDate.getDay()];
-        matchingRow[dayCol] = markValue;
+        cellKey = days[reportDate.getDay()];
       }
 
-      if (foreman && (!matchingRow['Foreman'] || matchingRow['Foreman'].toLowerCase() === 'unknown' || /^\d{3}-\d{2}/.test(matchingRow['Foreman']))) {
+      if (cellKey) {
+        const currCell = String(matchingRow[cellKey] || '');
+        if (isCredited || !onlyUncreditIfChecked || currCell.includes('✅')) {
+          matchingRow[cellKey] = markValue;
+        }
+      }
+
+      if (isCredited && foreman && (!matchingRow['Foreman'] || matchingRow['Foreman'].toLowerCase() === 'unknown' || /^\d{3}-\d{2}/.test(matchingRow['Foreman']))) {
         matchingRow['Foreman'] = foreman;
       }
 
@@ -3574,6 +3785,19 @@ class SafetyEmailsEngine {
       else matchingRow['Status'] = 'Complete';
 
       matchingRow['Updated'] = new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' }) + ' ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+      // Keep scTable.rawGrid synchronized with updated matchingRow
+      if (Array.isArray(scTable.rawGrid) && Array.isArray(scTable.headers)) {
+        const rowArrIdx = scTable.rows.indexOf(matchingRow);
+        const gridIdx = (matchingRow._rowIdx && matchingRow._rowIdx > 1)
+          ? (matchingRow._rowIdx - 1)
+          : (rowArrIdx !== -1 ? rowArrIdx + 1 : -1);
+        if (gridIdx > 0 && scTable.rawGrid[gridIdx]) {
+          scTable.headers.forEach((h, cIdx) => {
+            if (matchingRow[h] !== undefined) scTable.rawGrid[gridIdx][cIdx] = matchingRow[h];
+          });
+        }
+      }
 
       // Persist snapshot to disk
       if (typeof window.localDB.persistSnapshot === 'function') {
@@ -3717,6 +3941,14 @@ class SafetyEmailsEngine {
       }
     }
 
+    // Capture pre-edit values before mutating log/snapshot so we can detect diffs & un-credit prior crews
+    const prevForeman = String(log.foreman || '').trim();
+    const prevJob = String(log.jobNumber || '').trim();
+    const prevCredited = String(log.creditedTo || '').trim();
+    const prevDate = String(log.date || '').trim();
+    const prevStatus = String(log.status || '').trim();
+    const prevNotes = String(log.notes || '').trim();
+
     // Update in-memory log
     log.foreman = foreman;
     log.jobNumber = jobNum;
@@ -3725,25 +3957,51 @@ class SafetyEmailsEngine {
     log.status = status;
     log.notes = notes;
 
-    // Update local snapshot table row
+    const LOG_SHEET_SPECS = {
+      'JHA Log': { tblKey: 'jha_log', dateCol: 2, dateKeys: ['Date Created', 'Work Date'], dateHeader: 'Date Created', jobCol: 3, fmCol: 4, statusCol: 8, credCol: 9, notesCol: 10 },
+      'Weekly Safety Log': { tblKey: 'weekly_safety_log', dateCol: 2, dateKeys: ['Week Of'], dateHeader: 'Week Of', jobCol: 3, fmCol: 4, statusCol: 7, credCol: 8, notesCol: 9 },
+      'Monthly Checklist Log': { tblKey: 'monthly_checklist_log', dateCol: 2, dateKeys: ['Report Date', 'Date Created'], dateHeader: 'Date Created', jobCol: 3, fmCol: 4, statusCol: 8, credCol: 9, notesCol: 11 }
+    };
+    const spec = LOG_SHEET_SPECS[log.sheetName];
+
+    // Update local snapshot table row + rawGrid and determine sheet row index
+    let targetRowIdx = log.rowIndex;
+    let tblHeaders = null;
+    let oldCellVals = { date: prevDate, job: prevJob, foreman: prevForeman, status: prevStatus, credited: prevCredited, notes: prevNotes };
+
     if (window.localDB && window.localDB.snapshot && window.localDB.snapshot.tables) {
       const snap = window.localDB.snapshot;
-      let tblKey = '';
-      if (log.sheetName === 'JHA Log') tblKey = 'jha_log';
-      else if (log.sheetName === 'Weekly Safety Log') tblKey = 'weekly_safety_log';
-      else if (log.sheetName === 'Monthly Checklist Log') tblKey = 'monthly_checklist_log';
-
-      if (tblKey && snap.tables[tblKey] && snap.tables[tblKey].rows) {
-        const row = snap.tables[tblKey].rows.find(r => (r._rowIdx === log.rowIndex) || (log.emailId && (r['Email ID'] === log.emailId || r.email_id === log.emailId)));
+      const tbl = spec ? snap.tables[spec.tblKey] : null;
+      if (tbl && tbl.rows) {
+        tblHeaders = Array.isArray(tbl.headers) ? tbl.headers : null;
+        const row = tbl.rows.find(r => (r._rowIdx && r._rowIdx === log.rowIndex) || (log.emailId && (r['Email ID'] === log.emailId || r.email_id === log.emailId)));
         if (row) {
+          if (row._rowIdx > 1) targetRowIdx = row._rowIdx;
+          const existingDateVal = spec.dateKeys.map(k => row[k]).find(v => v !== undefined && v !== '');
+          oldCellVals = {
+            date: existingDateVal !== undefined ? String(existingDateVal) : prevDate,
+            job: row['Job Number'] !== undefined ? String(row['Job Number']) : prevJob,
+            foreman: row['Foreman'] !== undefined ? String(row['Foreman']) : prevForeman,
+            status: row['Status'] !== undefined ? String(row['Status']) : prevStatus,
+            credited: row['Credited To'] !== undefined ? String(row['Credited To']) : prevCredited,
+            notes: row['Notes'] !== undefined ? String(row['Notes']) : prevNotes
+          };
+
           row['Foreman'] = foreman;
           row['Job Number'] = jobNum;
           row['Credited To'] = credited;
           row['Status'] = status;
           row['Notes'] = notes;
-          if (tblKey === 'weekly_safety_log') row['Week Of'] = dateStr;
-          else if (tblKey === 'jha_log') { row['Date Created'] = dateStr; row['Work Date'] = dateStr; }
-          else if (tblKey === 'monthly_checklist_log') { row['Report Date'] = dateStr; row['Date Created'] = dateStr; }
+          if (dateStr) {
+            spec.dateKeys.forEach(k => { row[k] = dateStr; });
+          }
+
+          if (Array.isArray(tbl.rawGrid) && tblHeaders && targetRowIdx > 1 && tbl.rawGrid[targetRowIdx - 1]) {
+            const gRow = tbl.rawGrid[targetRowIdx - 1];
+            tblHeaders.forEach((h, cIdx) => {
+              if (row[h] !== undefined) gRow[cIdx] = row[h];
+            });
+          }
         }
       }
       if (typeof window.localDB.persistSnapshot === 'function') {
@@ -3751,41 +4009,57 @@ class SafetyEmailsEngine {
       }
     }
 
-    // Queue mutations to sync back to Google Sheets
-    if (window.syncEngine && log.sheetName && log.rowIndex > 1) {
-      if (log.sheetName === 'JHA Log') {
-        if (dateStr) window.syncEngine.addMutation({ action: 'UPDATE_CELL', sheetName: log.sheetName, row: log.rowIndex, col: 2, value: dateStr });
-        window.syncEngine.addMutation({ action: 'UPDATE_CELL', sheetName: log.sheetName, row: log.rowIndex, col: 3, value: jobNum });
-        window.syncEngine.addMutation({ action: 'UPDATE_CELL', sheetName: log.sheetName, row: log.rowIndex, col: 4, value: foreman });
-        window.syncEngine.addMutation({ action: 'UPDATE_CELL', sheetName: log.sheetName, row: log.rowIndex, col: 8, value: status });
-        window.syncEngine.addMutation({ action: 'UPDATE_CELL', sheetName: log.sheetName, row: log.rowIndex, col: 9, value: credited });
-        window.syncEngine.addMutation({ action: 'UPDATE_CELL', sheetName: log.sheetName, row: log.rowIndex, col: 10, value: notes });
-      } else if (log.sheetName === 'Weekly Safety Log') {
-        if (dateStr) window.syncEngine.addMutation({ action: 'UPDATE_CELL', sheetName: log.sheetName, row: log.rowIndex, col: 2, value: dateStr });
-        window.syncEngine.addMutation({ action: 'UPDATE_CELL', sheetName: log.sheetName, row: log.rowIndex, col: 3, value: jobNum });
-        window.syncEngine.addMutation({ action: 'UPDATE_CELL', sheetName: log.sheetName, row: log.rowIndex, col: 4, value: foreman });
-        window.syncEngine.addMutation({ action: 'UPDATE_CELL', sheetName: log.sheetName, row: log.rowIndex, col: 7, value: status });
-        window.syncEngine.addMutation({ action: 'UPDATE_CELL', sheetName: log.sheetName, row: log.rowIndex, col: 8, value: credited });
-        window.syncEngine.addMutation({ action: 'UPDATE_CELL', sheetName: log.sheetName, row: log.rowIndex, col: 9, value: notes });
-      } else if (log.sheetName === 'Monthly Checklist Log') {
-        if (dateStr) window.syncEngine.addMutation({ action: 'UPDATE_CELL', sheetName: log.sheetName, row: log.rowIndex, col: 2, value: dateStr });
-        window.syncEngine.addMutation({ action: 'UPDATE_CELL', sheetName: log.sheetName, row: log.rowIndex, col: 3, value: jobNum });
-        window.syncEngine.addMutation({ action: 'UPDATE_CELL', sheetName: log.sheetName, row: log.rowIndex, col: 4, value: foreman });
-        window.syncEngine.addMutation({ action: 'UPDATE_CELL', sheetName: log.sheetName, row: log.rowIndex, col: 8, value: status });
-        window.syncEngine.addMutation({ action: 'UPDATE_CELL', sheetName: log.sheetName, row: log.rowIndex, col: 9, value: credited });
-        window.syncEngine.addMutation({ action: 'UPDATE_CELL', sheetName: log.sheetName, row: log.rowIndex, col: 11, value: notes });
-      }
+    // Queue changed cell mutations to sync back to Google Sheets
+    if (window.syncEngine && spec && targetRowIdx > 1) {
+      const queueField = (defaultCol, defaultHeader, oldVal, newVal, skipIfEmpty = false) => {
+        if (skipIfEmpty && !newVal) return;
+        const oldStr = String(oldVal ?? '').trim();
+        const newStr = String(newVal ?? '').trim();
+        if (oldStr === newStr) return;
+
+        let resolvedCol = defaultCol;
+        let resolvedHeader = defaultHeader;
+        if (tblHeaders) {
+          const idxByHdr = tblHeaders.findIndex(h => String(h || '').trim().toLowerCase() === defaultHeader.toLowerCase());
+          if (idxByHdr !== -1) {
+            resolvedCol = idxByHdr + 1;
+            resolvedHeader = tblHeaders[idxByHdr];
+          } else if (tblHeaders[defaultCol - 1]) {
+            resolvedHeader = tblHeaders[defaultCol - 1];
+          }
+        }
+        window.syncEngine.addMutation({
+          action: 'UPDATE_CELL',
+          sheetName: log.sheetName,
+          row: targetRowIdx,
+          col: resolvedCol,
+          header: resolvedHeader,
+          oldValue: oldVal ?? '',
+          value: newVal,
+          itemIdentifier: log.emailId || ''
+        });
+      };
+
+      queueField(spec.dateCol, spec.dateHeader, oldCellVals.date, dateStr, true);
+      queueField(spec.jobCol, 'Job Number', oldCellVals.job, jobNum);
+      queueField(spec.fmCol, 'Foreman', oldCellVals.foreman, foreman);
+      queueField(spec.statusCol, 'Status', oldCellVals.status, status);
+      queueField(spec.credCol, 'Credited To', oldCellVals.credited, credited);
+      queueField(spec.notesCol, 'Notes', oldCellVals.notes, notes);
     }
 
-    // Immediately reflect credit on Safety Compliance matrix
-    this.creditComplianceRecordLocally({
-      crew: credited || jobNum,
-      originalJob: jobNum,
-      dateStr: dateStr,
-      reportType: log.type || log.sheetName,
-      status: status,
-      foreman: foreman
-    });
+    // Immediately reconcile Safety Compliance for both prior crew(s)/date(s) and the newly credited crew/date
+    const reportType = log.type || log.sheetName;
+    const newOwner = credited || jobNum;
+    const orderedCrews = Array.from(new Set([...[prevCredited, prevJob].filter(c => c && c !== newOwner), newOwner].filter(Boolean)));
+    const datesToReconcile = Array.from(new Set([prevDate, dateStr].filter(Boolean)));
+    if (datesToReconcile.length === 0 && log.dateReceived) datesToReconcile.push(log.dateReceived);
+
+    for (const cCrew of orderedCrews) {
+      for (const cDate of datesToReconcile) {
+        this.reconcileComplianceCellFromLogs(cCrew, cDate, reportType, foreman);
+      }
+    }
 
     // Close edit modal
     const editModal = document.getElementById('edit-log-entry-modal');

@@ -3500,8 +3500,11 @@ class ItemStatsEngine {
     if (newAssignedTo && assignedToHeader) row[assignedToHeader] = newAssignedTo;
     if (newChgOut && changeOutHeader) row[changeOutHeader] = newChgOut;
 
-    // Apply to rawGrid if exists
+    // Snapshot prior rawGrid row BEFORE applying updates in-place
     const rowIdx = row._rowIdx || (table.rows.indexOf(row) !== -1 ? table.rows.indexOf(row) + 2 : null);
+    const priorRawRow = (table.rawGrid && rowIdx && table.rawGrid[rowIdx - 1])
+      ? table.rawGrid[rowIdx - 1].slice()
+      : null;
     if (table.rawGrid && rowIdx && table.rawGrid[rowIdx - 1]) {
       const gRow = table.rawGrid[rowIdx - 1];
       table.headers.forEach((h, colIdx) => {
@@ -3511,16 +3514,27 @@ class ItemStatsEngine {
 
     // Queue UPDATE_CELL mutations for sync
     const sheetName = table.name || activeSheetKey;
+    const itemIdKey = String(
+      row['HVT #'] || row['HV Tester'] || row['Phasing Set'] || row['Phasing Set #'] || row['PS #'] ||
+      row['AED'] || row['AED #'] || row['Glove'] || row['Sleeve'] || row['Blanket'] || row['MACK'] ||
+      row['Item #'] || (String(activeSheetKey || '').includes('ground') ? row['Serial #'] : '') ||
+      row['Hot Stick'] || (table.headers && table.headers[0] ? row[table.headers[0]] : '') || ''
+    ).trim();
     const addCellMutation = async (hName, val, skipHistory = true) => {
       if (!hName || val === undefined) return;
       const colIdx = table.headers.indexOf(hName);
       if (colIdx !== -1 && rowIdx) {
+        const oldVal = (priorRawRow && priorRawRow[colIdx] !== undefined && priorRawRow[colIdx] !== null)
+          ? priorRawRow[colIdx]
+          : '';
         await this.db.addMutation({
           action: 'UPDATE_CELL',
           sheetName: sheetName,
           row: rowIdx,
           col: colIdx + 1,
           header: hName,
+          itemIdentifier: itemIdKey,
+          oldValue: oldVal,
           value: val,
           skipHistory: skipHistory
         });

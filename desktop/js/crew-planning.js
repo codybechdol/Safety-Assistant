@@ -556,24 +556,28 @@ class CrewPlanningEngine {
       if (currentSideType && o.sideType && o.sideType.toLowerCase() === currentSideType.toLowerCase()) return true;
       return false;
     });
-    const memberObj = currentOcc?.memberObj;
+    let memberObj = currentOcc?.memberObj;
+    if (!memberObj && currentSideType && plan.sidePane && Array.isArray(plan.sidePane[currentSideType])) {
+      memberObj = plan.sidePane[currentSideType].find(item => String(item?.name || '').toLowerCase().trim() === norm);
+    }
 
     const confirmKey = currentBaseJob ? `${norm}::${currentBaseJob.toLowerCase()}` : `${norm}::${(currentSideType || '').toLowerCase()}`;
+    const legacySideKey = currentSideType ? `${norm}::side:${currentSideType.toLowerCase()}` : '';
     let explicitConfirmVal = undefined;
     if (plan.confirmedPositions) {
       if (plan.confirmedPositions[confirmKey] !== undefined) {
         explicitConfirmVal = plan.confirmedPositions[confirmKey];
-      } else if (plan.confirmedPositions[norm] !== undefined) {
-        explicitConfirmVal = plan.confirmedPositions[norm];
+      } else if (legacySideKey && plan.confirmedPositions[legacySideKey] !== undefined) {
+        explicitConfirmVal = plan.confirmedPositions[legacySideKey];
       }
     }
 
-    const isConfirmed = explicitConfirmVal !== undefined
-      ? Boolean(explicitConfirmVal)
-      : Boolean(memberObj?.isConfirmed);
+    const isConfirmed = (isMultiLocation || isMoved)
+      ? (explicitConfirmVal !== undefined ? Boolean(explicitConfirmVal) : Boolean(memberObj?.isConfirmed))
+      : false;
 
     // Conditional styling evaluation:
-    // 1. If not multi-location and not moved: NORMAL (conditional coloring removed)
+    // 1. If not multi-location and not moved: NORMAL (no conditional highlighting)
     // 2. If moved or multi-location:
     //    - If confirmed: YELLOW
     //    - If unconfirmed: PURPLE
@@ -600,17 +604,6 @@ class CrewPlanningEngine {
         statusColor = 'purple';
         badgeText = 'Moved';
         title = `Moved from ${originalLabel} to ${currentLabel}. Click to confirm position`;
-      }
-    } else if (explicitConfirmVal !== undefined) {
-      // User explicitly confirmed or unconfirmed this employee
-      if (isConfirmed) {
-        statusColor = 'yellow';
-        badgeText = 'Confirmed';
-        title = `Confirmed position in ${currentLabel}`;
-      } else {
-        statusColor = 'purple';
-        badgeText = 'Unconfirmed';
-        title = `Unconfirmed position in ${currentLabel}. Click to confirm position`;
       }
     }
 
@@ -682,6 +675,11 @@ class CrewPlanningEngine {
     // Safety auto-repair: Ensure no active baseline employees are completely missing from the plan
     this.healMissingBaselineEmployees(plan);
 
+    // Clear stale confirmations for employees whose positions already match live baseline
+    if (this.cleanupStaleConfirmations(plan)) {
+      this.savePlan(plan);
+    }
+
     // Sync crew types with Job Tracking and auto-heal if empty
     if (plan.crews && Array.isArray(plan.crews)) {
       const jtTable = this.db ? this.db.getTable('job_tracking') : null;
@@ -700,6 +698,82 @@ class CrewPlanningEngine {
     }
 
     return plan;
+  }
+
+  /**
+   * Clears location-scoped and legacy bare-name confirmation entries for an employee.
+   */
+  clearMemberConfirmations(plan, empName, locationKeys = []) {
+    if (!plan || !plan.confirmedPositions || !empName) return;
+    const norm = String(empName).toLowerCase().trim();
+    delete plan.confirmedPositions[norm];
+    (locationKeys || []).forEach(loc => {
+      const k = String(loc || '').toLowerCase().trim();
+      if (!k) return;
+      delete plan.confirmedPositions[`${norm}::${k}`];
+      delete plan.confirmedPositions[`${norm}::side:${k}`];
+    });
+  }
+
+  /**
+   * Removes stale confirmation flags/entries for employees who match their live baseline
+   * in a single location (e.g. confirmed moves carried over from a previous week's structure).
+   */
+  cleanupStaleConfirmations(plan) {
+    if (!plan) return false;
+    let changed = false;
+    if (!plan.confirmedPositions || typeof plan.confirmedPositions !== 'object') {
+      plan.confirmedPositions = {};
+    }
+
+    const baselineMap = this.getOriginalEmployeeLocations();
+    const occMap = this.getEmployeeOccurrencesMap(plan);
+    const validMovedKeys = new Set();
+
+    (plan.crews || []).forEach(crew => {
+      const baseJobLower = String(crew.jobNumber || '').trim().toLowerCase();
+      (crew.members || []).forEach(m => {
+        if (!m || !m.name || this.isNonEmployeeName(m.name)) return;
+        const norm = String(m.name).toLowerCase().trim();
+        const st = this.getEmployeePlanningStatus(m.name, crew.jobNumber, null, plan, baselineMap, occMap);
+        if (!st.isMoved && !st.isMultiLocation) {
+          if (m.isConfirmed) {
+            m.isConfirmed = false;
+            changed = true;
+          }
+        } else {
+          validMovedKeys.add(`${norm}::${baseJobLower}`);
+        }
+      });
+    });
+
+    const sp = plan.sidePane || {};
+    ['planning', 'vacation', 'quit', 'weeds', 'lightDuty', 'pendingHires'].forEach(cat => {
+      const catLower = cat.toLowerCase();
+      (sp[cat] || []).forEach(item => {
+        if (!item || !item.name || this.isNonEmployeeName(item.name)) return;
+        const norm = String(item.name).toLowerCase().trim();
+        const st = this.getEmployeePlanningStatus(item.name, null, cat, plan, baselineMap, occMap);
+        if (!st.isMoved && !st.isMultiLocation) {
+          if (item.isConfirmed) {
+            item.isConfirmed = false;
+            changed = true;
+          }
+        } else {
+          validMovedKeys.add(`${norm}::${catLower}`);
+          validMovedKeys.add(`${norm}::side:${catLower}`);
+        }
+      });
+    });
+
+    Object.keys(plan.confirmedPositions).forEach(key => {
+      if (!validMovedKeys.has(key)) {
+        delete plan.confirmedPositions[key];
+        changed = true;
+      }
+    });
+
+    return changed;
   }
 
   /**
@@ -2651,6 +2725,11 @@ class CrewPlanningEngine {
     // Mark as unconfirmed on move/copy into different crew so it glows purple
     memberObj.isConfirmed = false;
     if (isCopy) memberObj.isDuplicate = true;
+    this.clearMemberConfirmations(
+      plan,
+      memberObj.name,
+      isCopy ? [destBaseJob] : [fromBaseJob, fromSideType, destBaseJob]
+    );
 
     // Insert into destination crew at target position
     if (insertPosition === 'start') {
@@ -2777,6 +2856,11 @@ class CrewPlanningEngine {
     memberObj.priorBaseJob = fromBaseJob || memberObj.priorBaseJob || memberObj.currentJob || memberObj.originalBaseJob || '';
     memberObj.isConfirmed = false;
     if (isCopy) memberObj.isDuplicate = true;
+    this.clearMemberConfirmations(
+      plan,
+      memberObj.name,
+      isCopy ? [destSideType] : [fromBaseJob, fromSideType, destSideType]
+    );
     plan.sidePane[destSideType].push(memberObj);
 
     this.savePlan(plan);
@@ -3124,6 +3208,8 @@ class CrewPlanningEngine {
       } else {
         plan.sidePane.quit.push(quitItem);
       }
+      if (!plan.confirmedPositions) plan.confirmedPositions = {};
+      plan.confirmedPositions[`${normName}::quit`] = true;
 
       this.savePlan(plan);
       this.refreshView();
@@ -3187,6 +3273,11 @@ class CrewPlanningEngine {
     memberObj.currentJob = fromBaseJob || memberObj.currentJob || '';
     memberObj.isConfirmed = false;
     if (isCopy) memberObj.isDuplicate = true;
+    this.clearMemberConfirmations(
+      plan,
+      memberObj.name,
+      isCopy ? ['quit'] : [fromBaseJob, fromSideType, 'quit']
+    );
     memberObj.departureDate = departureDate;
     memberObj.departureReason = departureReason;
     memberObj.notes = notes;
@@ -3688,7 +3779,7 @@ class CrewPlanningEngine {
           name: existingItem?.name || empName,
           classification: resolvedClass,
           role: resolvedRole,
-          isConfirmed: true,
+          isConfirmed: false,
           slot: `${srcCrew.jobNumber}.${srcCrew.members.length + 1}`
         };
         srcCrew.members.push(memberObj);
@@ -3698,8 +3789,6 @@ class CrewPlanningEngine {
       memberObj.vacationDateRange = dateRange;
       memberObj.isFutureVacation = Boolean(isFutureVacation);
       memberObj.vacationNotes = notes;
-      memberObj.isConfirmed = true;
-      plan.confirmedPositions[`${normName}::${srcCrew.jobNumber.toLowerCase()}`] = true;
 
       // Also update or add entry in plan.sidePane.vacation
       const vacIdx = plan.sidePane.vacation.findIndex(v => v.name.trim().toLowerCase() === normName);
@@ -3725,7 +3814,7 @@ class CrewPlanningEngine {
       } else {
         plan.sidePane.vacation.push(vacItem);
       }
-      plan.confirmedPositions[`${normName}::side:vacation`] = true;
+      plan.confirmedPositions[`${normName}::vacation`] = true;
 
       // If this is a Future Week vacation, check if the start date falls into one of the upcoming planning weeks and stage it there too!
       if (isFutureVacation && vacationStartDate) {
@@ -3801,7 +3890,8 @@ class CrewPlanningEngine {
     } else {
       plan.sidePane.vacation.push(updatedVacItem);
     }
-    plan.confirmedPositions[`${normName}::side:vacation`] = true;
+    this.clearMemberConfirmations(plan, empName, isCopy ? [] : [crewNum, fromSideType]);
+    plan.confirmedPositions[`${normName}::vacation`] = true;
 
     this.savePlan(plan);
     this.refreshView();
@@ -3828,8 +3918,9 @@ class CrewPlanningEngine {
       const sunStr = `${String(sun.getMonth() + 1).padStart(2, '0')}/${String(sun.getDate()).padStart(2, '0')}/${sun.getFullYear()}`;
       if (sunStr === this.selectedWeek) return;
 
-      if (this.plansMap && this.plansMap[sunStr]) {
-        const futurePlan = this.plansMap[sunStr];
+      const allPlans = this.getPlansMap();
+      if (allPlans && allPlans[sunStr]) {
+        const futurePlan = allPlans[sunStr];
         if (!futurePlan.sidePane) futurePlan.sidePane = {};
         if (!futurePlan.sidePane.vacation) futurePlan.sidePane.vacation = [];
         const norm = vacItem.name.trim().toLowerCase();
@@ -3858,7 +3949,7 @@ class CrewPlanningEngine {
           futurePlan.sidePane.vacation.push(fItem);
         }
         if (!futurePlan.confirmedPositions) futurePlan.confirmedPositions = {};
-        futurePlan.confirmedPositions[`${norm}::side:vacation`] = true;
+        futurePlan.confirmedPositions[`${norm}::vacation`] = true;
         this.savePlan(futurePlan);
       }
     } catch (err) {
@@ -3992,6 +4083,7 @@ class CrewPlanningEngine {
           targetCrew.members.forEach((m, idx) => {
             m.slot = `${targetCrew.jobNumber}.${idx + 1}`;
           });
+          this.clearMemberConfirmations(plan, name, [sideType, targetCrew.jobNumber]);
           restored = true;
 
           if (typeof window.showToast === 'function') {
@@ -4008,11 +4100,13 @@ class CrewPlanningEngine {
           currentJob: base?.originalSlot || '',
           isConfirmed: false
         });
+        this.clearMemberConfirmations(plan, name, [sideType, 'planning']);
         if (typeof window.showToast === 'function') {
           window.showToast(`↩️ Moved ${name} to Planning Pool`, 'info');
         }
       }
     } else {
+      this.clearMemberConfirmations(plan, name, [sideType]);
       if (typeof window.showToast === 'function') {
         window.showToast(`Removed ${name} from ${sideType === 'quit' ? 'Quit / Notice' : sideType}.`, 'info');
       }
@@ -4435,13 +4529,21 @@ class CrewPlanningEngine {
 
     if (targetMember) {
       const currentSt = this.getEmployeePlanningStatus(empName, matchedCrewJob, matchedSideType, plan);
+      if (!currentSt.isMoved && !currentSt.isMultiLocation) {
+        targetMember.isConfirmed = false;
+        this.clearMemberConfirmations(plan, empName, [matchedCrewJob || matchedSideType]);
+        this.savePlan(plan);
+        this.refreshView();
+        return;
+      }
       const newState = !currentSt.isConfirmed;
       targetMember.isConfirmed = newState;
+      delete plan.confirmedPositions[norm];
+      if (matchedSideType) {
+        delete plan.confirmedPositions[`${norm}::side:${matchedSideType.toLowerCase()}`];
+      }
       if (confirmKey) {
         plan.confirmedPositions[confirmKey] = newState;
-      }
-      if (!currentSt.isMultiLocation) {
-        plan.confirmedPositions[norm] = newState;
       }
       this.savePlan(plan);
       if (typeof window.showToast === 'function') {
@@ -4467,8 +4569,8 @@ class CrewPlanningEngine {
       if (p.memberObj) p.memberObj.isConfirmed = true;
       const norm = p.name.toLowerCase().trim();
       const locKey = p.baseJob ? p.baseJob.toLowerCase() : (p.sideType ? p.sideType.toLowerCase() : '');
+      delete plan.confirmedPositions[norm];
       if (locKey) plan.confirmedPositions[`${norm}::${locKey}`] = true;
-      plan.confirmedPositions[norm] = true;
     });
 
     this.savePlan(plan);
@@ -5192,6 +5294,19 @@ class CrewPlanningEngine {
     const deltas = this.computePublishDeltas(plan);
     const transferEquipment = document.getElementById('publish-transfer-equipment-checkbox')?.checked ?? true;
 
+    // Capture confirmed yellow moved employee names BEFORE Steps 1-3 mutate live empTable.rows
+    const yellowConfirmedMoves = [];
+    const prePublishBaselineMap = this.getOriginalEmployeeLocations();
+    const prePublishOccMap = this.getEmployeeOccurrencesMap(plan);
+    (plan.crews || []).forEach(crew => {
+      (crew.members || []).forEach(m => {
+        const st = this.getEmployeePlanningStatus(m.name, crew.jobNumber, null, plan, prePublishBaselineMap, prePublishOccMap);
+        if (st.statusColor === 'yellow' || (st.isMoved && m.isConfirmed)) {
+          if (!yellowConfirmedMoves.includes(m.name)) yellowConfirmedMoves.push(m.name);
+        }
+      });
+    });
+
     try {
       const empTable = this.db.getTable('employees');
       const jtTable = this.db.getTable('job_tracking');
@@ -5497,20 +5612,7 @@ class CrewPlanningEngine {
         }
       }
 
-      // 6. Collect confirmed yellow moved employee names to persist onto live crew cards
-      const yellowConfirmedMoves = [];
-      const baselineMap = this.getOriginalEmployeeLocations();
-      const occMap = this.getEmployeeOccurrencesMap(plan);
-
-      (plan.crews || []).forEach(crew => {
-        (crew.members || []).forEach(m => {
-          const st = this.getEmployeePlanningStatus(m.name, crew.jobNumber, null, plan, baselineMap, occMap);
-          if (st.statusColor === 'yellow' || (st.isMoved && m.isConfirmed)) {
-            if (!yellowConfirmedMoves.includes(m.name)) yellowConfirmedMoves.push(m.name);
-          }
-        });
-      });
-
+      // 6. Persist confirmed yellow moved employee names onto live crew cards for this published week
       if (!this.db.snapshot.configs) this.db.snapshot.configs = {};
       if (!this.db.snapshot.configs.confirmed_yellow_moves) this.db.snapshot.configs.confirmed_yellow_moves = {};
       this.db.snapshot.configs.confirmed_yellow_moves[publishWeek] = yellowConfirmedMoves;
@@ -5530,15 +5632,22 @@ class CrewPlanningEngine {
       publishedPlanCopy.weekDate = publishWeek;
       publishedPlanCopy.weekDateFormatted = publishWeek;
       publishedPlanCopy.status = 'published';
+      this.cleanupStaleConfirmations(publishedPlanCopy);
       this.savePlan(publishedPlanCopy);
 
       // If the user edited on a future week (e.g. 11/15/2026) and published to Current Week (e.g. 11/08/2026),
-      // re-sync the future week draft from the newly updated live roster so it starts clean from the published baseline
+      // re-sync the future week draft from the newly updated live roster so it starts clean from the published baseline.
+      // Also strip stale confirmations from any other draft weeks whose moves just went live.
+      const allPlans = this.getPlansMap();
       if (sourceWeek && sourceWeek !== publishWeek) {
-        const allPlans = this.getPlansMap();
         allPlans[sourceWeek] = this.initializePlanFromCurrentRoster(sourceWeek);
-        this.savePlansMap(allPlans);
       }
+      Object.keys(allPlans).forEach(wk => {
+        if (wk !== publishWeek && allPlans[wk] && allPlans[wk].status !== 'published') {
+          this.cleanupStaleConfirmations(allPlans[wk]);
+        }
+      });
+      this.savePlansMap(allPlans);
 
       this.selectedWeek = publishWeek;
 
@@ -6331,6 +6440,7 @@ class CrewPlanningEngine {
           if (fIdx !== -1) {
             fObj = plan.sidePane.planning.splice(fIdx, 1)[0];
           }
+          this.clearMemberConfirmations(plan, empName, ['planning', cleanJob]);
           initialMembers.push({
             name: empName,
             slot: `${cleanJob}.${initialMembers.length + 1}`,
@@ -7546,15 +7656,17 @@ class CrewPlanningEngine {
       }, '#fbbf24', 'rgba(245, 158, 11, 0.12)'));
     }
 
-    // 4. Confirm / Unconfirm
-    if (st.isConfirmed) {
-      menu.appendChild(makeItem('🟣', 'Unconfirm Position (Return to Purple)', () => {
-        this.toggleConfirmMemberPosition(empName, baseJob);
-      }, '#c084fc'));
-    } else {
-      menu.appendChild(makeItem('🟡', 'Confirm Position (Turn Yellow)', () => {
-        this.toggleConfirmMemberPosition(empName, baseJob);
-      }, '#facc15', 'rgba(250, 204, 21, 0.12)'));
+    // 4. Confirm / Unconfirm (only applicable for moved or multi-location positions)
+    if (st.isMoved || st.isMultiLocation) {
+      if (st.isConfirmed) {
+        menu.appendChild(makeItem('🟣', 'Unconfirm Position (Return to Purple)', () => {
+          this.toggleConfirmMemberPosition(empName, baseJob);
+        }, '#c084fc'));
+      } else {
+        menu.appendChild(makeItem('🟡', 'Confirm Position (Turn Yellow)', () => {
+          this.toggleConfirmMemberPosition(empName, baseJob);
+        }, '#facc15', 'rgba(250, 204, 21, 0.12)'));
+      }
     }
 
     menu.appendChild(makeDivider());

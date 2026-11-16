@@ -1349,8 +1349,9 @@ class ProcurementEngine {
     return result;
   }
 
-  suggestNextItemNumber(category) {
+  suggestNextItemNumber(category, sizeOrSpec = '') {
     const cat = String(category || '').toLowerCase();
+    const spec = String(sizeOrSpec || '').toLowerCase();
     let tableKey = 'gloves';
     let prefix = '';
     let defaultStart = 1001;
@@ -1363,7 +1364,8 @@ class ProcurementEngine {
       defaultStart = 3000;
     } else if (cat.includes('blanket')) {
       tableKey = 'blankets';
-      prefix = 'B';
+      const isSplit = spec.includes('split');
+      prefix = isSplit ? 'S' : 'B';
       defaultStart = 100;
     } else if (cat.includes('mack')) {
       tableKey = 'macks';
@@ -1395,7 +1397,9 @@ class ProcurementEngine {
     if (!table) return prefix ? `${prefix}${defaultStart}` : String(defaultStart);
 
     const rows = table.rows || table.rawGrid || [];
-    let maxNum = defaultStart - 1;
+    let matchedMax = -1;
+    let padWidth = 0;
+    const prefixRegex = prefix ? new RegExp(`^${prefix}[\\s\\-_#]*?(\\d+)$`, 'i') : null;
 
     rows.forEach(r => {
       let numStr = '';
@@ -1405,15 +1409,30 @@ class ProcurementEngine {
         numStr = String(r['Item #'] || r['Item Number'] || r['Serial #'] || r['Glove'] || r['Sleeve'] || r['Blanket'] || r['MACK'] || Object.values(r)[0] || '').trim();
       }
       if (!numStr) return;
-      const digits = numStr.replace(/^[A-Za-z#\s\-_]+/, '').trim();
+
+      let digits = '';
+      if (prefixRegex) {
+        const m = numStr.match(prefixRegex);
+        if (!m) return;
+        digits = m[1];
+      } else {
+        digits = numStr.replace(/^[A-Za-z#\s\-_]+/, '').trim();
+      }
+
       const parsed = parseInt(digits, 10);
-      if (!isNaN(parsed) && parsed > maxNum) {
-        maxNum = parsed;
+      if (!isNaN(parsed) && parsed > matchedMax) {
+        matchedMax = parsed;
+      }
+      if (/^0\d+/.test(digits) && digits.length > padWidth) {
+        padWidth = digits.length;
       }
     });
 
-    const nextVal = maxNum + 1;
-    return prefix ? `${prefix}${nextVal}` : String(nextVal);
+    const nextVal = matchedMax >= 0 ? (matchedMax + 1) : defaultStart;
+    const formatted = (padWidth > 0 && String(nextVal).length < padWidth)
+      ? String(nextVal).padStart(padWidth, '0')
+      : String(nextVal);
+    return prefix ? `${prefix}${formatted}` : formatted;
   }
 
   async syncVendorPrice(vendorName, itemCategory, size, classVal, newPrice) {
@@ -3016,16 +3035,73 @@ class ProcurementEngine {
     return match ? (match.partNumber || '') : '';
   }
 
-  getSectionTabsHtml(activeFilter = 'all', counts = null) {
-    const c = counts || {
-      all: this.items ? this.items.length : 0,
-      needs: this.items ? this.items.filter(i => i.section !== 'ordered_pending').length : 0,
-      ordered_pending: this.items ? this.items.filter(i => i.section === 'ordered_pending').length : 0,
-      swaps_need: this.items ? this.items.filter(i => i.section === 'swaps_need').length : 0,
-      swaps_size_up: this.items ? this.items.filter(i => i.section === 'swaps_size_up').length : 0,
-      assigned_size_up: this.items ? this.items.filter(i => i.section === 'assigned_size_up').length : 0,
-      compliance_missing: this.items ? this.items.filter(i => i.section === 'compliance_missing').length : 0
+  summarizeOrderItems(items = []) {
+    let equipmentUnits = 0;
+    let equipmentLineCount = 0;
+    let testingUnits = 0;
+    let testingLineCount = 0;
+    const orderKeys = new Set();
+
+    (items || []).forEach(it => {
+      const qty = Number(it.quantity) || 0;
+      if (this.isTestingServiceItem(it)) {
+        testingLineCount += 1;
+        testingUnits += qty;
+      } else {
+        equipmentLineCount += 1;
+        equipmentUnits += qty;
+      }
+      if (it.section === 'ordered_pending') {
+        orderKeys.add(this.getOrderKeyForPendingItem(it).orderKey);
+      }
+    });
+
+    return {
+      orderCount: orderKeys.size,
+      equipmentUnits,
+      equipmentLineCount,
+      testingUnits,
+      testingLineCount
     };
+  }
+
+  formatOrderItemsCountText(summary, includeOrderCount = false) {
+    const { orderCount, equipmentUnits, testingUnits } = summary || {};
+    const parts = [];
+    if (includeOrderCount) {
+      const ord = orderCount || 0;
+      parts.push(`${ord} ${ord === 1 ? 'order' : 'orders'}`);
+    }
+    if (equipmentUnits > 0) {
+      const testSuffix = testingUnits > 0 ? ` (+${testingUnits} testing)` : '';
+      parts.push(`${equipmentUnits} ${equipmentUnits === 1 ? 'item' : 'items'}${testSuffix}`);
+    } else if (testingUnits > 0) {
+      parts.push(`${testingUnits} testing/labor`);
+    } else {
+      parts.push('0 items');
+    }
+    return parts.join(' · ');
+  }
+
+  getSectionCounts() {
+    const items = this.items || [];
+    const needsItems = items.filter(i => i.section !== 'ordered_pending');
+    const orderedItems = items.filter(i => i.section === 'ordered_pending');
+    const orderedOrderCount = this.summarizeOrderItems(orderedItems).orderCount;
+    const needsCount = needsItems.length;
+    return {
+      all: needsCount + orderedOrderCount,
+      needs: needsCount,
+      ordered_pending: orderedOrderCount,
+      swaps_need: needsItems.filter(i => i.section === 'swaps_need').length,
+      swaps_size_up: needsItems.filter(i => i.section === 'swaps_size_up').length,
+      assigned_size_up: needsItems.filter(i => i.section === 'assigned_size_up').length,
+      compliance_missing: needsItems.filter(i => i.section === 'compliance_missing').length
+    };
+  }
+
+  getSectionTabsHtml(activeFilter = 'all', counts = null) {
+    const c = counts || this.getSectionCounts();
 
     return `
       <!-- Section Filter Tabs Bar -->
@@ -3039,7 +3115,7 @@ class ProcurementEngine {
           <span>🛒 Needs to Order</span>
           <span style="background: rgba(255,255,255,0.15); padding: 1px 6px; border-radius: 10px; font-size: 10.5px;">${c.needs}</span>
         </button>
-        <button type="button" class="btn ${activeFilter === 'ordered_pending' ? 'btn-primary' : 'btn-secondary'}" style="font-size: 11.5px; padding: 4px 10px; display: inline-flex; align-items: center; gap: 6px; border-color: #10b981; color: ${activeFilter === 'ordered_pending' ? '#fff' : '#6ee7b7'};" onclick="window.procurementEngine.setSectionFilter('ordered_pending')">
+        <button type="button" class="btn ${activeFilter === 'ordered_pending' ? 'btn-primary' : 'btn-secondary'}" style="font-size: 11.5px; padding: 4px 10px; display: inline-flex; align-items: center; gap: 6px; border-color: #10b981; color: ${activeFilter === 'ordered_pending' ? '#fff' : '#6ee7b7'};" onclick="window.procurementEngine.setSectionFilter('ordered_pending')" title="Open purchase orders awaiting delivery">
           <span>📦 Ordered (Awaiting Delivery)</span>
           <span style="background: rgba(16,185,129,0.25); padding: 1px 6px; border-radius: 10px; font-size: 10.5px; color: #34d399; font-weight: 700;">${c.ordered_pending}</span>
         </button>
@@ -3490,15 +3566,7 @@ class ProcurementEngine {
     const activeFilter = this.currentSectionFilter || 'all';
 
     // Calculate section counts
-    const counts = {
-      all: this.items.length,
-      needs: this.items.filter(i => i.section !== 'ordered_pending').length,
-      ordered_pending: this.items.filter(i => i.section === 'ordered_pending').length,
-      swaps_need: this.items.filter(i => i.section === 'swaps_need').length,
-      swaps_size_up: this.items.filter(i => i.section === 'swaps_size_up').length,
-      assigned_size_up: this.items.filter(i => i.section === 'assigned_size_up').length,
-      compliance_missing: this.items.filter(i => i.section === 'compliance_missing').length
-    };
+    const counts = this.getSectionCounts();
 
     const tabsHtml = this.getSectionTabsHtml(activeFilter, counts);
 
@@ -3749,9 +3817,11 @@ class ProcurementEngine {
                 <button type="button" class="btn btn-xs" onclick="window.procurementEngine.quickMarkItemReceived(${item._globalIdx})" style="background: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.4); color: #6ee7b7; padding: 3px 7px; font-size: 11px; border-radius: 3px; cursor: pointer; display: inline-flex; align-items: center; gap: 3px;" title="Mark this line item as Received and clear it from Awaiting Delivery (already added to inventory)">
                   <span>✅</span> Mark Rec'd
                 </button>
-                <button type="button" class="btn btn-xs" onclick="window.procurementEngine.openBatchDeliveryModal([window.procurementEngine.items[${item._globalIdx}]])" style="background: rgba(59, 130, 246, 0.15); border: 1px solid rgba(59, 130, 246, 0.4); color: #93c5fd; padding: 3px 7px; font-size: 11px; border-radius: 3px; cursor: pointer; display: inline-flex; align-items: center; gap: 3px;" title="Receive this delivered item into inventory and assign new item numbers">
-                  <span>🚚</span> Deliver
-                </button>
+                ${!this.isTestingServiceItem(item) ? `
+                  <button type="button" class="btn btn-xs" onclick="window.procurementEngine.openBatchDeliveryModal([window.procurementEngine.items[${item._globalIdx}]])" style="background: rgba(59, 130, 246, 0.15); border: 1px solid rgba(59, 130, 246, 0.4); color: #93c5fd; padding: 3px 7px; font-size: 11px; border-radius: 3px; cursor: pointer; display: inline-flex; align-items: center; gap: 3px;" title="Receive this delivered item into inventory and assign new item numbers">
+                    <span>🚚</span> Deliver
+                  </button>
+                ` : ''}
                 <button type="button" class="btn btn-xs" onclick="window.procurementEngine.openEditPendingOrderItem(${item._globalIdx})" style="background: rgba(148, 163, 184, 0.15); border: 1px solid rgba(148, 163, 184, 0.35); color: #cbd5e1; padding: 3px 7px; font-size: 11px; border-radius: 3px; cursor: pointer; display: inline-flex; align-items: center; gap: 3px;" title="Edit Order #, Price, and Assigned Lineman">
                   <span>✏️</span> Edit
                 </button>
@@ -3778,6 +3848,9 @@ class ProcurementEngine {
 
       const secUnits = secItems.reduce((acc, it) => acc + it.quantity, 0);
       const secAllChecked = secItems.every(it => it.selected);
+      const secBadgeText = secKey === 'ordered_pending'
+        ? this.formatOrderItemsCountText(this.summarizeOrderItems(secItems), true)
+        : `${secItems.length} line ${secItems.length === 1 ? 'item' : 'items'} (${secUnits} units)`;
 
       const isSecCollapsed = this.isSectionCollapsed(secKey);
 
@@ -3794,7 +3867,7 @@ class ProcurementEngine {
                 <span style="font-size: 16px;">${secConfig.icon}</span>
                 <span style="font-weight: 800; font-size: 13.5px; color: ${secConfig.badgeText};">${secConfig.title.toUpperCase()}</span>
                 <span class="brand-badge" style="background: ${secConfig.badgeColor}; color: ${secConfig.badgeText}; border: 1px solid ${secConfig.badgeBorder}; font-size: 11px; font-weight: 700;">
-                  ${secItems.length} line ${secItems.length === 1 ? 'item' : 'items'} (${secUnits} units)
+                  ${secBadgeText}
                 </span>
               </div>
               <div style="display: flex; align-items: center; gap: 12px;">
@@ -3906,8 +3979,16 @@ class ProcurementEngine {
                       <span style="color: #38bdf8; font-size: 12px;">🚚 Est. Delivery: <strong style="color: #67e8f9;">${this.escapeHtml(grp.expectedDelivery)}</strong></span>
                     ` : ''}
                     <span class="brand-badge" style="background: rgba(16, 185, 129, 0.18); color: #6ee7b7; border: 1px solid rgba(16, 185, 129, 0.35); font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 10px;">
-                      ${grp.items.length} line ${grp.items.length === 1 ? 'item' : 'items'} (${grp.totalUnits} units)
+                      ${this.formatOrderItemsCountText(this.summarizeOrderItems(grp.items), false)}
                     </span>
+                    ${(() => {
+                      const dSum = this._getPoOrderDraftSummary(grp.vendorOrderNumber || grp.poNumber || grp.orderNumber);
+                      if (!dSum.hasDraft) return '';
+                      const label = dSum.receivedCount > 0
+                        ? `💾 In Progress (${dSum.receivedCount} received)`
+                        : '💾 Draft Saved';
+                      return `<span class="brand-badge" style="background: rgba(245, 158, 11, 0.2); color: #fcd34d; border: 1px solid rgba(245, 158, 11, 0.45); font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 10px;" title="Saved edits / partial receiving progress stored">${label}</span>`;
+                    })()}
                   </div>
                   <div style="display: flex; align-items: center; gap: 8px;" onclick="event.stopPropagation()">
                     ${grp.totalCost > 0 ? `
@@ -4047,20 +4128,24 @@ class ProcurementEngine {
       targetItems = targetItems.filter(i => i.section === activeFilter);
     }
 
-    let selectedCount = 0;
-    let totalQty = 0;
+    const selectedTargetItems = targetItems.filter(i => i.selected);
     let totalCost = 0;
 
-    targetItems.forEach(i => {
-      if (i.selected) {
-        selectedCount++;
-        totalQty += (i.quantity || 0);
-        totalCost += ((i.price || 0) * (i.quantity || 0));
-      }
+    selectedTargetItems.forEach(i => {
+      totalCost += ((i.price || 0) * (i.quantity || 0));
     });
 
     const badge = document.getElementById('procurement-selected-badge');
-    if (badge) badge.textContent = `${selectedCount} items selected (${totalQty} units)`;
+    if (badge) {
+      if (activeFilter === 'ordered_pending') {
+        const sum = this.summarizeOrderItems(selectedTargetItems);
+        badge.textContent = this.formatOrderItemsCountText(sum, true);
+      } else {
+        const selectedCount = selectedTargetItems.length;
+        const totalQty = selectedTargetItems.reduce((acc, i) => acc + (i.quantity || 0), 0);
+        badge.textContent = `${selectedCount} items selected (${totalQty} units)`;
+      }
+    }
 
     const totalEl = document.getElementById('procurement-total-cost');
     if (totalEl) totalEl.textContent = `$${totalCost.toFixed(2)}`;
@@ -6455,26 +6540,59 @@ class ProcurementEngine {
     }
 
     // 4. Update swap tables (glove_swaps, sleeve_swaps, blanket_swaps, mack_swaps)
+    const swapMetaMap = {
+      glove_swaps: { cat: 'glove', invKey: 'gloves', isRubber: true },
+      sleeve_swaps: { cat: 'sleeve', invKey: 'sleeves', isRubber: true },
+      blanket_swaps: { cat: 'blanket', invKey: 'blankets', isRubber: false },
+      mack_swaps: { cat: 'mack', invKey: 'macks', isRubber: false }
+    };
+    const parseSwapCls = (c) => {
+      if (c === undefined || c === null || c === '') return null;
+      const m = String(c).match(/\d+/);
+      return m ? parseInt(m[0], 10) : null;
+    };
     const swapKeys = ['glove_swaps', 'sleeve_swaps', 'blanket_swaps', 'mack_swaps'];
     for (const sk of swapKeys) {
       const sTable = (this.db && typeof this.db.getTable === 'function' ? this.db.getTable(sk) : null) || snap?.tables?.[sk];
       if (sTable) {
+        const meta = swapMetaMap[sk];
+        const invTableForSk = (this.db && typeof this.db.getTable === 'function' ? this.db.getTable(meta.invKey) : null) || snap?.tables?.[meta.invKey];
         const isMack = (sk === 'mack_swaps');
         const statColIdx = isMack ? 9 : 7; // 0-based
         const notesColIdx = isMack ? 11 : 11; // 0-based
         const pickColIdx = isMack ? 8 : 6;
         const pickedColIdx = isMack ? 10 : 8;
 
-        if (sTable.rows) {
+        if (sTable.rows && sTable.rows.length > 0) {
           for (const sr of sTable.rows) {
             const emp = String(sr['Employee'] || sr['Employee Name'] || sr['Assigned To'] || Object.values(sr)[0] || '').trim();
             const stat = String(sr['Status'] || '');
+            const statLower = stat.toLowerCase();
+            if (statLower === 'complete' || statLower.includes('ready for delivery')) continue;
             const notes = String(sr['Notes'] || '');
             if (matchesPoOrEmp(emp, stat, notes)) {
-              // Find unit itemNum if available
+              const oldItemNum = String(sr['Current Glove #'] || sr['Current Sleeve #'] || sr['Current Blanket #'] || sr['Current MACK #'] || sr['Current Item #'] || sr['Current Item'] || '').trim();
+              let srClass = parseSwapCls(sr['Class']);
+              if (meta.isRubber && srClass === null && oldItemNum && invTableForSk && Array.isArray(invTableForSk.rows)) {
+                const oldInv = invTableForSk.rows.find(it => String(it['Item #'] || it['Glove'] || it['Sleeve'] || it['ESL ID'] || '').trim() === oldItemNum);
+                if (oldInv) srClass = parseSwapCls(oldInv['Class']);
+              }
+
               let assignedItemNum = '';
-              if (options.units) {
-                const matchedU = options.units.find(u => this.isNameMatch(u.empName, emp));
+              if (Array.isArray(options.units) && options.units.length > 0) {
+                const empCatUnits = options.units.filter(u =>
+                  this.isNameMatch(u.empName, emp) &&
+                  String(u.category || '').toLowerCase().includes(meta.cat)
+                );
+                const empAnyUnits = options.units.filter(u => this.isNameMatch(u.empName, emp));
+                if (empAnyUnits.length > 0 && empCatUnits.length === 0) continue; // Units for another category only
+
+                const matchedU = empCatUnits.find(u => {
+                  if (!meta.isRubber || srClass === null) return true;
+                  const uClass = parseSwapCls(u.classVal || u.itemClass);
+                  return uClass === null || uClass === srClass;
+                });
+                if (empCatUnits.length > 0 && !matchedU) continue; // Units exist in another rubber class (e.g. Class 3 vs Class 2)
                 if (matchedU && (matchedU.suggestedNum || matchedU.itemNum)) {
                   assignedItemNum = matchedU.suggestedNum || matchedU.itemNum;
                 }
@@ -6523,15 +6641,12 @@ class ProcurementEngine {
                 });
               }
               if (isReadyForDelivery && assignedItemNum && typeof this.db.saveManualPick === 'function') {
-                const oldItemNum = String(sr['Current Item #'] || sr['Current Item'] || sr['Glove'] || sr['Sleeve'] || sr['Blanket'] || sr['MACK'] || '').trim();
                 this.db.saveManualPick(sk, emp, oldItemNum, assignedItemNum, 'Ready For Delivery 🚚', true);
               }
             }
           }
-        }
-
-        // Also update rawGrid directly if sTable.rows was empty or detached
-        if (sTable.rawGrid && Array.isArray(sTable.rawGrid)) {
+        } else if (sTable.rawGrid && Array.isArray(sTable.rawGrid)) {
+          // Fallback: update rawGrid directly when sTable.rows is empty or detached
           for (let r = 1; r < sTable.rawGrid.length; r++) {
             const gridRow = sTable.rawGrid[r];
             if (!Array.isArray(gridRow)) continue;
@@ -6585,6 +6700,383 @@ class ProcurementEngine {
     }
   }
 
+  /**
+   * Returns true when a procurement line item or unit is a non-receivable testing/labor service
+   * rather than physical equipment entered into inventory sheets.
+   */
+  isTestingServiceItem(item) {
+    if (!item) return false;
+    const rawCat = String(item.itemType || item.category || '').trim();
+    const rawSize = String(item.size || '').trim();
+    const rawLabel = String(item.typeLabel || '').trim();
+    const rawPart = String(item.partNumber || item.orderInfo?.partNumber || '').trim();
+    const lowerCat = rawCat.toLowerCase();
+
+    if (lowerCat === 'testing' || lowerCat === 'testing & labor') return true;
+    // Do not misclassify physical testing instruments (HV Testers, Phasing Sets) as service fees
+    if (/\b(?:hv\s*tester|phasing|voltmeter|hi-pot|hipot|detector)\b/i.test(rawCat)) return false;
+
+    const combined = `${rawCat} ${rawSize} ${rawLabel} ${rawPart}`;
+    return /\b(?:testing|labor|retest|recertification|dielectric\s*testing|tester\s*calibration)\b/i.test(combined) &&
+      !/\b(?:voltmeter|phasing|hi-pot|hipot|bierer|detector|hv\s*tester)\b/i.test(combined);
+  }
+
+  _collectBatchPoNumbers(extraItems = []) {
+    const sources = [
+      ...(this._pendingDeliveryUnits || []),
+      ...(this.pendingBatchDeliveryItems || []),
+      ...(extraItems || [])
+    ];
+    return [...new Set(
+      sources
+        .map(x =>
+          x?.orderInfo?.vendorOrderNumber ||
+          x?.orderInfo?.orderNumber ||
+          x?.orderInfo?.poNumber ||
+          x?.origItem?.orderInfo?.vendorOrderNumber ||
+          x?.origItem?.orderInfo?.orderNumber ||
+          x?.origItem?.orderInfo?.poNumber
+        )
+        .filter(Boolean)
+    )];
+  }
+
+  async _markTestingOnlyOrderReceived(testingItems) {
+    try {
+      const todayStr = this.formatToMdY ? this.formatToMdY(new Date().toISOString().split('T')[0]) : new Date().toLocaleDateString();
+      const poNums = this._collectBatchPoNumbers(testingItems);
+      await this.resolveReceivedOrderItems(poNums, {
+        assignedEmployees: [],
+        isReadyForDelivery: false,
+        todayStr: todayStr
+      });
+      await this.loadData();
+      this.render();
+      if (window.ppeTrackingEngine && typeof window.ppeTrackingEngine.refresh === 'function') {
+        window.ppeTrackingEngine.refresh();
+      }
+      alert('✅ Testing / Labor item(s) marked as Received and cleared from Awaiting Delivery.');
+    } catch (err) {
+      console.error('Error marking testing-only order received:', err);
+      alert('❌ Failed to mark Testing order received: ' + (err.message || err));
+    }
+  }
+
+  _getBatchDraftStorageKey() {
+    return 'sa_batch_delivery_drafts_v1';
+  }
+
+  _normalizeBatchPoKey(poNum) {
+    const clean = String(poNum || '').trim().toLowerCase();
+    return clean || '_none';
+  }
+
+  _getBatchDraftStore() {
+    try {
+      if (typeof localStorage === 'undefined') return {};
+      const raw = localStorage.getItem(this._getBatchDraftStorageKey());
+      const parsed = raw ? JSON.parse(raw) : {};
+      return (parsed && typeof parsed === 'object') ? parsed : {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  _saveBatchDraftStore(store) {
+    try {
+      if (typeof localStorage === 'undefined') return;
+      localStorage.setItem(this._getBatchDraftStorageKey(), JSON.stringify(store || {}));
+    } catch (e) {
+      console.warn('Could not persist batch delivery draft:', e);
+    }
+  }
+
+  _getPoOrderDraftSummary(poNum) {
+    const store = this._getBatchDraftStore();
+    const key = this._normalizeBatchPoKey(poNum);
+    const bucket = store[key];
+    if (!bucket || !bucket.units || typeof bucket.units !== 'object') {
+      return { hasDraft: false, editedCount: 0, receivedCount: 0, updatedAt: '' };
+    }
+    const vals = Object.values(bucket.units);
+    const receivedCount = vals.filter(v => v && v.received).length;
+    return {
+      hasDraft: vals.length > 0,
+      editedCount: vals.length,
+      receivedCount,
+      updatedAt: bucket.updatedAt || ''
+    };
+  }
+
+  _buildBatchDatalistsHtml() {
+    const empTable = (this.db && typeof this.db.getTable === 'function')
+      ? this.db.getTable('employees')
+      : (window.localDB && typeof window.localDB.getTable === 'function' ? window.localDB.getTable('employees') : null);
+    const employees = (empTable && empTable.rows) ? empTable.rows : [];
+    const seenNames = new Set(['on shelf', 'in testing', 'ready for delivery']);
+    const empOpts = [
+      '<option value="On Shelf">On Shelf (Warehouse Stock)</option>',
+      '<option value="In Testing">In Testing</option>'
+    ];
+    const seenLocs = new Set(["cody's truck", 'helena', 'bozeman', 'butte', 'great falls', 'missoula', 'billings', 'kalispell']);
+    const locOpts = [
+      '<option value="Cody\'s Truck"></option>',
+      '<option value="Helena"></option>',
+      '<option value="Bozeman"></option>',
+      '<option value="Butte"></option>',
+      '<option value="Great Falls"></option>',
+      '<option value="Missoula"></option>',
+      '<option value="Billings"></option>',
+      '<option value="Kalispell"></option>'
+    ];
+
+    employees.forEach(e => {
+      const name = String(e['Name'] || e['Employee Name'] || '').trim();
+      const loc = String(e['Location'] || '').trim();
+      if (name && !seenNames.has(name.toLowerCase())) {
+        seenNames.add(name.toLowerCase());
+        empOpts.push(`<option value="${this.escapeHtml(name)}">${this.escapeHtml(loc ? `${name} (${loc})` : name)}</option>`);
+      }
+      if (loc && !seenLocs.has(loc.toLowerCase())) {
+        seenLocs.add(loc.toLowerCase());
+        locOpts.push(`<option value="${this.escapeHtml(loc)}"></option>`);
+      }
+    });
+
+    return `
+      <datalist id="batch-delivery-employees-datalist">${empOpts.join('')}</datalist>
+      <datalist id="batch-delivery-locations-datalist">${locOpts.join('')}</datalist>
+    `;
+  }
+
+  _collectBatchDraftRowsFromDom() {
+    const rows = document.querySelectorAll('.batch-delivery-unit-row');
+    const store = this._getBatchDraftStore();
+    const nowIso = new Date().toISOString();
+
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      const u = this._pendingDeliveryUnits && this._pendingDeliveryUnits[i];
+      if (!u || !u.unitKey) continue;
+
+      const bucketKey = u.poBucketKey || '_none';
+      if (!store[bucketKey] || typeof store[bucketKey] !== 'object') {
+        store[bucketKey] = { updatedAt: nowIso, units: {} };
+      }
+      if (!store[bucketKey].units || typeof store[bucketKey].units !== 'object') {
+        store[bucketKey].units = {};
+      }
+      store[bucketKey].updatedAt = nowIso;
+
+      if (u._alreadyReceived) {
+        const existing = store[bucketKey].units[u.unitKey] || {};
+        store[bucketKey].units[u.unitKey] = {
+          ...existing,
+          received: true,
+          checked: false
+        };
+        continue;
+      }
+
+      const includeEl = r.querySelector('.batch-unit-include');
+      const classEl = r.querySelector('.batch-class');
+      const sizeEl = r.querySelector('.batch-size');
+      const assignedEl = r.querySelector('.batch-assigned-to');
+      const itemNumEl = r.querySelector('.batch-item-num');
+      const eslEl = r.querySelector('.batch-esl-id');
+      const dateEl = r.querySelector('.batch-test-date');
+      const locEl = r.querySelector('.batch-location');
+      const statEl = r.querySelector('.batch-status');
+
+      const curItemNum = itemNumEl ? itemNumEl.value.trim() : (u.suggestedNum || '');
+      const defaultSugg = (itemNumEl && itemNumEl.getAttribute)
+        ? (itemNumEl.getAttribute('data-default-suggested') || u.defaultSuggestedNum || '')
+        : (u.defaultSuggestedNum || '');
+
+      store[bucketKey].units[u.unitKey] = {
+        checked: includeEl ? !!includeEl.checked : true,
+        classVal: classEl ? classEl.value.trim() : u.classVal,
+        size: sizeEl ? sizeEl.value.trim() : u.size,
+        empName: assignedEl ? assignedEl.value.trim() : (u.empName || ''),
+        itemNum: curItemNum,
+        itemNumEdited: curItemNum !== defaultSugg,
+        eslId: eslEl ? eslEl.value.trim() : '',
+        testDate: dateEl ? dateEl.value : '',
+        location: locEl ? locEl.value.trim() : '',
+        status: statEl ? statEl.value : 'On Shelf',
+        received: false
+      };
+    }
+
+    return store;
+  }
+
+  saveBatchDeliveryDraft(showStatus = true) {
+    if (!this._pendingDeliveryUnits || !this._pendingDeliveryUnits.length) return false;
+    const store = this._collectBatchDraftRowsFromDom();
+    this._saveBatchDraftStore(store);
+
+    if (showStatus) {
+      const indicator = document.getElementById('batch-draft-save-indicator');
+      if (indicator) {
+        const timeStr = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+        indicator.textContent = `💾 Saved at ${timeStr}`;
+        indicator.style.color = '#fcd34d';
+      }
+    }
+    return true;
+  }
+
+  saveBatchDeliveryDraftAndClose() {
+    this.saveBatchDeliveryDraft(true);
+    this.closeBatchDeliveryModal();
+    if (typeof this.render === 'function') {
+      this.render();
+    }
+  }
+
+  resetBatchDeliveryDraft() {
+    if (!this._pendingDeliveryUnits || !this._pendingDeliveryUnits.length) return;
+    if (!confirm('Reset all saved draft edits for these items back to defaults?\n\nNote: Items already added to inventory will not be deleted from sheets, only local draft edits will be cleared.')) {
+      return;
+    }
+    const keys = [...new Set(this._pendingDeliveryUnits.map(u => u.poBucketKey || '_none'))];
+    const store = this._getBatchDraftStore();
+    keys.forEach(k => { delete store[k]; });
+    this._saveBatchDraftStore(store);
+    this.openBatchDeliveryModal(this.pendingBatchDeliveryItems || null);
+  }
+
+  _clearBatchDraftsForPoNums(poNums = [], extraBucketKeys = []) {
+    const store = this._getBatchDraftStore();
+    const keysToDelete = new Set([
+      ...(extraBucketKeys || []),
+      ...(poNums || []).map(p => this._normalizeBatchPoKey(p))
+    ]);
+    let changed = false;
+    keysToDelete.forEach(k => {
+      if (Object.prototype.hasOwnProperty.call(store, k)) {
+        delete store[k];
+        changed = true;
+      }
+    });
+    if (changed) this._saveBatchDraftStore(store);
+  }
+
+  onBatchItemNumInput(el) {
+    if (el) {
+      const def = (el.getAttribute && el.getAttribute('data-default-suggested')) || '';
+      const val = String(el.value || '').trim();
+      if (el.dataset) {
+        el.dataset.manualEdit = (val !== def) ? 'true' : 'false';
+      }
+    }
+    this.onBatchDeliveryFieldChange();
+  }
+
+  _nextUnusedInModalSeries(targetIdx, category, sizeOrSpec = '') {
+    const base = this.suggestNextItemNumber(category, sizeOrSpec);
+    const mBase = base.match(/^([A-Za-z#\s\-_]*)(\d+)$/);
+    if (!mBase) return base;
+    const prefix = mBase[1];
+    let candidateNum = parseInt(mBase[2], 10);
+    const padLen = /^0\d+/.test(mBase[2]) ? mBase[2].length : 0;
+
+    const used = new Set();
+    const rows = document.querySelectorAll('.batch-delivery-unit-row');
+    rows.forEach((r, idx) => {
+      if (idx === targetIdx) return;
+      const val = String(r.querySelector('.batch-item-num')?.value || '').trim().toUpperCase();
+      if (val) used.add(val);
+    });
+
+    const formatCandidate = (n) => {
+      const numStr = (padLen > 0 && String(n).length < padLen) ? String(n).padStart(padLen, '0') : String(n);
+      return `${prefix}${numStr}`;
+    };
+
+    while (used.has(formatCandidate(candidateNum).toUpperCase())) {
+      candidateNum++;
+    }
+    return formatCandidate(candidateNum);
+  }
+
+  onBatchSpecChange(idx) {
+    const rows = document.querySelectorAll('.batch-delivery-unit-row');
+    const r = rows[idx];
+    const u = this._pendingDeliveryUnits && this._pendingDeliveryUnits[idx];
+    if (r && u && !u._alreadyReceived && String(u.category || '').toLowerCase().includes('blanket')) {
+      const sizeEl = r.querySelector('.batch-size');
+      const itemNumEl = r.querySelector('.batch-item-num');
+      if (sizeEl && itemNumEl) {
+        const newSize = sizeEl.value.trim();
+        const isSplit = newSize.toLowerCase().includes('split');
+        const expectedPrefix = isSplit ? 'S' : 'B';
+        const curVal = String(itemNumEl.value || '').trim();
+        const curDef = (itemNumEl.getAttribute && itemNumEl.getAttribute('data-default-suggested')) || '';
+        const manualEdit = itemNumEl.dataset && itemNumEl.dataset.manualEdit === 'true';
+
+        // Re-suggest if untouched, empty, or switching between B### and S### blanket prefixes
+        if (!curVal || (!manualEdit && (curVal === curDef || /^[BS]\d+$/i.test(curVal)))) {
+          if (!curVal || !curVal.toUpperCase().startsWith(expectedPrefix)) {
+            const nextNum = this._nextUnusedInModalSeries(idx, u.category, newSize);
+            itemNumEl.value = nextNum;
+            if (itemNumEl.setAttribute) itemNumEl.setAttribute('data-default-suggested', nextNum);
+            if (itemNumEl.dataset) itemNumEl.dataset.manualEdit = 'false';
+          }
+        }
+      }
+    }
+    this.onBatchDeliveryFieldChange();
+  }
+
+  onBatchDeliveryFieldChange() {
+    this.saveBatchDeliveryDraft(true);
+    this._updateBatchDeliveryActionUi();
+  }
+
+  toggleAllBatchDeliveryUnits(checked) {
+    const boxes = document.querySelectorAll('.batch-unit-include');
+    boxes.forEach(cb => {
+      if (!cb.disabled) cb.checked = !!checked;
+    });
+    this.onBatchDeliveryFieldChange();
+  }
+
+  _updateBatchDeliveryActionUi() {
+    const rows = document.querySelectorAll('.batch-delivery-unit-row');
+    let pendingCount = 0;
+    let checkedPending = 0;
+
+    rows.forEach((r, idx) => {
+      const u = this._pendingDeliveryUnits && this._pendingDeliveryUnits[idx];
+      if (!u || u._alreadyReceived) return;
+      pendingCount++;
+      const cb = r.querySelector('.batch-unit-include');
+      if (!cb || cb.checked) checkedPending++;
+    });
+
+    const selectAllEl = document.getElementById('batch-select-all');
+    if (selectAllEl && pendingCount > 0) {
+      selectAllEl.checked = (checkedPending === pendingCount);
+      selectAllEl.indeterminate = (checkedPending > 0 && checkedPending < pendingCount);
+    }
+
+    const confirmBtn = document.getElementById('btn-confirm-batch-delivery');
+    if (confirmBtn && pendingCount > 0) {
+      const hasPreviouslyReceived = (this._pendingDeliveryUnits || []).some(u => u._alreadyReceived);
+      if (checkedPending === 0) {
+        confirmBtn.innerHTML = '<span>📦</span> Select Items to Add to Inventory';
+      } else if (checkedPending < pendingCount) {
+        confirmBtn.innerHTML = `<span>📦</span> Add Selected (${checkedPending} of ${pendingCount}) &amp; Save Rest`;
+      } else if (hasPreviouslyReceived) {
+        confirmBtn.innerHTML = `<span>📦</span> Add Remaining (${checkedPending}) &amp; Complete Delivery`;
+      } else {
+        confirmBtn.innerHTML = '<span>📦</span> Add to Inventory &amp; Complete Delivery';
+      }
+    }
+  }
+
   openBatchDeliveryModal(itemsToDeliver = null) {
     let items = itemsToDeliver;
     if (!items || !items.length) {
@@ -6598,6 +7090,16 @@ class ProcurementEngine {
       return;
     }
 
+    const skippedTestingItems = items.filter(i => this.isTestingServiceItem(i));
+    const receivableItems = items.filter(i => !this.isTestingServiceItem(i));
+
+    if (!receivableItems.length) {
+      if (confirm('🧪 Testing / Labor items are non-inventory services and do not belong on the Receive Inventory screen.\n\nMark these Testing item(s) / PO as Received now and clear from Awaiting Delivery?')) {
+        this._markTestingOnlyOrderReceived(skippedTestingItems);
+      }
+      return;
+    }
+
     this.pendingBatchDeliveryItems = items;
     const modal = document.getElementById('batch-delivery-modal');
     const body = document.getElementById('batch-delivery-modal-body');
@@ -6606,15 +7108,22 @@ class ProcurementEngine {
     const today = new Date();
     const todayYmd = today.toISOString().split('T')[0];
 
+    const draftStore = this._getBatchDraftStore();
+    const specSeqMap = {};
     const units = [];
     const catCounters = {};
+    let restoredDraftCount = 0;
+    let alreadyReceivedCount = 0;
 
-    items.forEach(item => {
+    receivableItems.forEach(item => {
       const cat = item.itemType || 'Gloves';
+      const origSize = item.size || 'Standard';
+      const origClass = item.classVal || 'Class 2';
+      const poRaw = item.orderInfo?.vendorOrderNumber || item.orderInfo?.orderNumber || item.orderInfo?.poNumber || '';
+      const poBucketKey = this._normalizeBatchPoKey(poRaw);
+      const bucketUnits = draftStore[poBucketKey]?.units || {};
       const cleanCat = cat.toLowerCase();
-      if (!catCounters[cleanCat]) {
-        catCounters[cleanCat] = 0;
-      }
+      const isBlanketCat = cleanCat.includes('blanket');
 
       const emps = (item.employees && item.employees.length > 0)
         ? item.employees.filter(e => e.checked).map(e => e.name)
@@ -6624,27 +7133,76 @@ class ProcurementEngine {
 
       for (let u = 0; u < count; u++) {
         const empName = emps[u] || '';
-        const baseSuggested = this.suggestNextItemNumber(cat);
-        let suggestedNum = baseSuggested;
-        const prefixMatch = baseSuggested.match(/^([A-Za-z#\s\-_]+)(\d+)$/);
-        const numOnlyMatch = baseSuggested.match(/^(\d+)$/);
+        const specPrefix = `${poBucketKey}|${cat}|${origClass}|${origSize}`;
+        const seqIdx = specSeqMap[specPrefix] || 0;
+        specSeqMap[specPrefix] = seqIdx + 1;
+        const unitKey = `${specPrefix}#${seqIdx}`;
+        const saved = bucketUnits[unitKey] || null;
+        const alreadyReceived = !!(saved && saved.received);
 
-        if (prefixMatch) {
-          const pref = prefixMatch[1];
-          const val = parseInt(prefixMatch[2], 10) + catCounters[cleanCat];
-          suggestedNum = `${pref}${val}`;
-        } else if (numOnlyMatch) {
-          const val = parseInt(numOnlyMatch[1], 10) + catCounters[cleanCat];
-          suggestedNum = String(val);
+        if (saved) restoredDraftCount++;
+        if (alreadyReceived) alreadyReceivedCount++;
+
+        const effectiveEmp = (saved && saved.empName !== undefined) ? saved.empName : empName;
+        const isAssignedDefault = !!effectiveEmp && !effectiveEmp.toLowerCase().includes('shelf') && !effectiveEmp.toLowerCase().includes('stock');
+        const effectiveSize = (saved && saved.size) ? saved.size : origSize;
+        const effectiveClass = (saved && saved.classVal) ? saved.classVal : origClass;
+
+        const isSplitBlanket = isBlanketCat && String(effectiveSize || '').toLowerCase().includes('split');
+        const seriesKey = isBlanketCat ? (isSplitBlanket ? 'blankets:split' : 'blankets:regular') : cleanCat;
+        if (!catCounters[seriesKey]) {
+          catCounters[seriesKey] = 0;
         }
-        catCounters[cleanCat]++;
+
+        const baseSuggested = this.suggestNextItemNumber(cat, effectiveSize);
+        let defaultSuggestedNum = baseSuggested;
+        const hasValidManualNum = !!(saved && saved.itemNumEdited && saved.itemNum);
+        if (!alreadyReceived && !hasValidManualNum) {
+          const prefixMatch = baseSuggested.match(/^([A-Za-z#\s\-_]+)(\d+)$/);
+          const numOnlyMatch = baseSuggested.match(/^(\d+)$/);
+
+          if (prefixMatch) {
+            const pref = prefixMatch[1];
+            const rawNext = parseInt(prefixMatch[2], 10) + catCounters[seriesKey];
+            const padLen = /^0\d+/.test(prefixMatch[2]) ? prefixMatch[2].length : 0;
+            const formattedNext = (padLen > 0 && String(rawNext).length < padLen)
+              ? String(rawNext).padStart(padLen, '0')
+              : String(rawNext);
+            defaultSuggestedNum = `${pref}${formattedNext}`;
+          } else if (numOnlyMatch) {
+            const val = parseInt(numOnlyMatch[1], 10) + catCounters[seriesKey];
+            defaultSuggestedNum = String(val);
+          }
+          catCounters[seriesKey]++;
+        }
+
+        const effectiveItemNum = alreadyReceived
+          ? (saved.receivedItemNum || saved.itemNum || defaultSuggestedNum)
+          : (hasValidManualNum ? saved.itemNum : defaultSuggestedNum);
+        const effectiveEsl = (saved && saved.eslId !== undefined) ? saved.eslId : '';
+        const effectiveDate = (saved && saved.testDate) ? saved.testDate : todayYmd;
+        const effectiveLoc = (saved && saved.location) ? saved.location : (isAssignedDefault ? "Cody's Truck" : 'Helena');
+        const effectiveStatus = (saved && saved.status) ? saved.status : (isAssignedDefault ? 'Ready For Delivery' : 'On Shelf');
+        const effectiveChecked = alreadyReceived ? false : (saved && saved.checked !== undefined ? !!saved.checked : true);
 
         units.push({
           category: cat,
-          size: item.size || 'Standard',
-          classVal: item.classVal || 'Class 2',
-          empName: empName,
-          suggestedNum: suggestedNum,
+          size: effectiveSize,
+          classVal: effectiveClass,
+          origSize: origSize,
+          origClassVal: origClass,
+          empName: effectiveEmp,
+          suggestedNum: effectiveItemNum,
+          defaultSuggestedNum: defaultSuggestedNum,
+          eslId: effectiveEsl,
+          testDate: effectiveDate,
+          location: effectiveLoc,
+          status: effectiveStatus,
+          checked: effectiveChecked,
+          poBucketKey: poBucketKey,
+          unitKey: unitKey,
+          _savedDraft: saved,
+          _alreadyReceived: alreadyReceived,
           orderInfo: item.orderInfo || null,
           origItem: item
         });
@@ -6652,69 +7210,105 @@ class ProcurementEngine {
     });
 
     let unitRowsHtml = units.map((u, idx) => {
-      const isAssigned = !!u.empName && !u.empName.toLowerCase().includes('shelf') && !u.empName.toLowerCase().includes('stock');
-      const defaultStatus = isAssigned ? 'Ready For Delivery' : 'On Shelf';
-      const defaultLoc = isAssigned ? "Cody's Truck" : 'Helena';
+      const disabledAttr = u._alreadyReceived ? 'disabled' : '';
+      const rowClass = u._alreadyReceived ? 'batch-delivery-unit-row is-already-received' : 'batch-delivery-unit-row';
 
       return `
-        <tr class="batch-delivery-unit-row" data-unit-idx="${idx}" style="border-bottom: 1px solid var(--border-color);">
-          <td style="padding: 10px; font-weight: 700; color: #38bdf8; text-align: center;">
-            #${idx + 1}
+        <tr class="${rowClass}" data-unit-idx="${idx}" style="border-bottom: 1px solid var(--border-color);">
+          <td style="padding: 8px 4px; width: 36px; min-width: 36px; text-align: center;">
+            <input type="checkbox" class="batch-unit-include" ${u.checked ? 'checked' : ''} ${disabledAttr} onchange="window.procurementEngine.onBatchDeliveryFieldChange()" title="${u._alreadyReceived ? 'Already added to inventory' : 'Include this item when adding to inventory'}" style="cursor: ${u._alreadyReceived ? 'not-allowed' : 'pointer'}; width: 15px; height: 15px;">
           </td>
-          <td style="padding: 10px;">
-            <div style="font-weight: 600; color: #f1f5f9; font-size: 13px;">${this.escapeHtml(u.category)}</div>
-            <div style="font-size: 11px; color: #94a3b8;">${this.escapeHtml(u.classVal)} • Size: <strong style="color: #e2e8f0;">${this.escapeHtml(u.size)}</strong></div>
-            ${u.orderInfo?.orderNumber ? `<div style="font-size: 10.5px; color: #34d399;">Order #: ${this.escapeHtml(u.orderInfo.vendorOrderNumber || u.orderInfo.orderNumber)}</div>` : ''}
+          <td style="padding: 8px 6px; width: 42px; min-width: 42px; font-weight: 700; color: #38bdf8; text-align: center;">
+            <div>#${idx + 1}</div>
+            ${u._alreadyReceived ? `<div style="font-size: 9.5px; color: #34d399; font-weight: 700; margin-top: 2px;">✅ Added</div>` : ''}
           </td>
-          <td style="padding: 10px;">
-            <input type="text" class="batch-delivery-input batch-assigned-to" value="${this.escapeHtml(u.empName || '')}" placeholder="Lineman Name or leave blank for Shelf">
+          <td style="padding: 8px 10px; width: 210px; min-width: 200px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; gap: 6px; margin-bottom: 4px;">
+              <span style="font-weight: 600; color: #f1f5f9; font-size: 13px;">${this.escapeHtml(u.category)}</span>
+              ${u.orderInfo?.orderNumber ? `<span style="font-size: 10px; color: #34d399; font-family: monospace;">PO ${this.escapeHtml(u.orderInfo.vendorOrderNumber || u.orderInfo.orderNumber)}</span>` : ''}
+            </div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
+              <div>
+                <input type="text" class="batch-spec-mini-input batch-class" value="${this.escapeHtml(u.classVal)}" ${disabledAttr} oninput="window.procurementEngine.onBatchDeliveryFieldChange()" title="Class / KV" placeholder="Class">
+              </div>
+              <div>
+                <input type="text" class="batch-spec-mini-input batch-size" value="${this.escapeHtml(u.size)}" ${disabledAttr} oninput="window.procurementEngine.onBatchSpecChange(${idx})" title="Size / Type" placeholder="Size / Type">
+              </div>
+            </div>
           </td>
-          <td style="padding: 10px; width: 140px;">
-            <input type="text" class="batch-delivery-input batch-item-num" value="${this.escapeHtml(u.suggestedNum)}" style="font-weight: 700; color: #4ade80;" placeholder="Item # *">
+          <td style="padding: 8px 10px; width: 240px; min-width: 220px;">
+            <input type="text" class="batch-delivery-input batch-assigned-to" list="batch-delivery-employees-datalist" value="${this.escapeHtml(u.empName || '')}" ${disabledAttr} oninput="window.procurementEngine.onBatchDeliveryFieldChange()" placeholder="Lineman Name or leave blank for Shelf">
           </td>
-          <td style="padding: 10px; width: 130px;">
-            <input type="text" class="batch-delivery-input batch-esl-id" placeholder="Optional ESL ID">
+          <td style="padding: 8px 10px; width: 115px; min-width: 105px;">
+            <input type="text" class="batch-delivery-input batch-item-num" value="${this.escapeHtml(u.suggestedNum)}" data-default-suggested="${this.escapeHtml(u.defaultSuggestedNum)}" ${disabledAttr} oninput="window.procurementEngine.onBatchItemNumInput(this)" style="font-weight: 700; color: #4ade80;" placeholder="Item # *">
           </td>
-          <td style="padding: 10px; width: 130px;">
-            <input type="date" class="batch-delivery-input batch-test-date" value="${todayYmd}">
+          <td style="padding: 8px 10px; width: 125px; min-width: 115px;">
+            <input type="text" class="batch-delivery-input batch-esl-id" value="${this.escapeHtml(u.eslId || '')}" ${disabledAttr} oninput="window.procurementEngine.onBatchDeliveryFieldChange()" placeholder="Optional ESL ID">
           </td>
-          <td style="padding: 10px; width: 120px;">
-            <input type="text" class="batch-delivery-input batch-location" value="${defaultLoc}" placeholder="Helena">
+          <td style="padding: 8px 10px; width: 140px; min-width: 135px;">
+            <input type="date" class="batch-delivery-input batch-test-date" value="${this.escapeHtml(u.testDate || todayYmd)}" ${disabledAttr} onchange="window.procurementEngine.onBatchDeliveryFieldChange()">
           </td>
-          <td style="padding: 10px; width: 145px;">
-            <select class="batch-delivery-input batch-status">
-              <option value="Ready For Delivery" ${defaultStatus === 'Ready For Delivery' ? 'selected' : ''}>Ready For Delivery 🚚</option>
-              <option value="Assigned" ${defaultStatus === 'Assigned' ? 'selected' : ''}>Assigned (Direct Hand-off)</option>
-              <option value="On Shelf" ${defaultStatus === 'On Shelf' ? 'selected' : ''}>On Shelf</option>
+          <td style="padding: 8px 10px; width: 130px; min-width: 120px;">
+            <input type="text" class="batch-delivery-input batch-location" list="batch-delivery-locations-datalist" value="${this.escapeHtml(u.location)}" ${disabledAttr} oninput="window.procurementEngine.onBatchDeliveryFieldChange()" placeholder="Helena">
+          </td>
+          <td style="padding: 8px 10px; width: 185px; min-width: 180px;">
+            <select class="batch-delivery-input batch-status" ${disabledAttr} onchange="window.procurementEngine.onBatchDeliveryFieldChange()">
+              <option value="Ready For Delivery" ${u.status === 'Ready For Delivery' ? 'selected' : ''}>Ready For Delivery 🚚</option>
+              <option value="Assigned" ${u.status === 'Assigned' ? 'selected' : ''}>Assigned (Direct Hand-off)</option>
+              <option value="On Shelf" ${u.status === 'On Shelf' ? 'selected' : ''}>On Shelf</option>
             </select>
           </td>
         </tr>
       `;
     }).join('');
 
+    const skippedTestingUnits = skippedTestingItems.reduce((sum, it) => sum + (parseInt(it.quantity, 10) || 1), 0);
+    const skippedNoticeHtml = skippedTestingUnits > 0
+      ? `<div style="margin-top: 6px; font-size: 11.5px; color: #6ee7b7;">🧪 Excluded ${skippedTestingUnits} non-inventory Testing / Labor item(s) from receiving (they will still resolve when the PO is completed).</div>`
+      : '';
+
+    const draftNoticeHtml = restoredDraftCount > 0
+      ? `
+        <div style="margin-top: 8px; padding: 8px 12px; background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.35); border-radius: 6px; display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap;">
+          <span style="font-size: 12px; color: #fcd34d;">
+            💾 <strong>Saved Draft Restored</strong> (${restoredDraftCount} row${restoredDraftCount === 1 ? '' : 's'}${alreadyReceivedCount > 0 ? `, ${alreadyReceivedCount} already added to inventory` : ''}) — uncheck items to receive only part of the order now and come back later for the rest.
+          </span>
+          <button type="button" class="btn btn-xs" onclick="window.procurementEngine.resetBatchDeliveryDraft()" style="background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.4); color: #fca5a5; padding: 3px 9px; font-size: 11px; border-radius: 4px; cursor: pointer;">
+            ↺ Reset Draft
+          </button>
+        </div>
+      `
+      : '';
+
     body.innerHTML = `
+      ${this._buildBatchDatalistsHtml()}
       <div style="margin-bottom: 16px; background: rgba(59, 130, 246, 0.08); border: 1px solid rgba(59, 130, 246, 0.25); border-radius: 8px; padding: 14px 18px;">
         <div style="font-weight: 700; font-size: 14px; color: #60a5fa; margin-bottom: 4px; display: flex; align-items: center; gap: 8px;">
           <span>🚚</span> Batch Delivery Receiving
         </div>
         <div style="font-size: 12px; color: #cbd5e1;">
-          Enter the new stamped <strong>Item #</strong> (pre-filled with the next sequential available numbers) and details for each arriving unit. 
-          When confirmed, these items will automatically be inserted into their respective tracking sheets (<strong>Gloves, Sleeves, Blankets, MACKs, etc.</strong>), change-out dates will be calculated, swap rows marked complete, and order status resolved.
+          Edit any row's specs, <strong>Assign To Lineman</strong>, stamped <strong>Item #</strong>, ESL ID, Test Date, Location, or Status.
+          Uncheck items you aren't ready to add yet, or click <strong>Save Progress &amp; Close</strong> anytime to pick up where you left off later.
         </div>
+        ${skippedNoticeHtml}
+        ${draftNoticeHtml}
       </div>
 
       <div style="overflow-x: auto; border: 1px solid var(--border-color); border-radius: 6px; margin-bottom: 16px;">
         <table style="width: 100%; border-collapse: collapse; font-size: 12.5px;">
           <thead>
             <tr style="background: rgba(30, 41, 59, 0.85); border-bottom: 2px solid var(--border-color); text-align: left; color: #94a3b8; font-size: 11px; text-transform: uppercase;">
-              <th style="padding: 10px; text-align: center; width: 45px;">#</th>
-              <th style="padding: 10px; width: 180px;">Item / Spec</th>
-              <th style="padding: 10px;">Assign To Lineman</th>
-              <th style="padding: 10px; width: 140px;">New Item # *</th>
-              <th style="padding: 10px; width: 130px;">ESL ID</th>
-              <th style="padding: 10px; width: 130px;">Test Date *</th>
-              <th style="padding: 10px; width: 120px;">Location</th>
-              <th style="padding: 10px; width: 110px;">Status</th>
+              <th style="padding: 10px 4px; text-align: center; width: 36px; min-width: 36px;">
+                <input type="checkbox" id="batch-select-all" checked onchange="window.procurementEngine.toggleAllBatchDeliveryUnits(this.checked)" title="Select / Deselect all pending items" style="cursor: pointer; width: 15px; height: 15px;">
+              </th>
+              <th style="padding: 10px 6px; text-align: center; width: 42px; min-width: 42px;">#</th>
+              <th style="padding: 10px; width: 210px; min-width: 200px;">Item / Class &amp; Size</th>
+              <th style="padding: 10px; width: 240px; min-width: 220px;">Assign To Lineman</th>
+              <th style="padding: 10px; width: 115px; min-width: 105px;">New Item # *</th>
+              <th style="padding: 10px; width: 125px; min-width: 115px;">ESL ID</th>
+              <th style="padding: 10px; width: 140px; min-width: 135px;">Test Date *</th>
+              <th style="padding: 10px; width: 130px; min-width: 120px;">Location</th>
+              <th style="padding: 10px; width: 185px; min-width: 180px;">Status</th>
             </tr>
           </thead>
           <tbody>
@@ -6725,6 +7319,9 @@ class ProcurementEngine {
     `;
 
     this._pendingDeliveryUnits = units;
+    const indicator = document.getElementById('batch-draft-save-indicator');
+    if (indicator) indicator.textContent = restoredDraftCount > 0 ? '💾 Draft loaded' : '';
+    this._updateBatchDeliveryActionUi();
     modal.style.display = 'flex';
     modal.classList.add('active');
   }
@@ -6744,6 +7341,41 @@ class ProcurementEngine {
       return;
     }
 
+    // Save current edits immediately so unchecked rows retain their edits
+    const draftStore = this._collectBatchDraftRowsFromDom();
+    this._saveBatchDraftStore(draftStore);
+
+    const pendingCheckedIndices = [];
+    let pendingTotalCount = 0;
+
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      const u = this._pendingDeliveryUnits[i];
+      if (!u || u._alreadyReceived || this.isTestingServiceItem(u)) continue;
+      pendingTotalCount++;
+
+      const includeEl = r.querySelector('.batch-unit-include');
+      const isIncluded = includeEl ? !!includeEl.checked : true;
+      if (!isIncluded) continue;
+
+      const itemNumInput = r.querySelector('.batch-item-num');
+      const itemNum = itemNumInput ? itemNumInput.value.trim() : '';
+      if (!itemNum) {
+        alert(`⚠️ Please provide an Item # for unit #${i + 1} (${u.category}).`);
+        if (itemNumInput) itemNumInput.focus();
+        return;
+      }
+      pendingCheckedIndices.push(i);
+    }
+
+    if (pendingCheckedIndices.length === 0) {
+      alert('⚠️ Please check at least one item to add to inventory (or click "Save Progress & Close" to save your changes for later).');
+      return;
+    }
+
+    const uncheckedPendingCount = pendingTotalCount - pendingCheckedIndices.length;
+    const isPartialDelivery = uncheckedPendingCount > 0;
+
     const confirmBtn = document.getElementById('btn-confirm-batch-delivery');
     if (confirmBtn) confirmBtn.textContent = '⏳ Adding to Inventory...';
 
@@ -6753,6 +7385,7 @@ class ProcurementEngine {
         : (window.localDB ? window.localDB.getSnapshot() : null);
 
       const addedItemsSummary = [];
+      const committedUnits = [];
       const formatToMdY = (dStr) => {
         if (!dStr) return '';
         if (dStr.includes('/')) return dStr;
@@ -6764,22 +7397,21 @@ class ProcurementEngine {
       const now = new Date();
       const todayIso = now.toISOString().split('T')[0];
       const todayStr = formatToMdY(todayIso);
+      let anyReadyForDelivery = false;
 
-      for (let i = 0; i < rows.length; i++) {
+      for (const i of pendingCheckedIndices) {
         const r = rows[i];
         const u = this._pendingDeliveryUnits[i];
-        if (!u) continue;
+        if (!u || this.isTestingServiceItem(u)) continue;
 
         const itemNumInput = r.querySelector('.batch-item-num');
         const itemNum = itemNumInput ? itemNumInput.value.trim() : '';
-        if (!itemNum) {
-          alert(`⚠️ Please provide an Item # for unit #${i + 1} (${u.category}).`);
-          if (itemNumInput) itemNumInput.focus();
-          return;
-        }
-
+        const classInput = r.querySelector('.batch-class');
+        const editedClassVal = (classInput && classInput.value.trim()) ? classInput.value.trim() : (u.classVal || 'Class 2');
+        const sizeInput = r.querySelector('.batch-size');
+        const editedSize = (sizeInput && sizeInput.value.trim()) ? sizeInput.value.trim() : (u.size || 'Standard');
         const assignedInput = r.querySelector('.batch-assigned-to');
-        const assignedTo = assignedInput ? assignedInput.value.trim() : u.empName || '';
+        const assignedTo = assignedInput ? assignedInput.value.trim() : (u.empName || '');
         const eslInput = r.querySelector('.batch-esl-id');
         const eslId = eslInput ? eslInput.value.trim() : '';
         const testDateInput = r.querySelector('.batch-test-date');
@@ -6790,6 +7422,7 @@ class ProcurementEngine {
         const status = statSelect ? statSelect.value : (assignedTo ? 'Ready For Delivery' : 'On Shelf');
 
         const isReadyForDelivery = (status === 'Ready For Delivery' || status === 'Ready For Delivery 🚚');
+        if (isReadyForDelivery) anyReadyForDelivery = true;
         const invStatus = isReadyForDelivery ? 'Ready For Delivery' : status;
         const invAssignedTo = isReadyForDelivery ? 'Packed For Delivery' : assignedTo;
         const invPickedFor = (isReadyForDelivery && assignedTo) ? `${assignedTo} Picked On ${todayIso}` : '';
@@ -6823,8 +7456,8 @@ class ProcurementEngine {
             [itemHeader]: itemNum,
             'Item #': itemNum,
             'ESL ID': eslId,
-            'Size': u.size,
-            'Class': (u.classVal || 'Class 2').replace(/[^0-9]/g, '') || '2',
+            'Size': editedSize,
+            'Class': (editedClassVal || 'Class 2').replace(/[^0-9]/g, '') || '2',
             'Test Date': testDate,
             'Date Assigned': assignedTo ? todayStr : '',
             'Location': invLocation,
@@ -6838,8 +7471,8 @@ class ProcurementEngine {
           newRow = {
             'Blanket': itemNum,
             'Item #': itemNum,
-            'Type': u.size || 'Regular',
-            'Class': (u.classVal || 'Class 4').replace(/[^0-9]/g, '') || '4',
+            'Type': editedSize || 'Regular',
+            'Class': (editedClassVal || 'Class 4').replace(/[^0-9]/g, '') || '4',
             'Test Date': testDate,
             'Date Assigned': assignedTo ? todayStr : testDate,
             'Location': invLocation,
@@ -6855,7 +7488,7 @@ class ProcurementEngine {
             'Item #': itemNum,
             'ESL ID': eslId || itemNum,
             'KV': '15KV',
-            'Size': u.size || '1/0',
+            'Size': editedSize || '1/0',
             'Length': '8 ft',
             'Test Date': testDate,
             'Date Assigned': assignedTo ? todayStr : testDate,
@@ -6891,92 +7524,16 @@ class ProcurementEngine {
         }
 
         if (assignedTo) {
-          let swapKey = '';
-          if (catKey === 'gloves') swapKey = 'glove_swaps';
-          else if (catKey === 'sleeves') swapKey = 'sleeve_swaps';
-          else if (catKey === 'blankets') swapKey = 'blanket_swaps';
-          else if (catKey === 'macks') swapKey = 'mack_swaps';
-
-          const swapTable = swapKey ? ((this.db && typeof this.db.getTable === 'function' ? this.db.getTable(swapKey) : null) || snap?.tables?.[swapKey]) : null;
-          if (swapTable && swapTable.rows) {
-            const sRow = swapTable.rows.find(sr => {
-              const name = String(sr['Employee'] || sr['Employee Name'] || sr['Assigned To'] || Object.values(sr)[0] || '').trim();
-              return this.isNameMatch(name, assignedTo);
-            });
-            if (sRow) {
-              const oldItemNum = String(sRow['Current Item #'] || sRow['Current Item'] || sRow['Glove'] || sRow['Sleeve'] || sRow['Blanket'] || sRow['MACK'] || '').trim();
-              const pickCol = (catKey === 'macks') ? 9 : 7;
-              const statCol = (catKey === 'macks') ? 10 : 8;
-              const pickedCol = (catKey === 'macks') ? 11 : 9;
-
-              if (isReadyForDelivery) {
-                sRow['Status'] = 'Ready For Delivery 🚚';
-                sRow['Pick List Item #'] = itemNum;
-                sRow['Picked For'] = itemNum;
-                sRow['Picked'] = true;
-                this.db.syncRowToRawGrid(swapTable, sRow);
-                const rIdx = sRow._rowIdx || (swapTable.rows.indexOf(sRow) + 2);
-                await this.db.addMutation({
-                  action: 'UPDATE_CELL',
-                  sheetName: swapTable.name,
-                  tableKey: swapKey,
-                  row: rIdx,
-                  col: pickCol,
-                  value: itemNum
-                });
-                await this.db.addMutation({
-                  action: 'UPDATE_CELL',
-                  sheetName: swapTable.name,
-                  tableKey: swapKey,
-                  row: rIdx,
-                  col: statCol,
-                  value: 'Ready For Delivery 🚚'
-                });
-                await this.db.addMutation({
-                  action: 'UPDATE_CELL',
-                  sheetName: swapTable.name,
-                  tableKey: swapKey,
-                  row: rIdx,
-                  col: pickedCol,
-                  value: true
-                });
-                if (typeof this.db.saveManualPick === 'function') {
-                  this.db.saveManualPick(swapKey, assignedTo, oldItemNum, itemNum, 'Ready For Delivery 🚚', true);
-                }
-              } else {
-                sRow['Status'] = 'Complete';
-                sRow['Pick List Item #'] = itemNum;
-                sRow['Picked For'] = itemNum;
-                sRow['Picked'] = true;
-                this.db.syncRowToRawGrid(swapTable, sRow);
-                const rIdx = sRow._rowIdx || (swapTable.rows.indexOf(sRow) + 2);
-                await this.db.addMutation({
-                  action: 'UPDATE_CELL',
-                  sheetName: swapTable.name,
-                  tableKey: swapKey,
-                  row: rIdx,
-                  col: pickCol,
-                  value: itemNum
-                });
-                await this.db.addMutation({
-                  action: 'UPDATE_CELL',
-                  sheetName: swapTable.name,
-                  tableKey: swapKey,
-                  row: rIdx,
-                  col: statCol,
-                  value: 'Complete'
-                });
-                await this.db.addMutation({
-                  action: 'UPDATE_CELL',
-                  sheetName: swapTable.name,
-                  tableKey: swapKey,
-                  row: rIdx,
-                  col: pickedCol,
-                  value: true
-                });
-              }
-            }
-          }
+          await this._syncReceivedItemToSwapSheet({
+            catKey,
+            assignedTo,
+            itemNum,
+            itemClass: editedClassVal,
+            size: editedSize,
+            invItemData: newRow,
+            isReadyForDelivery,
+            snap
+          });
 
           const needsTable = (this.db && typeof this.db.getTable === 'function' ? this.db.getTable('safety_equipment_needs') : null) || snap?.tables?.['safety_equipment_needs'];
           if (needsTable && needsTable.rows) {
@@ -7002,33 +7559,86 @@ class ProcurementEngine {
         }
       }
 
-      // Resolve and clear all matching line items across swap sheets, safety equipment needs, and purchase orders
-      const poNums = [...new Set(this._pendingDeliveryUnits.map(u => u.orderInfo?.vendorOrderNumber || u.orderInfo?.orderNumber || u.origItem?.orderInfo?.orderNumber).filter(Boolean))];
-      const assignedEmps = this._pendingDeliveryUnits.map(u => u.empName).filter(Boolean);
-
-      await this.resolveReceivedOrderItems(poNums, {
-        units: this._pendingDeliveryUnits,
-        assignedEmployees: assignedEmps,
-        isReadyForDelivery: isReadyForDelivery,
-        todayStr: todayStr
-      });
-
-      this.closeBatchDeliveryModal();
-      await this.loadData();
-
-      if (window.ppeTrackingEngine && typeof window.ppeTrackingEngine.refresh === 'function') {
-        window.ppeTrackingEngine.refresh();
+      // Mark committed units in draft store first so partial progress stays accurate
+      for (const i of pendingCheckedIndices) {
+        const r = rows[i];
+        const u = this._pendingDeliveryUnits[i];
+        if (!u || this.isTestingServiceItem(u)) continue;
+        const itemNumVal = r.querySelector('.batch-item-num')?.value.trim() || u.suggestedNum || '';
+        const classVal = r.querySelector('.batch-class')?.value.trim() || u.classVal;
+        const sizeVal = r.querySelector('.batch-size')?.value.trim() || u.size;
+        const empVal = r.querySelector('.batch-assigned-to')?.value.trim() || '';
+        committedUnits.push({
+          ...u,
+          empName: empVal,
+          suggestedNum: itemNumVal,
+          classVal,
+          size: sizeVal
+        });
+        const bKey = u.poBucketKey || '_none';
+        if (u.unitKey && draftStore[bKey]?.units?.[u.unitKey]) {
+          draftStore[bKey].units[u.unitKey] = {
+            ...draftStore[bKey].units[u.unitKey],
+            received: true,
+            receivedItemNum: itemNumVal,
+            receivedAt: todayStr,
+            checked: false
+          };
+        }
       }
-      if (window.inventoryManager && typeof window.inventoryManager.loadData === 'function') {
-        window.inventoryManager.loadData();
-      }
 
-      alert(`✅ Successfully received and created ${addedItemsSummary.length} inventory item(s)!\n\n` + addedItemsSummary.join('\n'));
+      const poNums = this._collectBatchPoNumbers();
+      const bucketKeys = [...new Set(this._pendingDeliveryUnits.map(u => u.poBucketKey).filter(Boolean))];
+
+      const refreshDeliveryViews = () => {
+        if (window.ppeTrackingEngine && typeof window.ppeTrackingEngine.refresh === 'function') {
+          window.ppeTrackingEngine.refresh();
+        }
+        if (window.inventoryManager && typeof window.inventoryManager.loadData === 'function') {
+          window.inventoryManager.loadData();
+        }
+        if (window.sheetNavigator && typeof window.sheetNavigator.renderActiveView === 'function') {
+          window.sheetNavigator.renderActiveView();
+        }
+        if (window.tripPlanner && typeof window.tripPlanner.renderPickedSwapsList === 'function') {
+          window.tripPlanner.renderPickedSwapsList();
+        }
+      };
+
+      if (isPartialDelivery) {
+        this._saveBatchDraftStore(draftStore);
+        this.closeBatchDeliveryModal();
+        await this.loadData();
+        refreshDeliveryViews();
+
+        alert(
+          `✅ Added ${addedItemsSummary.length} item(s) to inventory!\n\n` +
+          addedItemsSummary.join('\n') +
+          `\n\n💾 ${uncheckedPendingCount} remaining item(s) saved in draft so you can finish receiving this order later.`
+        );
+      } else {
+        // Resolve and clear all matching line items across swap sheets, safety equipment needs, and purchase orders
+        const assignedEmps = committedUnits.map(u => u.empName).filter(Boolean);
+
+        await this.resolveReceivedOrderItems(poNums, {
+          units: committedUnits,
+          assignedEmployees: assignedEmps,
+          isReadyForDelivery: anyReadyForDelivery,
+          todayStr: todayStr
+        });
+
+        this._clearBatchDraftsForPoNums(poNums, bucketKeys);
+        this.closeBatchDeliveryModal();
+        await this.loadData();
+        refreshDeliveryViews();
+
+        alert(`✅ Successfully received and created ${addedItemsSummary.length} inventory item(s)!\n\n` + addedItemsSummary.join('\n'));
+      }
     } catch (err) {
       console.error('Error confirming batch delivery:', err);
       alert('❌ Failed to process batch delivery: ' + (err.message || err));
     } finally {
-      if (confirmBtn) confirmBtn.innerHTML = '<span>✅</span> Add to Inventory & Complete Delivery';
+      this._updateBatchDeliveryActionUi();
     }
   }
 
@@ -7052,8 +7662,9 @@ class ProcurementEngine {
 
       const todayStr = this.formatToMdY ? this.formatToMdY(new Date().toISOString().split('T')[0]) : new Date().toLocaleDateString();
 
-      // Collect all PO numbers and assigned employees from pending units
-      const poNums = [...new Set(this._pendingDeliveryUnits.map(u => u.orderInfo?.vendorOrderNumber || u.orderInfo?.orderNumber || u.origItem?.orderInfo?.orderNumber).filter(Boolean))];
+      // Collect all PO numbers and assigned employees from pending units + skipped service items
+      const poNums = this._collectBatchPoNumbers();
+      const bucketKeys = [...new Set(this._pendingDeliveryUnits.map(u => u.poBucketKey).filter(Boolean))];
       const assignedEmps = this._pendingDeliveryUnits.map(u => u.empName).filter(Boolean);
 
       await this.resolveReceivedOrderItems(poNums, {
@@ -7063,6 +7674,7 @@ class ProcurementEngine {
         todayStr: todayStr
       });
 
+      this._clearBatchDraftsForPoNums(poNums, bucketKeys);
       this.closeBatchDeliveryModal();
       await this.loadData();
       this.render();
@@ -7201,6 +7813,90 @@ class ProcurementEngine {
     }
   }
 
+  /**
+   * Syncs a received order item into the matching Swap sheet without crossing rubber classes
+   * (creating a New Assignment row for Class 3/0 items when an employee keeps existing Class 2 gear).
+   */
+  async _syncReceivedItemToSwapSheet({ catKey, assignedTo, itemNum, itemClass = '', size = '', invItemData = null, isReadyForDelivery = true, snap = null } = {}) {
+    if (!assignedTo || !itemNum) return;
+    let swapKey = '';
+    if (catKey === 'gloves') swapKey = 'glove_swaps';
+    else if (catKey === 'sleeves') swapKey = 'sleeve_swaps';
+    else if (catKey === 'blankets') swapKey = 'blanket_swaps';
+    else if (catKey === 'macks') swapKey = 'mack_swaps';
+    if (!swapKey) return;
+
+    const parseOrderClass = (c) => {
+      if (c === undefined || c === null || c === '') return null;
+      const m = String(c).match(/\d+/);
+      return m ? parseInt(m[0], 10) : null;
+    };
+    const isRubber = (catKey === 'gloves' || catKey === 'sleeves');
+    const orderClass = isRubber ? parseOrderClass(itemClass || (invItemData && invItemData['Class'])) : null;
+    const invTable = (this.db && typeof this.db.getTable === 'function' ? this.db.getTable(catKey) : null) || snap?.tables?.[catKey];
+    const swapTable = (this.db && typeof this.db.getTable === 'function' ? this.db.getTable(swapKey) : null) || snap?.tables?.[swapKey];
+
+    let updatedExisting = false;
+    if (swapTable && Array.isArray(swapTable.rows)) {
+      const sRow = swapTable.rows.find(sr => {
+        const name = String(sr['Employee'] || sr['Employee Name'] || sr['Assigned To'] || Object.values(sr)[0] || '').trim();
+        const empMatch = this.isNameMatch(name, assignedTo) ||
+          (typeof window !== 'undefined' && window.employeeResolver && typeof window.employeeResolver.areSameEmployee === 'function' && window.employeeResolver.areSameEmployee(name, assignedTo));
+        if (!empMatch) return false;
+        if (String(sr['Date Changed'] || '').trim()) return false;
+        const statLower = String(sr['Status'] || '').toLowerCase();
+        if (statLower.includes('return') || statLower.includes('reclaim') || statLower.includes('locate')) return false;
+
+        if (isRubber && orderClass !== null) {
+          const oldNum = String(sr['Current Glove #'] || sr['Current Sleeve #'] || sr['Current Item #'] || sr['Current Item'] || '').trim();
+          let srClass = parseOrderClass(sr['Class']);
+          if (oldNum && invTable && Array.isArray(invTable.rows)) {
+            const oldInv = invTable.rows.find(it => String(it['Item #'] || it['Glove'] || it['Sleeve'] || it['ESL ID'] || '').trim() === oldNum);
+            if (oldInv) srClass = parseOrderClass(oldInv['Class']);
+          }
+          if (srClass !== null && srClass !== orderClass) return false;
+        }
+        return true;
+      });
+
+      if (sRow) {
+        updatedExisting = true;
+        const oldItemNum = String(sRow['Current Glove #'] || sRow['Current Sleeve #'] || sRow['Current Blanket #'] || sRow['Current MACK #'] || sRow['Current Item #'] || sRow['Current Item'] || '').trim();
+        const pickCol = (catKey === 'macks') ? 9 : 7;
+        const statCol = (catKey === 'macks') ? 10 : 8;
+        const pickedCol = (catKey === 'macks') ? 11 : 9;
+        const targetStatus = isReadyForDelivery ? 'Ready For Delivery 🚚' : 'Complete';
+
+        sRow['Status'] = targetStatus;
+        sRow['Pick List Item #'] = itemNum;
+        sRow['Picked For'] = itemNum;
+        sRow['Picked'] = true;
+        this.db.syncRowToRawGrid(swapTable, sRow);
+        const rIdx = sRow._rowIdx || (swapTable.rows.indexOf(sRow) + 2);
+        await this.db.addMutation({ action: 'UPDATE_CELL', sheetName: swapTable.name, tableKey: swapKey, row: rIdx, col: pickCol, value: itemNum });
+        await this.db.addMutation({ action: 'UPDATE_CELL', sheetName: swapTable.name, tableKey: swapKey, row: rIdx, col: statCol, value: targetStatus });
+        await this.db.addMutation({ action: 'UPDATE_CELL', sheetName: swapTable.name, tableKey: swapKey, row: rIdx, col: pickedCol, value: true });
+        if (isReadyForDelivery && typeof this.db.saveManualPick === 'function') {
+          this.db.saveManualPick(swapKey, assignedTo, oldItemNum, itemNum, 'Ready For Delivery 🚚', true);
+        }
+      }
+    }
+
+    if (!updatedExisting && isRubber && isReadyForDelivery) {
+      if (typeof window !== 'undefined' && window.swapEngine && typeof window.swapEngine.upsertNewAssignmentSwapRow === 'function') {
+        await window.swapEngine.upsertNewAssignmentSwapRow(swapKey, {
+          empName: assignedTo,
+          itemNum,
+          itemClass,
+          size,
+          invItemData
+        });
+      } else if (this.db && typeof this.db.saveManualPick === 'function') {
+        this.db.saveManualPick(swapKey, assignedTo, '', itemNum, 'Ready For Delivery 🚚', true);
+      }
+    }
+  }
+
   onPastOrderVendorChange(val) {
     const custom = document.getElementById('past-order-custom-vendor');
     if (!custom) return;
@@ -7314,16 +8010,7 @@ class ProcurementEngine {
 
   renderOrdersHistory(container, tabsHtml = '') {
     if (!tabsHtml) {
-      const counts = {
-        all: this.items.length,
-        needs: this.items.filter(i => i.section !== 'ordered_pending').length,
-        ordered_pending: this.items.filter(i => i.section === 'ordered_pending').length,
-        swaps_need: this.items.filter(i => i.section === 'swaps_need').length,
-        swaps_size_up: this.items.filter(i => i.section === 'swaps_size_up').length,
-        assigned_size_up: this.items.filter(i => i.section === 'assigned_size_up').length,
-        compliance_missing: this.items.filter(i => i.section === 'compliance_missing').length
-      };
-      tabsHtml = this.getSectionTabsHtml('history', counts);
+      tabsHtml = this.getSectionTabsHtml('history', this.getSectionCounts());
     }
 
     const snap = (this.db && typeof this.db.getSnapshot === 'function')

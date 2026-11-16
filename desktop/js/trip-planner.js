@@ -817,8 +817,13 @@ class TripPlannerApp {
       const swRow = swTable.rows.find(r => {
         const rEmp = String(r['Employee'] || r['Crew Lead / Employee'] || '').trim().toLowerCase();
         const rOld = String(r['Current Glove #'] || r['Current Sleeve #'] || r['Current Blanket #'] || r['Current MACK #'] || r['Current Item #'] || '').trim();
+        const rPick = String(r['Pick List Glove #'] || r['Pick List Sleeve #'] || r['Pick List Blanket #'] || r['Pick List MACK #'] || r['Pick List Item #'] || '').trim();
         const empMatch = rEmp === empName || (window.employeeResolver && typeof window.employeeResolver.areSameEmployee === 'function' && window.employeeResolver.areSameEmployee(rEmp, empName));
-        return empMatch && (!oldItm || rOld === oldItm);
+        if (!empMatch) return false;
+        if (oldItm) return rOld === oldItm;
+        const isUnassignedRow = !rOld || rOld === '—' || rOld === '-';
+        if (!isUnassignedRow) return false;
+        return !pickItm || !rPick || rPick === pickItm;
       });
       if (swRow) {
         const dateChanged = String(swRow['Date Changed'] || swRow['Delivered Date'] || '').trim();
@@ -5493,6 +5498,61 @@ class TripPlannerApp {
     }
   }
 
+  /**
+   * Resolves a swap row for an employee without colliding across multi-class swaps
+   * (e.g. an employee keeping Class 2 while receiving a New Assignment Class 3 item).
+   */
+  findSwapRowForItem(swTable, rowIdxOrEmp, empName, currentItem = '', pickItem = '') {
+    if (!swTable || !Array.isArray(swTable.rows)) return null;
+    const isMatchForEmp = (r) => {
+      if (!r) return false;
+      const emp = String(r['Employee'] || r['Crew Lead / Employee'] || r['Employee Name'] || r['Assigned To'] || r['Worker'] || '').trim().toLowerCase();
+      return emp === (empName || '').toLowerCase() || (window.employeeResolver && typeof window.employeeResolver.areSameEmployee === 'function' && window.employeeResolver.areSameEmployee(emp, empName));
+    };
+
+    if (typeof rowIdxOrEmp === 'number' && swTable.rows[rowIdxOrEmp] && isMatchForEmp(swTable.rows[rowIdxOrEmp])) {
+      return swTable.rows[rowIdxOrEmp];
+    }
+
+    const curClean = String(currentItem || '').trim().toLowerCase();
+    const pickClean = String(pickItem || '').trim().toLowerCase();
+
+    return swTable.rows.find(r => {
+      if (!isMatchForEmp(r)) return false;
+      const rOld = String(r['Current Glove #'] || r['Current Sleeve #'] || r['Current Blanket #'] || r['Current MACK #'] || r['Current Item #'] || r['Item #'] || '').trim().toLowerCase();
+      const rPick = String(r['Pick List Glove #'] || r['Pick List Sleeve #'] || r['Pick List Blanket #'] || r['Pick List MACK #'] || r['Pick List Item #'] || r['Pick List'] || '').trim().toLowerCase();
+      if (curClean) return rOld === curClean;
+      const isBlankOld = !rOld || rOld === '—' || rOld === '-';
+      if (!isBlankOld) return false;
+      return !pickClean || !rPick || rPick === pickClean;
+    }) || null;
+  }
+
+  /**
+   * Updates scheduledSwaps completion state using currentItem OR Pick List item fallback
+   * so blank-Current-Item New Assignments don't touch sibling class swaps.
+   */
+  _updateScheduledSwapCompletion(empName, currentItem, swRow, isCompleted, completedDate = '') {
+    if (!this.scheduledSwaps) return;
+    const targetEmp = (empName || '').trim().toLowerCase();
+    const normTargetEmp = this.normalizeEmpName(empName).toLowerCase();
+    const rowPick = swRow ? String(swRow['Pick List Glove #'] || swRow['Pick List Sleeve #'] || swRow['Pick List Item #'] || '').trim() : '';
+    const targetItm = String(currentItem || rowPick || '').trim().toLowerCase();
+    let changed = false;
+    Object.keys(this.scheduledSwaps).forEach(k => {
+      const kLower = k.toLowerCase();
+      const empMatches = kLower.includes(targetEmp) || (normTargetEmp && kLower.includes(normTargetEmp));
+      if (empMatches && (!targetItm || kLower.includes(targetItm))) {
+        if (typeof this.scheduledSwaps[k] === 'object') {
+          this.scheduledSwaps[k].completed = isCompleted;
+          this.scheduledSwaps[k].completedDate = isCompleted ? completedDate : '';
+          changed = true;
+        }
+      }
+    });
+    if (changed) this.saveScheduledSwaps();
+  }
+
   async completeSwapDirectly(tableKey, rowIdx, empName, currentItem) {
     if (window.currentRoleMode === 'view_only') return;
     if (!confirm(`Mark ${tableKey.includes('glove') ? 'glove' : 'sleeve'} swap delivered for ${empName}? This will update the Swaps sheet and transfer inventory.`)) {
@@ -5501,48 +5561,14 @@ class TripPlannerApp {
     const today = new Date();
     const todayStr = `${String(today.getMonth() + 1).padStart(2, '0')}/${String(today.getDate()).padStart(2, '0')}/${today.getFullYear()}`;
     const swTable = this.db ? this.db.getTable(tableKey) : null;
-    let swRow = null;
-    if (swTable && swTable.rows) {
-      const isMatch = (r) => {
-        if (!r) return false;
-        const emp = String(r['Employee'] || r['Employee Name'] || '').trim().toLowerCase();
-        return emp === (empName || '').toLowerCase() || (window.employeeResolver && typeof window.employeeResolver.areSameEmployee === 'function' && window.employeeResolver.areSameEmployee(emp, empName));
-      };
-      if (typeof rowIdx === 'number' && swTable.rows[rowIdx] && isMatch(swTable.rows[rowIdx])) {
-        swRow = swTable.rows[rowIdx];
-      } else {
-        swRow = swTable.rows.find(r => {
-          if (!isMatch(r)) return false;
-          const itm = String(r['Current Glove #'] || r['Current Sleeve #'] || r['Current Item #'] || '').trim().toLowerCase();
-          return !currentItem || itm === (currentItem || '').toLowerCase();
-        });
-      }
-    }
+    const swRow = this.findSwapRowForItem(swTable, rowIdx, empName, currentItem);
 
     const sm = window.swapEngine || window.swapsManager;
     if (swRow && sm && typeof sm.handleDateChangedEdit === 'function') {
       await sm.handleDateChangedEdit(tableKey, swRow, todayStr);
     }
 
-    // Update scheduledSwaps to marked completed instead of deleting
-    if (this.scheduledSwaps) {
-      const targetEmp = (empName || '').trim().toLowerCase();
-      const normTargetEmp = this.normalizeEmpName(empName).toLowerCase();
-      const targetItm = (currentItem || '').trim().toLowerCase();
-      let changed = false;
-      Object.keys(this.scheduledSwaps).forEach(k => {
-        const kLower = k.toLowerCase();
-        const empMatches = kLower.includes(targetEmp) || (normTargetEmp && kLower.includes(normTargetEmp));
-        if (empMatches && (!targetItm || kLower.includes(targetItm))) {
-          if (typeof this.scheduledSwaps[k] === 'object') {
-            this.scheduledSwaps[k].completed = true;
-            this.scheduledSwaps[k].completedDate = todayStr;
-            changed = true;
-          }
-        }
-      });
-      if (changed) this.saveScheduledSwaps();
-    }
+    this._updateScheduledSwapCompletion(empName, currentItem, swRow, true, todayStr);
 
     this.showToast(`✅ Swap marked delivered for ${empName}. Inventory updated.`);
     this.renderPlanner();
@@ -5615,44 +5641,13 @@ class TripPlannerApp {
     let swRow = null;
     let swRowIdx = target.swapRowIdx || (typeof target.rowIdx === 'number' ? target.rowIdx : null);
 
-    const isRowMatchForEmp = (r) => {
-      if (!r) return false;
-      const rEmp = String(r['Employee'] || r['Crew Lead / Employee'] || r['Assigned To'] || r['Worker'] || '').trim().toLowerCase();
-      if (!rEmp || !empName) return false;
-      if (rEmp === empName.toLowerCase()) return true;
-      if (window.employeeResolver && typeof window.employeeResolver.areSameEmployee === 'function') {
-        return window.employeeResolver.areSameEmployee(rEmp, empName);
-      }
-      return false;
-    };
-
-    const curItmClean = String(target.currentItem || '').trim().toLowerCase();
-    const pickItmClean = String(target.pickItem || target.pickListItem || '').trim().toLowerCase();
-
-    if (swTable && swTable.rows) {
-      if (typeof swRowIdx === 'number' && swTable.rows[swRowIdx] && isRowMatchForEmp(swTable.rows[swRowIdx])) {
-        swRow = swTable.rows[swRowIdx];
-      } else {
-        swRowIdx = null;
-        swRow = swTable.rows.find(r => {
-          if (!isRowMatchForEmp(r)) return false;
-          const rOld = String(r['Current Glove #'] || r['Current Sleeve #'] || r['Current Blanket #'] || r['Current MACK #'] || r['Current Item #'] || r['Item #'] || '').trim().toLowerCase();
-          const rPick = String(r['Pick List Glove #'] || r['Pick List Sleeve #'] || r['Pick List Blanket #'] || r['Pick List MACK #'] || r['Pick List Item #'] || r['Pick List'] || '').trim().toLowerCase();
-          if (curItmClean && pickItmClean) {
-            return (rOld === curItmClean || rOld.includes(curItmClean)) || (rPick === pickItmClean || rPick.includes(pickItmClean));
-          }
-          if (curItmClean) {
-            return rOld === curItmClean || rOld.includes(curItmClean) || curItmClean.includes(rOld);
-          }
-          if (pickItmClean) {
-            return rPick === pickItmClean || rPick.includes(pickItmClean) || pickItmClean.includes(rPick);
-          }
-          return true;
-        });
-        if (swRow && swTable.rows) {
-          swRowIdx = swTable.rows.indexOf(swRow);
-        }
-      }
+    const curItmClean = String(target.currentItem || '').trim();
+    const pickItmClean = String(target.pickItem || target.pickListItem || '').trim();
+    swRow = this.findSwapRowForItem(swTable, swRowIdx, empName, curItmClean, pickItmClean);
+    if (swRow && swTable && swTable.rows) {
+      swRowIdx = swTable.rows.indexOf(swRow);
+    } else if (!swRow) {
+      swRowIdx = null;
     }
 
     // 4. Extract Item Identifiers & Status (target from card is authoritative ground truth)
@@ -6102,46 +6097,14 @@ class TripPlannerApp {
     const dateFormatted = `${String(dObj.getMonth() + 1).padStart(2, '0')}/${String(dObj.getDate()).padStart(2, '0')}/${dObj.getFullYear()}`;
 
     const swTable = this.db ? this.db.getTable(tableKey) : null;
-    let swRow = null;
-    if (swTable && swTable.rows) {
-      const isMatchForEmp = (r) => {
-        if (!r) return false;
-        const emp = String(r['Employee'] || r['Crew Lead / Employee'] || '').trim().toLowerCase();
-        return emp === (empName || '').toLowerCase() || (window.employeeResolver && typeof window.employeeResolver.areSameEmployee === 'function' && window.employeeResolver.areSameEmployee(emp, empName));
-      };
-      if (typeof rowIdxOrEmp === 'number' && swTable.rows[rowIdxOrEmp] && isMatchForEmp(swTable.rows[rowIdxOrEmp])) {
-        swRow = swTable.rows[rowIdxOrEmp];
-      } else {
-        swRow = swTable.rows.find(r => {
-          if (!isMatchForEmp(r)) return false;
-          const itm = String(r['Current Glove #'] || r['Current Sleeve #'] || r['Current Blanket #'] || r['Current Item #'] || '').trim().toLowerCase();
-          return !currentItem || itm === (currentItem || '').toLowerCase();
-        });
-      }
-    }
+    const swRow = this.findSwapRowForItem(swTable, rowIdxOrEmp, empName, currentItem);
 
     const sm = window.swapEngine || window.swapsManager;
     if (sm && typeof sm.handleDateChangedEdit === 'function') {
       await sm.handleDateChangedEdit(tableKey, swRow || rowIdxOrEmp, dateFormatted, empName, currentItem);
     }
 
-    // Update scheduledSwaps entry if exists
-    if (this.scheduledSwaps) {
-      const targetEmp = (empName || '').trim().toLowerCase();
-      const targetItm = (currentItem || '').trim().toLowerCase();
-      let changed = false;
-      Object.keys(this.scheduledSwaps).forEach(k => {
-        const kLower = k.toLowerCase();
-        if (kLower.includes(targetEmp) && (!targetItm || kLower.includes(targetItm))) {
-          if (typeof this.scheduledSwaps[k] === 'object') {
-            this.scheduledSwaps[k].completed = true;
-            this.scheduledSwaps[k].completedDate = dateFormatted;
-            changed = true;
-          }
-        }
-      });
-      if (changed) this.saveScheduledSwaps();
-    }
+    this._updateScheduledSwapCompletion(empName, currentItem, swRow, true, dateFormatted);
 
     this.closeSwapDetailsModal();
     const chkOfficeEdit = document.getElementById('swap-is-office-task-modal');
@@ -6177,46 +6140,14 @@ class TripPlannerApp {
     const dateFormatted = `${String(dObj.getMonth() + 1).padStart(2, '0')}/${String(dObj.getDate()).padStart(2, '0')}/${dObj.getFullYear()}`;
 
     const swTable = this.db ? this.db.getTable(tableKey) : null;
-    let swRow = null;
-    if (swTable && swTable.rows) {
-      const isMatchForEmp = (r) => {
-        if (!r) return false;
-        const emp = String(r['Employee'] || r['Crew Lead / Employee'] || '').trim().toLowerCase();
-        return emp === (empName || '').toLowerCase() || (window.employeeResolver && typeof window.employeeResolver.areSameEmployee === 'function' && window.employeeResolver.areSameEmployee(emp, empName));
-      };
-      if (typeof rowIdxOrEmp === 'number' && swTable.rows[rowIdxOrEmp] && isMatchForEmp(swTable.rows[rowIdxOrEmp])) {
-        swRow = swTable.rows[rowIdxOrEmp];
-      } else {
-        swRow = swTable.rows.find(r => {
-          if (!isMatchForEmp(r)) return false;
-          const itm = String(r['Current Glove #'] || r['Current Sleeve #'] || r['Current Blanket #'] || r['Current Item #'] || '').trim().toLowerCase();
-          return !currentItem || itm === (currentItem || '').toLowerCase();
-        });
-      }
-    }
+    const swRow = this.findSwapRowForItem(swTable, rowIdxOrEmp, empName, currentItem);
 
     const sm = window.swapEngine || window.swapsManager;
     if (sm && typeof sm.handleDateChangedEdit === 'function') {
       await sm.handleDateChangedEdit(tableKey, swRow || rowIdxOrEmp, dateFormatted, empName, currentItem);
     }
 
-    // Update scheduledSwaps to marked completed instead of deleting
-    if (this.scheduledSwaps) {
-      const targetEmp = (empName || '').trim().toLowerCase();
-      const targetItm = (currentItem || '').trim().toLowerCase();
-      let changed = false;
-      Object.keys(this.scheduledSwaps).forEach(k => {
-        const kLower = k.toLowerCase();
-        if (kLower.includes(targetEmp) && (!targetItm || kLower.includes(targetItm))) {
-          if (typeof this.scheduledSwaps[k] === 'object') {
-            this.scheduledSwaps[k].completed = true;
-            this.scheduledSwaps[k].completedDate = dateFormatted;
-            changed = true;
-          }
-        }
-      });
-      if (changed) this.saveScheduledSwaps();
-    }
+    this._updateScheduledSwapCompletion(empName, currentItem, swRow, true, dateFormatted);
 
     const chkOffice = document.getElementById('swap-is-office-task-modal');
     const inputOffice = document.getElementById('swap-office-note-input');
@@ -6273,46 +6204,14 @@ class TripPlannerApp {
     }
 
     const swTable = this.db ? this.db.getTable(tableKey) : null;
-    let swRow = null;
-    if (swTable && swTable.rows) {
-      const isMatchForEmp = (r) => {
-        if (!r) return false;
-        const emp = String(r['Employee'] || r['Crew Lead / Employee'] || '').trim().toLowerCase();
-        return emp === (empName || '').toLowerCase() || (window.employeeResolver && typeof window.employeeResolver.areSameEmployee === 'function' && window.employeeResolver.areSameEmployee(emp, empName));
-      };
-      if (typeof rowIdxOrEmp === 'number' && swTable.rows[rowIdxOrEmp] && isMatchForEmp(swTable.rows[rowIdxOrEmp])) {
-        swRow = swTable.rows[rowIdxOrEmp];
-      } else {
-        swRow = swTable.rows.find(r => {
-          if (!isMatchForEmp(r)) return false;
-          const itm = String(r['Current Glove #'] || r['Current Sleeve #'] || r['Current Blanket #'] || r['Current Item #'] || '').trim().toLowerCase();
-          return !currentItem || itm === (currentItem || '').toLowerCase();
-        });
-      }
-    }
+    const swRow = this.findSwapRowForItem(swTable, rowIdxOrEmp, empName, currentItem);
 
     const sm = window.swapEngine || window.swapsManager;
     if (sm && typeof sm.handleDateChangedEdit === 'function') {
       await sm.handleDateChangedEdit(tableKey, swRow || rowIdxOrEmp, '', empName, currentItem);
     }
 
-    // Revert scheduledSwaps back to pending
-    if (this.scheduledSwaps) {
-      const targetEmp = (empName || '').trim().toLowerCase();
-      const targetItm = (currentItem || '').trim().toLowerCase();
-      let changed = false;
-      Object.keys(this.scheduledSwaps).forEach(k => {
-        const kLower = k.toLowerCase();
-        if (kLower.includes(targetEmp) && (!targetItm || kLower.includes(targetItm))) {
-          if (typeof this.scheduledSwaps[k] === 'object') {
-            this.scheduledSwaps[k].completed = false;
-            this.scheduledSwaps[k].completedDate = '';
-            changed = true;
-          }
-        }
-      });
-      if (changed) this.saveScheduledSwaps();
-    }
+    this._updateScheduledSwapCompletion(empName, currentItem, swRow, false, '');
 
     this.closeSwapDetailsModal();
     this.showToast(`↩ Swap reverted to pending for ${empName}.`);
@@ -9700,11 +9599,14 @@ class TripPlannerApp {
       if (status.includes('ready for delivery')) return true;
       const emp = String(row['Employee'] || row['Employee Name'] || row['Name'] || '').toLowerCase();
       const item = String(row['Current Glove #'] || row['Current Sleeve #'] || row['Current Item #'] || '').toLowerCase();
+      const pick = String(row['Pick List Glove #'] || row['Pick List Sleeve #'] || row['Pick List Item #'] || '').toLowerCase();
       if (this.db && this.db.snapshot && this.db.snapshot.manualPicks) {
         const mp = this.db.snapshot.manualPicks[tableKey];
         if (mp) {
           const fallback = mp[emp];
-          const entry = mp[`${emp}|${item}`] || (fallback && (!fallback.currentItemNum || String(fallback.currentItemNum).toLowerCase() === item) ? fallback : null);
+          const fallbackMatches = fallback && String(fallback.currentItemNum || '').trim().toLowerCase() === item &&
+            (!pick || !fallback.pickListNum || String(fallback.pickListNum).trim().toLowerCase() === pick);
+          const entry = mp[`${emp}|${item}`] || (fallbackMatches ? fallback : null);
           if (entry && (entry.isPicked || String(entry.status || '').toLowerCase().includes('ready for delivery'))) {
             return true;
           }
@@ -9739,10 +9641,15 @@ class TripPlannerApp {
           }
         }
         const pickItem = String(r['Pick List Glove #'] || r['Pick List Item #'] || r['Pick List Item'] || '').trim() || (isReclaim ? '—' : '');
-        const size = String(r['Size'] || (itRow && itRow['Size']) || '').trim();
+        const pickItRow = (!itRow && pickItem && pickItem !== '—' && pickItem !== '-' && glovesInvTable && glovesInvTable.rows)
+          ? glovesInvTable.rows.find(it => String(it['Item #'] || it['Glove'] || it['ESL ID'] || '').trim() === pickItem)
+          : null;
+        const size = String(r['Size'] || (itRow && itRow['Size']) || (pickItRow && pickItRow['Size']) || '').trim();
         let itemClass = String(r['Class'] || '').trim();
         if ((!itemClass || isReclaim) && itRow && itRow['Class']) {
           itemClass = String(itRow['Class']).trim();
+        } else if (!itemClass && pickItRow && pickItRow['Class']) {
+          itemClass = String(pickItRow['Class']).trim();
         }
         const status = String(r['Status'] || (isReclaim ? 'Return to Shelf' : 'Ready For Delivery 🚚')).trim();
         let changeOutDate = String(r['Change Out Date'] || r['Change-Out Date'] || r['Due Date'] || (itRow && itRow['Change Out Date']) || '').trim();
@@ -9823,10 +9730,15 @@ class TripPlannerApp {
           }
         }
         const pickItem = String(r['Pick List Sleeve #'] || r['Pick List Item #'] || r['Pick List Item'] || '').trim() || (isReclaim ? '—' : '');
-        const size = String(r['Size'] || (itRow && itRow['Size']) || '').trim();
+        const pickItRow = (!itRow && pickItem && pickItem !== '—' && pickItem !== '-' && sleevesInvTable && sleevesInvTable.rows)
+          ? sleevesInvTable.rows.find(it => String(it['Item #'] || it['Sleeve'] || it['ESL ID'] || '').trim() === pickItem)
+          : null;
+        const size = String(r['Size'] || (itRow && itRow['Size']) || (pickItRow && pickItRow['Size']) || '').trim();
         let itemClass = String(r['Class'] || '').trim();
         if ((!itemClass || isReclaim) && itRow && itRow['Class']) {
           itemClass = String(itRow['Class']).trim();
+        } else if (!itemClass && pickItRow && pickItRow['Class']) {
+          itemClass = String(pickItRow['Class']).trim();
         }
         const status = String(r['Status'] || (isReclaim ? 'Return to Shelf' : 'Ready For Delivery 🚚')).trim();
         let changeOutDate = String(r['Change Out Date'] || r['Change-Out Date'] || r['Due Date'] || (itRow && itRow['Change Out Date']) || '').trim();

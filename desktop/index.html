@@ -110,72 +110,107 @@
         </div>
         <div class="nav-section-body">
           <!-- A. Employees -->
-          <div class="nav-subgroup-title"><span>👥</span> Employees</div>
-          <div class="nav-item nav-sub-item active" data-view="sheets-view" data-sheet="employees">
-            <span class="nav-item-icon">👤</span> Crew Structure
-          </div>
-          <div class="nav-item nav-sub-item" data-view="sheets-view" data-sheet="job_tracking">
-            <span class="nav-item-icon">📋</span> Job Tracking
-          </div>
-          <div class="nav-item nav-sub-item" data-action="open-location-approvals">
-            <span class="nav-item-icon">📍</span> Locations & Approvals
+          <div class="nav-subgroup" id="nav-subgroup-employees">
+            <div class="nav-subgroup-header" onclick="toggleNavSubgroup('employees')">
+              <span class="nav-subgroup-title"><span>👥</span> Employees</span>
+              <span class="nav-subgroup-chevron">▼</span>
+            </div>
+            <div class="nav-subgroup-body">
+              <div class="nav-item nav-sub-item active" data-view="sheets-view" data-sheet="employees">
+                <span class="nav-item-icon">👤</span> Crew Structure
+              </div>
+              <div class="nav-item nav-sub-item" data-view="sheets-view" data-sheet="job_tracking">
+                <span class="nav-item-icon">📋</span> Job Tracking
+              </div>
+              <div class="nav-item nav-sub-item" data-action="open-location-approvals">
+                <span class="nav-item-icon">📍</span> Locations & Approvals
+              </div>
+            </div>
           </div>
 
           <!-- B. Rubber -->
-          <div class="nav-subgroup-title"><span>🧤</span> Rubber</div>
-          <div class="nav-item nav-sub-item" data-view="sheets-view" data-sheet="gloves">
-            <span class="nav-item-icon">🧤</span> Gloves
-          </div>
-          <div class="nav-item nav-sub-item" data-view="sheets-view" data-sheet="sleeves">
-            <span class="nav-item-icon">🦺</span> Sleeves
-          </div>
-          <div class="nav-item nav-sub-item" data-view="sheets-view" data-sheet="blankets">
-            <span class="nav-item-icon">🧱</span> Blankets
+          <div class="nav-subgroup" id="nav-subgroup-rubber">
+            <div class="nav-subgroup-header" onclick="toggleNavSubgroup('rubber')">
+              <span class="nav-subgroup-title"><span>🧤</span> Rubber</span>
+              <span class="nav-subgroup-chevron">▼</span>
+            </div>
+            <div class="nav-subgroup-body">
+              <div class="nav-item nav-sub-item" data-view="sheets-view" data-sheet="gloves">
+                <span class="nav-item-icon">🧤</span> Gloves
+              </div>
+              <div class="nav-item nav-sub-item" data-view="sheets-view" data-sheet="sleeves">
+                <span class="nav-item-icon">🦺</span> Sleeves
+              </div>
+              <div class="nav-item nav-sub-item" data-view="sheets-view" data-sheet="blankets">
+                <span class="nav-item-icon">🧱</span> Blankets
+              </div>
+            </div>
           </div>
 
           <!-- C. Equipment -->
-          <div class="nav-subgroup-title"><span>⚡</span> Equipment</div>
-          <div class="nav-item nav-sub-item" data-view="sheets-view" data-sheet="macks">
-            <span class="nav-item-icon">🧱</span> MACKs
-          </div>
-          <div class="nav-item nav-sub-item" data-view="sheets-view" data-sheet="hv_testers">
-            <span class="nav-item-icon">⚡</span> HV Testers
-          </div>
-          <div class="nav-item nav-sub-item" data-view="sheets-view" data-sheet="phasing_sets">
-            <span class="nav-item-icon">⚡</span> Phasing Sets
-          </div>
-          <div class="nav-item nav-sub-item" data-view="sheets-view" data-sheet="aed">
-            <span class="nav-item-icon">🏥</span> AED
-          </div>
-          <div class="nav-item nav-sub-item" data-view="sheets-view" data-sheet="grounds">
-            <span class="nav-item-icon">⚡</span> Grounds
-          </div>
-          <div class="nav-item nav-sub-item" data-view="sheets-view" data-sheet="hot_sticks">
-            <span class="nav-item-icon">🔴</span> Hot Sticks
-          </div>
-          <div class="nav-item nav-sub-item" data-view="sheets-view" data-sheet="test_batches">
-            <span class="nav-item-icon">🔬</span> Lab Test Batches & JM Portal
+          <div class="nav-subgroup" id="nav-subgroup-equipment">
+            <div class="nav-subgroup-header" onclick="toggleNavSubgroup('equipment')">
+              <span class="nav-subgroup-title"><span>⚡</span> Equipment</span>
+              <span class="nav-subgroup-chevron">▼</span>
+            </div>
+            <div class="nav-subgroup-body">
+              <div class="nav-item nav-sub-item" data-view="sheets-view" data-sheet="macks">
+                <span class="nav-item-icon">🧱</span> MACKs
+              </div>
+              <div class="nav-item nav-sub-item" data-view="sheets-view" data-sheet="hv_testers">
+                <span class="nav-item-icon">⚡</span> HV Testers
+              </div>
+              <div class="nav-item nav-sub-item" data-view="sheets-view" data-sheet="phasing_sets">
+                <span class="nav-item-icon">⚡</span> Phasing Sets
+              </div>
+              <div class="nav-item nav-sub-item" data-view="sheets-view" data-sheet="aed">
+                <span class="nav-item-icon">🏥</span> AED
+              </div>
+              <div class="nav-item nav-sub-item" data-view="sheets-view" data-sheet="grounds">
+                <span class="nav-item-icon">⚡</span> Grounds
+              </div>
+              <div class="nav-item nav-sub-item" data-view="sheets-view" data-sheet="hot_sticks">
+                <span class="nav-item-icon">🔴</span> Hot Sticks
+              </div>
+              <div class="nav-item nav-sub-item" data-view="sheets-view" data-sheet="test_batches">
+                <span class="nav-item-icon">🔬</span> Lab Test Batches & JM Portal
+              </div>
+            </div>
           </div>
 
           <!-- Procurement & Fleet Analytics -->
-          <div class="nav-subgroup-title"><span>🛒</span> Procurement & Fleet</div>
-          <div class="nav-item nav-sub-item" data-view="procurement-view">
-            <span class="nav-item-icon">🛒</span> Purchase Needs & Orders
-          </div>
-          <div class="nav-item nav-sub-item" data-view="aging-view">
-            <span class="nav-item-icon">📊</span> Fleet Aging & EOL
-          </div>
-          <div class="nav-item nav-sub-item" data-action="open-ppe-tracker">
-            <span class="nav-item-icon">🧤</span> Rubber PPE Tracker
+          <div class="nav-subgroup" id="nav-subgroup-procurement">
+            <div class="nav-subgroup-header" onclick="toggleNavSubgroup('procurement')">
+              <span class="nav-subgroup-title"><span>🛒</span> Procurement & Fleet</span>
+              <span class="nav-subgroup-chevron">▼</span>
+            </div>
+            <div class="nav-subgroup-body">
+              <div class="nav-item nav-sub-item" data-view="procurement-view">
+                <span class="nav-item-icon">🛒</span> Purchase Needs & Orders
+              </div>
+              <div class="nav-item nav-sub-item" data-view="aging-view">
+                <span class="nav-item-icon">📊</span> Fleet Aging & EOL
+              </div>
+              <div class="nav-item nav-sub-item" data-action="open-ppe-tracker">
+                <span class="nav-item-icon">🧤</span> Rubber PPE Tracker
+              </div>
+            </div>
           </div>
 
           <!-- D & E: Previous Employees & Crew Import -->
-          <div class="nav-subgroup-title"><span>📂</span> Personnel Archive</div>
-          <div class="nav-item nav-sub-item" data-view="previous-employees-view">
-            <span class="nav-item-icon">👥</span> Previous Employees
-          </div>
-          <div class="nav-item nav-sub-item" data-view="crew-import-view">
-            <span class="nav-item-icon">📥</span> Crew Import (Excel)
+          <div class="nav-subgroup" id="nav-subgroup-archive">
+            <div class="nav-subgroup-header" onclick="toggleNavSubgroup('archive')">
+              <span class="nav-subgroup-title"><span>📂</span> Personnel Archive</span>
+              <span class="nav-subgroup-chevron">▼</span>
+            </div>
+            <div class="nav-subgroup-body">
+              <div class="nav-item nav-sub-item" data-view="previous-employees-view">
+                <span class="nav-item-icon">👥</span> Previous Employees
+              </div>
+              <div class="nav-item nav-sub-item" data-view="crew-import-view">
+                <span class="nav-item-icon">📥</span> Crew Import (Excel)
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -2467,7 +2502,7 @@
 
   <!-- Batch Delivery to Inventory Modal -->
   <div id="batch-delivery-modal" class="modal-overlay" style="display: none;">
-    <div class="modal-box" style="max-width: 980px; width: 95%; max-height: 90vh;">
+    <div class="modal-box" style="max-width: 1400px; width: 96%; max-height: 90vh;">
       <div class="modal-header" style="background: linear-gradient(135deg, #1e40af 0%, #1e3a8a 100%); color: white;">
         <div style="display: flex; align-items: center; gap: 8px;">
           <span style="font-size: 18px;">🚚</span>
@@ -2479,7 +2514,13 @@
         <!-- Injected dynamically by procurement.js -->
       </div>
       <div class="modal-footer" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
-        <button class="btn btn-secondary" onclick="window.procurementEngine.closeBatchDeliveryModal()">Cancel</button>
+        <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+          <button class="btn btn-secondary" onclick="window.procurementEngine.closeBatchDeliveryModal()">Cancel</button>
+          <button class="btn btn-secondary" id="btn-save-batch-draft" onclick="window.procurementEngine.saveBatchDeliveryDraftAndClose()" style="background: rgba(245, 158, 11, 0.16); border: 1px solid rgba(245, 158, 11, 0.45); color: #fcd34d; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; font-size: 12.5px; border-radius: 4px; cursor: pointer;" title="Save your field edits and checkmarks so you can finish receiving this order later">
+            <span>💾</span> Save Progress &amp; Close
+          </button>
+          <span id="batch-draft-save-indicator" style="font-size: 11.5px; color: #94a3b8;"></span>
+        </div>
         <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
           <button class="btn btn-secondary" id="btn-mark-delivered-no-inv" onclick="window.procurementEngine.confirmMarkDeliveredWithoutInventory()" style="background: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.4); color: #6ee7b7; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; font-size: 12.5px; border-radius: 4px; cursor: pointer;" title="Mark this order as received/delivered without adding duplicate item numbers to Gloves or Sleeves sheets">
             <span>✅</span> Mark Delivered Only (Already Added to Inventory)
@@ -3384,7 +3425,7 @@
   <script src="js/inventory.js?v=20261027_01"></script>
   <script src="js/swaps.js?v=20261109_02"></script>
   <script src="js/crew-import.js?v=20261111_02"></script>
-  <script src="js/crew-planning.js?v=20261104_07"></script>
+  <script src="js/crew-planning.js?v=20261116_01"></script>
   <script src="js/item-stats.js?v=20261027_01"></script>
   <script src="js/sms-dialog.js?v=20261109_05"></script>
   <script src="js/employee-profile.js?v=20261111_02"></script>
@@ -3457,56 +3498,93 @@
       }, 3500);
     };
 
-    function toggleNavSection(secId) {
-      const el = document.getElementById('nav-section-' + secId);
+    const NAV_SECTION_IDS = ['inventory', 'safety', 'training', 'schedule', 'history'];
+    const NAV_SUBGROUP_IDS = ['employees', 'rubber', 'equipment', 'procurement', 'archive'];
+
+    function toggleNavCollapsible(idPrefix, storagePrefix, id) {
+      const el = document.getElementById(idPrefix + id);
       if (!el) return;
       const isCollapsed = el.classList.toggle('collapsed');
       try {
-        localStorage.setItem('sa_nav_' + secId + '_collapsed', isCollapsed ? 'true' : 'false');
+        localStorage.setItem(storagePrefix + id + '_collapsed', isCollapsed ? 'true' : 'false');
       } catch (e) {}
+    }
+
+    function toggleNavSection(secId) {
+      toggleNavCollapsible('nav-section-', 'sa_nav_', secId);
     }
     window.toggleNavSection = toggleNavSection;
 
-    function initNavSections() {
-      const sections = ['inventory', 'safety', 'training', 'schedule', 'history'];
-      sections.forEach(sec => {
-        const el = document.getElementById('nav-section-' + sec);
+    function toggleNavSubgroup(subId) {
+      toggleNavCollapsible('nav-subgroup-', 'sa_nav_sub_', subId);
+    }
+    window.toggleNavSubgroup = toggleNavSubgroup;
+
+    function initCollapsibleGroup(ids, idPrefix, storagePrefix, defaultCollapsedFn) {
+      ids.forEach(id => {
+        const el = document.getElementById(idPrefix + id);
         if (!el) return;
         let collapsed = false;
         try {
-          const saved = localStorage.getItem('sa_nav_' + sec + '_collapsed');
-          if (saved !== null) {
-            collapsed = saved === 'true';
-          } else {
-            // Default: inventory & safety open; training, schedule, history collapsed
-            collapsed = (sec === 'training' || sec === 'schedule' || sec === 'history');
-          }
+          const saved = localStorage.getItem(storagePrefix + id + '_collapsed');
+          collapsed = saved !== null ? (saved === 'true') : defaultCollapsedFn(id);
         } catch (e) {}
-        if (collapsed) {
-          el.classList.add('collapsed');
-        } else {
-          el.classList.remove('collapsed');
-        }
+        el.classList.toggle('collapsed', collapsed);
       });
+    }
+
+    function initNavSections() {
+      initCollapsibleGroup(
+        NAV_SECTION_IDS,
+        'nav-section-',
+        'sa_nav_',
+        sec => (sec === 'training' || sec === 'schedule' || sec === 'history')
+      );
+      initCollapsibleGroup(
+        NAV_SUBGROUP_IDS,
+        'nav-subgroup-',
+        'sa_nav_sub_',
+        () => false
+      );
+    }
+
+    function expandCollapsibleAncestor(itemEl, selector, idPrefix, storagePrefix) {
+      const ancestor = itemEl.closest(selector);
+      if (ancestor && ancestor.classList.contains('collapsed')) {
+        ancestor.classList.remove('collapsed');
+        const id = ancestor.id.replace(idPrefix, '');
+        try {
+          localStorage.setItem(storagePrefix + id + '_collapsed', 'false');
+        } catch (e) {}
+      }
     }
 
     function ensureParentSectionExpanded(itemEl) {
       if (!itemEl) return;
-      const parentSection = itemEl.closest('.nav-section');
-      if (parentSection && parentSection.classList.contains('collapsed')) {
-        parentSection.classList.remove('collapsed');
-        const secId = parentSection.id.replace('nav-section-', '');
-        try {
-          localStorage.setItem('sa_nav_' + secId + '_collapsed', 'false');
-        } catch (e) {}
-      }
+      expandCollapsibleAncestor(itemEl, '.nav-subgroup', 'nav-subgroup-', 'sa_nav_sub_');
+      expandCollapsibleAncestor(itemEl, '.nav-section', 'nav-section-', 'sa_nav_');
+    }
+
+    function syncSidebarActiveAncestors(activeEl) {
+      document.querySelectorAll('.nav-section.has-active, .nav-subgroup.has-active').forEach(el => {
+        el.classList.remove('has-active');
+      });
+      const target = activeEl || document.querySelector('.nav-item.active');
+      if (!target) return;
+      const parentSub = target.closest('.nav-subgroup');
+      if (parentSub) parentSub.classList.add('has-active');
+      const parentSec = target.closest('.nav-section');
+      if (parentSec) parentSec.classList.add('has-active');
     }
 
     function highlightSidebarItem(viewId, sheetKey) {
       document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
       let sidebarMatch = null;
       if (viewId === 'sheets-view') {
-        const targetSheet = sheetKey || (window.sheetNavigator ? window.sheetNavigator.currentSheetKey : 'employees');
+        const rawKey = sheetKey || (window.sheetNavigator ? window.sheetNavigator.currentSheetKey : 'employees');
+        const targetSheet = (window.sheetNavigator && typeof window.sheetNavigator.getCategoryMapping === 'function')
+          ? (window.sheetNavigator.getCategoryMapping(rawKey).invKey || rawKey)
+          : rawKey;
         sidebarMatch = document.querySelector(`.nav-item[data-view="sheets-view"][data-sheet="${targetSheet}"]`);
         if (!sidebarMatch) {
           sidebarMatch = document.querySelector(`.nav-item[data-view="sheets-view"]`);
@@ -3527,7 +3605,9 @@
         sidebarMatch.classList.add('active');
         ensureParentSectionExpanded(sidebarMatch);
       }
+      syncSidebarActiveAncestors(sidebarMatch);
     }
+    window.highlightSidebarItem = highlightSidebarItem;
 
     function navigateToView(viewId, sheetKey) {
       if (window.supabaseSync && !window.supabaseSync.canViewPage(viewId)) {
@@ -3626,6 +3706,7 @@
     });
 
     initNavSections();
+    syncSidebarActiveAncestors();
 
     document.querySelectorAll('.mobile-nav-btn[data-view]').forEach(item => {
       item.addEventListener('click', () => navigateToView(item.dataset.view));

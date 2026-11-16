@@ -290,11 +290,9 @@ class SheetNavigator {
         // Auto-activate when today reaches or exceeds hire date (todayNum >= hireNum)
         if (todayNum >= hireNum) {
           const empName = String(r['Employee Name'] || r['Name'] || Object.values(r)[0] || '').trim();
+          const oldStatus = r['Status'] !== undefined && r['Status'] !== null ? String(r['Status']) : 'Pending';
           r['Status'] = 'Active';
           const rIdx = r._rowIdx || (i + 2);
-          if (empTable.rawGrid && empTable.rawGrid[rIdx - 1]) {
-            empTable.rawGrid[rIdx - 1][statusColIdx - 1] = 'Active';
-          }
           await this.db.addMutation({
             action: 'UPDATE_CELL',
             sheetName: empTable.name || 'Employees',
@@ -303,8 +301,12 @@ class SheetNavigator {
             col: statusColIdx,
             header: 'Status',
             itemIdentifier: empName,
+            oldValue: oldStatus,
             value: 'Active'
           });
+          if (empTable.rawGrid && empTable.rawGrid[rIdx - 1]) {
+            empTable.rawGrid[rIdx - 1][statusColIdx - 1] = 'Active';
+          }
           activatedNames.push(empName);
         }
       }
@@ -534,6 +536,9 @@ class SheetNavigator {
     this.sortDir = 'asc';
     if (window.supabaseSync) {
       window.supabaseSync.syncEditModeForCurrentContext('sheets-view');
+    }
+    if (typeof window.highlightSidebarItem === 'function' && document.getElementById('sheets-view')?.classList.contains('active')) {
+      window.highlightSidebarItem('sheets-view', sheetKey);
     }
     this.renderTabsBar(true);
     this.renderCurrentSheet();
@@ -8093,8 +8098,11 @@ class SheetNavigator {
       if (firstCell && !isSubHeader && !isClassHeader && !isRetestHeader && !isPrevEmpHeader && !isClassReclaimHeader && !isLostHeader && !isCityHeader && !isForemanHeader) {
         const currentItemNum = String(rowArr[1] || '').trim();
         const isUnassignedDeficit = (!currentItemNum || currentItemNum === '—' || currentItemNum === '-');
+        const rowStatLower = String(rowArr[7] || '').trim().toLowerCase();
+        const rowPickedVal = String(rowArr[8] || '').trim().toUpperCase();
+        const isStagedDelivery = rowStatLower.includes('ready for delivery') || rowPickedVal === 'TRUE';
 
-        if (isUnassignedDeficit) {
+        if (isUnassignedDeficit && !isStagedDelivery) {
           // 1. Check if manually excluded from Swaps on their current crew
           if (typeof window !== 'undefined' && window.ppeTrackingEngine && typeof window.ppeTrackingEngine.isEmployeeSwapsExcluded === 'function') {
             if (window.ppeTrackingEngine.isEmployeeSwapsExcluded(firstCell)) {
@@ -8308,13 +8316,21 @@ class SheetNavigator {
             }
             const isPickListCol = colLower.includes('pick list');
             if (isPickListCol) {
-              const rowObj = (tableData.rows || [])[rowIdx - 1];
               const empName = String(rowArr[0] || '').trim().toLowerCase();
               const currentItem = String(rowArr[1] || '').trim().toLowerCase();
+              const rowObj = (tableData.rows || []).find(r => r._rowIdx === (rowIdx + 1)) ||
+                             (tableData.rows || []).find(r =>
+                               String(r['Employee'] || '').trim().toLowerCase() === empName &&
+                               String(r['Current Glove #'] || r['Current Sleeve #'] || r['Current Blanket #'] || r['Current Item #'] || '').trim().toLowerCase() === currentItem &&
+                               (!displayVal || String(r['Pick List Item #'] || '').trim() === displayVal)
+                             );
               const manualPicks = (this.db && typeof this.db.getManualPicks === 'function') ? this.db.getManualPicks(this.currentSheetKey) : {};
+              const compEntry = manualPicks[`${empName}|${currentItem}`];
+              const simpEntry = manualPicks[empName];
+              const matchingSimple = simpEntry && String(simpEntry.currentItemNum || '').trim().toLowerCase() === currentItem ? simpEntry : null;
               const isManual = (rowObj && (rowObj._manualPick || rowObj.isManualPick)) ||
-                               (manualPicks[`${empName}|${currentItem}`] && manualPicks[`${empName}|${currentItem}`].pickListNum === displayVal) ||
-                               (manualPicks[empName] && manualPicks[empName].pickListNum === displayVal);
+                               (compEntry && compEntry.pickListNum === displayVal) ||
+                               (matchingSimple && matchingSimple.pickListNum === displayVal);
               if (isManual && displayVal && displayVal !== '—' && displayVal !== '-') {
                 cellStyle += ' background-color: rgba(59, 130, 246, 0.18); border: 1px solid #60a5fa; font-weight: 700; color: #93c5fd; border-radius: 4px;';
               }
@@ -8389,8 +8405,14 @@ class SheetNavigator {
           const isCleared = (!newVal || newVal === '—' || newVal === '-');
           isManualPick = !isCleared;
 
-          // Find row object in tableData.rows
-          const rowObj = (tableData.rows || []).find(r => r._rowIdx === row || (r['Employee'] && r['Employee'] === empName));
+          // Find exact row object in tableData.rows (prefer _rowIdx so multi-row employees don't collide)
+          const rowObj = (tableData.rows || []).find(r => r._rowIdx === row) ||
+            (tableData.rows || []).find(r =>
+              r['Employee'] === empName &&
+              String(r['Current Glove #'] || r['Current Sleeve #'] || r['Current Blanket #'] || r['Current Item #'] || '').trim() === currentItemNum &&
+              (!initialVal || String(r['Pick List Item #'] || '').trim() === initialVal)
+            ) ||
+            (tableData.rows || []).find(r => r['Employee'] && r['Employee'] === empName);
 
           let invKey = this.currentSheetKey.replace('_swaps', '').replace('swaps', '');
           if (!invKey.endsWith('s') && ['glove', 'sleeve', 'blanket', 'mack', 'ground'].includes(invKey)) {
@@ -8411,21 +8433,23 @@ class SheetNavigator {
               return m ? parseInt(m[0], 10) : 0;
             };
 
-            const curItem = invTable.rows.find(it => {
+            const curItem = currentItemNum ? invTable.rows.find(it => {
               const itNum = String(it['Item #'] || it['Glove'] || it['Sleeve'] || it['ESL ID'] || Object.values(it)[0] || '').trim().toLowerCase();
               return itNum === currentItemNum.toLowerCase();
-            });
+            }) : null;
 
             matchedItem = invTable.rows.find(it => {
               const itNum = String(it['Item #'] || it['Glove'] || it['Sleeve'] || it['ESL ID'] || Object.values(it)[0] || '').trim().toLowerCase();
               return itNum === newVal.toLowerCase();
             });
 
-            if (curItem && matchedItem) {
-              const curClass = parseClass(curItem['Class']);
+            const expectedClass = curItem
+              ? parseClass(curItem['Class'])
+              : (rowObj && rowObj['Class'] !== undefined && rowObj['Class'] !== '' ? parseClass(rowObj['Class']) : null);
+            if (expectedClass !== null && matchedItem) {
               const pickClass = parseClass(matchedItem['Class']);
-              if (curClass !== pickClass) {
-                alert(`⚠️ Safety Violation: Rubber Class Mismatch!\n\nCannot assign Class ${pickClass} item #${newVal} to a Class ${curClass} swap.\nRubber class must match exactly.`);
+              if (expectedClass !== pickClass) {
+                alert(`⚠️ Safety Violation: Rubber Class Mismatch!\n\nCannot assign Class ${pickClass} item #${newVal} to a Class ${expectedClass} swap.\nRubber class must match exactly.`);
                 if (tableData.rawGrid && tableData.rawGrid[row - 1]) {
                   tableData.rawGrid[row - 1][col - 1] = initialVal;
                 }
@@ -11241,9 +11265,6 @@ class SheetNavigator {
 
     const colIdx = (jtTable.headers || []).findIndex(h => h.trim().toLowerCase() === colName.toLowerCase()) + 1;
     const rowIdx = jt._rowIdx || (jtTable.rows.indexOf(jt) + 2);
-    if (jtTable.rawGrid && jtTable.rawGrid[rowIdx - 1] && colIdx > 0) {
-      jtTable.rawGrid[rowIdx - 1][colIdx - 1] = newVal ? 'TRUE' : 'FALSE';
-    }
 
     await this.db.addMutation({
       action: 'UPDATE_CELL',
@@ -11253,8 +11274,13 @@ class SheetNavigator {
       col: colIdx > 0 ? colIdx : 12,
       header: colName,
       itemIdentifier: baseJob,
+      oldValue: curVal,
       value: newVal
     });
+
+    if (jtTable.rawGrid && jtTable.rawGrid[rowIdx - 1] && colIdx > 0) {
+      jtTable.rawGrid[rowIdx - 1][colIdx - 1] = newVal ? 'TRUE' : 'FALSE';
+    }
 
     await this.db.persistSnapshot(this.db.snapshot);
     this.renderCurrentSheet();
@@ -12819,24 +12845,30 @@ class SheetNavigator {
         // 2. Synthesize missing Job Tracking locations so every JT crew location is present
         validJtLocations.forEach((canonicalName, lower) => {
           if (!seenLocs.has(lower)) {
-            let dt = 60;
-            let dir = 'Montana';
-            if (window.tripPlannerEngine && window.tripPlannerEngine.masterLocations) {
-              const mInfo = window.tripPlannerEngine.masterLocations[canonicalName];
-              if (mInfo) {
-                dt = mInfo.mins;
-                dir = mInfo.dir || 'Montana';
-              }
-            }
-            const synthRow = {
-              'Location': canonicalName,
-              'Drive Time (min)': dt,
-              'Direction': dir,
-              'Overnight City': '',
-              'Base Time (min)': 15,
-              'Per Task (min)': 10,
-              'Rubber Class Approval': 'CL2'
-            };
+            const synthRow = (this.db && typeof this.db.buildLocationDefaults === 'function')
+              ? this.db.buildLocationDefaults(canonicalName, {}, tableData ? tableData.headers : null)
+              : (() => {
+                  let dt = 60;
+                  let dir = 'Montana';
+                  if (window.tripPlannerEngine && window.tripPlannerEngine.masterLocations) {
+                    const mInfo = window.tripPlannerEngine.masterLocations[canonicalName];
+                    if (mInfo) {
+                      dt = mInfo.mins;
+                      dir = mInfo.dir || 'Montana';
+                    }
+                  }
+                  return {
+                    'Location': canonicalName,
+                    'Drive Time (min)': dt,
+                    'Direction': dir,
+                    'Overnight City': '',
+                    'Base Time (min)': 15,
+                    'Per Task (min)': 10,
+                    'Rubber Class Approval': 'CL2'
+                  };
+                })();
+            synthRow._isSynthesized = true;
+            synthRow._rowIdx = null;
             matchedRows.push(synthRow);
             seenLocs.set(lower, synthRow);
           }
@@ -13697,8 +13729,8 @@ class SheetNavigator {
     let lastRenderedMonth = null;
 
     rows.forEach((row, rowIdx) => {
-      let sheetRowIdx = row._rowIdx;
-      if (!sheetRowIdx && tableData.rawGrid) {
+      let sheetRowIdx = row._isSynthesized ? '' : row._rowIdx;
+      if (!row._isSynthesized && !sheetRowIdx && tableData.rawGrid) {
         if (this.currentSheetKey === 'expiring_certs') {
           const empVal = String(row['Employee Name'] || row['Name'] || '').trim().toLowerCase();
           const certVal = String(row['Item Type'] || row['Cert Type'] || '').trim().toLowerCase();
@@ -13706,6 +13738,7 @@ class SheetNavigator {
           if (gIdx !== -1) sheetRowIdx = gIdx + 1;
         } else {
           const rawItemVal = String(
+            (this.currentSheetKey === 'locations' ? (row['Location'] || row['City']) : '') ||
             row['HVT #'] || row['HV Tester'] || row['Phasing Set'] || row['PS #'] || row['AED #'] ||
             row['Serial #'] || row['Item #'] || row['Glove'] || row['Sleeve'] || row['Blanket'] ||
             row['MACK'] || row['Name'] || row['Employee Name'] || row['Job Number'] || Object.values(row)[0] || ''
@@ -13727,12 +13760,14 @@ class SheetNavigator {
           }
         }
       }
-      if (!sheetRowIdx && tableData.rows) {
-        const rIdx = tableData.rows.indexOf(row);
-        if (rIdx !== -1) sheetRowIdx = rIdx + 2;
+      if (!row._isSynthesized) {
+        if (!sheetRowIdx && tableData.rows) {
+          const rIdx = tableData.rows.indexOf(row);
+          if (rIdx !== -1) sheetRowIdx = rIdx + 2;
+        }
+        if (!sheetRowIdx) sheetRowIdx = rowIdx + 2;
+        row._rowIdx = sheetRowIdx;
       }
-      if (!sheetRowIdx) sheetRowIdx = rowIdx + 2;
-      row._rowIdx = sheetRowIdx;
 
       const currentWeekVal = String(row['Week Start'] || row['Week'] || '').trim();
       const currentLocVal = String(row['Location'] || '').trim();
@@ -14261,6 +14296,8 @@ class SheetNavigator {
           itemIdentifier = `${row['Employee Name'] || row['Name'] || ''} | ${row['Item Type'] || row['Cert Type'] || ''}`;
         } else if (this.currentSheetKey === 'training_tracking') {
           itemIdentifier = `${row['Month'] || ''} | ${row['Crew #'] || row['Crew'] || ''} | ${row['Training Topic'] || ''}`;
+        } else if (this.currentSheetKey === 'locations') {
+          itemIdentifier = String(row['Location'] || row['City'] || (tableData.headers && tableData.headers[0] ? row[tableData.headers[0]] : '') || Object.values(row)[0] || '').trim();
         } else {
           itemIdentifier = String(row['Item #'] || row['HVT #'] || row['Phasing Set #'] || row['AED #'] || row['Glove'] || row['Sleeve'] || row['Blanket'] || row['MACK'] || row['Serial #'] || row['Name'] || row['Employee Name'] || row['Job Number'] || Object.values(row)[0] || '').trim();
         }
@@ -14272,6 +14309,7 @@ class SheetNavigator {
                      data-header="${this.escapeHtml(h)}"
                      data-primary="${isPrimaryItemCol ? 'true' : 'false'}"
                      data-item="${this.escapeHtml(itemIdentifier)}"
+                     data-synthesized="${row._isSynthesized ? 'true' : 'false'}"
                      data-sheet="${this.escapeHtml(tableData.name)}">${customCellHtml !== null ? customCellHtml : this.escapeHtml(val)}</td>`;
       });
       if (this.currentSheetKey === 'expiring_certs') {
@@ -14505,18 +14543,38 @@ class SheetNavigator {
             else if (nUpper.includes('CL2')) newVal = 'CL2';
           }
 
+          const tableData = this.db.getTable(this.currentSheetKey);
           const sheetName = targetCell.dataset.sheet || (tableData ? tableData.name : this.currentSheetKey);
           const row = parseInt(targetCell.dataset.row, 10);
           const col = parseInt(targetCell.dataset.col, 10);
           const itemIdentifier = targetCell.dataset.item || '';
 
-          const tableData = this.db.getTable(this.currentSheetKey);
           let tableRow = null;
           let actualRowIdx = row;
+          let isCreatedLocationRow = false;
 
           if (tableData) {
-            // 1. Direct match by exact row index (fastest and most accurate for all sheets)
-            if (row && tableData.rows) {
+            if (this.currentSheetKey === 'locations') {
+              if (itemIdentifier && tableData.rows) {
+                const targetLocLower = itemIdentifier.trim().toLowerCase();
+                const locHeader = Array.isArray(tableData.headers)
+                  ? tableData.headers.find(h => {
+                      const hl = String(h || '').trim().toLowerCase();
+                      return hl === 'location' || hl === 'city';
+                    })
+                  : null;
+                tableRow = tableData.rows.find(r => {
+                  const locVal = String(r['Location'] || r['City'] || (locHeader ? r[locHeader] : '') || '').trim().toLowerCase();
+                  return locVal === targetLocLower;
+                }) || null;
+                if (tableRow) {
+                  actualRowIdx = tableRow._rowIdx || (tableData.rows.indexOf(tableRow) + 2);
+                  targetCell.dataset.row = String(actualRowIdx);
+                  targetCell.dataset.synthesized = 'false';
+                }
+              }
+            } else if (row && tableData.rows) {
+              // 1. Direct match by exact row index (fastest and most accurate for all sheets)
               tableRow = tableData.rows.find(r => r._rowIdx === row);
             }
 
@@ -14576,7 +14634,7 @@ class SheetNavigator {
               }
             }
 
-            if (!tableRow && tableData.rows && tableData.rows[actualRowIdx - 2]) {
+            if (!tableRow && this.currentSheetKey !== 'locations' && tableData.rows && tableData.rows[actualRowIdx - 2]) {
               tableRow = tableData.rows[actualRowIdx - 2];
             }
           }
@@ -14643,10 +14701,22 @@ class SheetNavigator {
             }
           }
 
+          // Snapshot pre-edit row values before any workflow updates rawGrid in-place
+          const priorGridRow = (tableData && tableData.rawGrid && actualRowIdx && tableData.rawGrid[actualRowIdx - 1])
+            ? tableData.rawGrid[actualRowIdx - 1].slice()
+            : null;
+          const priorRowSnapshot = tableRow ? { ...tableRow } : null;
+
           const queueCell = async (hName, val, skipHistory = false) => {
             if (!hName || val === undefined || !tableData) return;
             const cIdx = (tableData.headers || []).indexOf(hName);
             if (cIdx !== -1) {
+              let oldVal = '';
+              if (priorGridRow && cIdx < priorGridRow.length && priorGridRow[cIdx] !== undefined && priorGridRow[cIdx] !== null) {
+                oldVal = priorGridRow[cIdx];
+              } else if (priorRowSnapshot && priorRowSnapshot[hName] !== undefined && priorRowSnapshot[hName] !== null) {
+                oldVal = priorRowSnapshot[hName];
+              }
               await this.db.addMutation({
                 action: 'UPDATE_CELL',
                 sheetName: sheetName,
@@ -14654,6 +14724,7 @@ class SheetNavigator {
                 col: cIdx + 1,
                 header: hName,
                 itemIdentifier: itemIdentifier,
+                oldValue: oldVal,
                 value: val,
                 skipHistory: skipHistory
               });
@@ -14760,8 +14831,6 @@ class SheetNavigator {
               if (notesColName) tableRow[notesColName] = reason;
             }
 
-            syncTableRowToGrid();
-
             if (assignedColName) { await queueCell(assignedColName, 'Failed Rubber'); updateRowCell(assignedColName, 'Failed Rubber'); }
             if (statusColName) { await queueCell(statusColName, 'Failed Rubber'); updateRowCell(statusColName, 'Failed Rubber'); }
             if (locationColName) { await queueCell(locationColName, 'Destroyed'); updateRowCell(locationColName, 'Destroyed'); }
@@ -14770,6 +14839,7 @@ class SheetNavigator {
             if (chgOutColName) { await queueCell(chgOutColName, 'N/A'); updateRowCell(chgOutColName, 'N/A'); }
             if (pickedColName) { await queueCell(pickedColName, ''); updateRowCell(pickedColName, ''); }
             if (notesColName) { await queueCell(notesColName, reason); updateRowCell(notesColName, reason); }
+            syncTableRowToGrid();
 
             await this.db.recordItemHistoryEvent(sheetName, tableRow, `Marked Failed Rubber: ${reason}`);
             flashSuccess();
@@ -14824,8 +14894,6 @@ class SheetNavigator {
               if (chgOutColName && calculatedShelfDate) tableRow[chgOutColName] = calculatedShelfDate;
             }
 
-            syncTableRowToGrid();
-
             if (assignedColName) { await queueCell(assignedColName, 'On Shelf', true); updateRowCell(assignedColName, 'On Shelf'); }
             if (statusColName) { await queueCell(statusColName, 'On Shelf', true); updateRowCell(statusColName, 'On Shelf'); }
             if (locationColName) { await queueCell(locationColName, 'Helena', true); updateRowCell(locationColName, 'Helena'); }
@@ -14834,6 +14902,7 @@ class SheetNavigator {
             if (eslColName && shelfDetails.eslId) { await queueCell(eslColName, shelfDetails.eslId, true); updateRowCell(eslColName, shelfDetails.eslId); }
             if (pickedColName) { await queueCell(pickedColName, '', true); updateRowCell(pickedColName, ''); }
             if (chgOutColName && calculatedShelfDate) { await queueCell(chgOutColName, calculatedShelfDate, true); updateRowCell(chgOutColName, calculatedShelfDate); }
+            syncTableRowToGrid();
 
             await this.db.recordItemHistoryEvent(sheetName, tableRow, `Returned to Shelf (Test Date: ${shelfDetails.testDate || todayFormatted})`);
             flashSuccess();
@@ -15187,8 +15256,8 @@ class SheetNavigator {
               tableRow[pickedColName] = '';
               const pIdx = (tableData.headers || []).indexOf(pickedColName);
               if (pIdx !== -1) {
-                if (tableData.rawGrid && tableData.rawGrid[actualRowIdx - 1]) tableData.rawGrid[actualRowIdx - 1][pIdx] = '';
                 await queueCell(pickedColName, '', true);
+                if (tableData.rawGrid && tableData.rawGrid[actualRowIdx - 1]) tableData.rawGrid[actualRowIdx - 1][pIdx] = '';
                 updateRowCell(pickedColName, '');
               }
             }
@@ -15213,8 +15282,29 @@ class SheetNavigator {
           }
 
           // 1. Update in-memory row and grid
+          if (this.currentSheetKey === 'locations' && !tableRow && itemIdentifier && this.db && typeof this.db.ensureLocationRow === 'function') {
+            const locOverrides = header ? { [header]: newVal } : { 'Rubber Class Approval': newVal };
+            const ensured = await this.db.ensureLocationRow(itemIdentifier, locOverrides);
+            if (ensured && ensured.row) {
+              tableRow = ensured.row;
+              actualRowIdx = tableRow._rowIdx || actualRowIdx;
+              isCreatedLocationRow = !!ensured.created;
+              targetCell.dataset.row = actualRowIdx ? String(actualRowIdx) : '';
+              targetCell.dataset.synthesized = 'false';
+              if (targetCell.parentElement) {
+                targetCell.parentElement.querySelectorAll('td[data-row]').forEach(sibCell => {
+                  if (actualRowIdx) sibCell.dataset.row = String(actualRowIdx);
+                  sibCell.dataset.synthesized = 'false';
+                  if (hLower === 'location' && newVal) sibCell.dataset.item = newVal;
+                });
+              }
+            }
+          }
           if (tableRow) {
             tableRow[header] = newVal;
+            if (this.currentSheetKey === 'locations' && (hLower.includes('rubber class') || hLower.includes('approval'))) {
+              tableRow['Rubber Class Approval'] = newVal;
+            }
             if (targetCell.dataset.primary === 'true') {
               tableRow['Item #'] = newVal;
               if (tableData && tableData.headers && tableData.headers[0]) {
@@ -15289,11 +15379,11 @@ class SheetNavigator {
 
               if (calculatedChgOut && chgOutColName && calculatedChgOut !== 'N/A') {
                 tableRow[chgOutColName] = calculatedChgOut;
+                await queueCell(chgOutColName, calculatedChgOut);
                 const chgIdx = (tableData.headers || []).indexOf(chgOutColName);
                 if (chgIdx !== -1 && tableData.rawGrid && tableData.rawGrid[actualRowIdx - 1]) {
                   tableData.rawGrid[actualRowIdx - 1][chgIdx] = calculatedChgOut;
                 }
-                await queueCell(chgOutColName, calculatedChgOut);
                 updateRowCell(chgOutColName, calculatedChgOut);
               }
             }
@@ -15532,18 +15622,23 @@ class SheetNavigator {
             }
           }
 
-          syncTableRowToGrid();
+          if (!isCreatedLocationRow) {
+            syncTableRowToGrid();
 
-          await this.db.addMutation({
-            action: 'UPDATE_CELL',
-            sheetName: sheetName,
-            row: actualRowIdx,
-            col: col,
-            header: header,
-            itemIdentifier: itemIdentifier,
-            oldValue: initialVal,
-            value: newVal
-          });
+            await this.db.addMutation({
+              action: 'UPDATE_CELL',
+              sheetName: sheetName,
+              row: actualRowIdx,
+              col: col,
+              header: header,
+              itemIdentifier: itemIdentifier,
+              oldValue: initialVal,
+              value: newVal
+            });
+            if (this.currentSheetKey === 'locations' && this.db && typeof this.db.persistSnapshot === 'function') {
+              await this.db.persistSnapshot(this.db.snapshot);
+            }
+          }
 
           // Update current cell presentation if it's Assigned To
           if (isAssignedCol && newVal) {
@@ -15610,10 +15705,10 @@ class SheetNavigator {
                 tableRow['Completion Date'] = todayFormatted;
                 const cIdx = (tableData.headers || []).findIndex(h => /completion|date completed/i.test(h));
                 if (cIdx !== -1) {
+                  await queueCell(tableData.headers[cIdx], todayFormatted);
                   if (tableData.rawGrid && actualRowIdx && tableData.rawGrid[actualRowIdx - 1]) {
                     tableData.rawGrid[actualRowIdx - 1][cIdx] = todayFormatted;
                   }
-                  await queueCell(tableData.headers[cIdx], todayFormatted);
                   updateRowCell(tableData.headers[cIdx], todayFormatted);
                 }
               }
@@ -15623,10 +15718,10 @@ class SheetNavigator {
                 tableRow['Completion Date'] = '';
                 const cIdx = (tableData.headers || []).findIndex(h => /completion|date completed/i.test(h));
                 if (cIdx !== -1) {
+                  await queueCell(tableData.headers[cIdx], '');
                   if (tableData.rawGrid && actualRowIdx && tableData.rawGrid[actualRowIdx - 1]) {
                     tableData.rawGrid[actualRowIdx - 1][cIdx] = '';
                   }
-                  await queueCell(tableData.headers[cIdx], '');
                   updateRowCell(tableData.headers[cIdx], '');
                 }
               }
@@ -15646,10 +15741,10 @@ class SheetNavigator {
                   tableRow['Status'] = 'Complete';
                   const sIdx = (tableData.headers || []).findIndex(h => /status/i.test(h));
                   if (sIdx !== -1) {
+                    await queueCell(tableData.headers[sIdx], 'Complete');
                     if (tableData.rawGrid && actualRowIdx && tableData.rawGrid[actualRowIdx - 1]) {
                       tableData.rawGrid[actualRowIdx - 1][sIdx] = 'Complete';
                     }
-                    await queueCell(tableData.headers[sIdx], 'Complete');
                     updateRowCell(tableData.headers[sIdx], 'Complete');
                   }
                 }
@@ -16761,9 +16856,6 @@ class SheetNavigator {
         if (tableRow) {
           tableRow[header] = newVal;
         }
-        if (tableData.rawGrid && row && tableData.rawGrid[row - 1] && col) {
-          tableData.rawGrid[row - 1][col - 1] = newVal;
-        }
 
         await this.db.addMutation({
           action: 'UPDATE_CELL',
@@ -16773,8 +16865,13 @@ class SheetNavigator {
           col: col,
           header: header,
           itemIdentifier: jobNum,
+          oldValue: initialVal === '—' ? '' : initialVal,
           value: newVal
         });
+
+        if (tableData.rawGrid && row && tableData.rawGrid[row - 1] && col) {
+          tableData.rawGrid[row - 1][col - 1] = newVal;
+        }
 
         if (typeof this.db.schedulePersistSnapshot === 'function') {
           this.db.schedulePersistSnapshot(this.db.snapshot, 300);
