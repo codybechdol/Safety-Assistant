@@ -825,6 +825,9 @@ class IncidentReportsEngine {
         if (!this.db.snapshot) this.db.snapshot = { tables: {} };
         if (!this.db.snapshot.tables) this.db.snapshot.tables = {};
         this.db.snapshot.tables['incident_reports'] = freshSnapshot.tables['incident_reports'];
+        if (typeof this.db.markTableDirty === 'function') {
+          this.db.markTableDirty('incident_reports');
+        }
         if (typeof this.db.persistSnapshot === 'function') {
           await this.db.persistSnapshot(this.db.snapshot);
         }
@@ -935,6 +938,9 @@ class IncidentReportsEngine {
           if (!this.db.snapshot) this.db.snapshot = { tables: {} };
           if (!this.db.snapshot.tables) this.db.snapshot.tables = {};
           this.db.snapshot.tables['incident_reports'] = result.table;
+          if (typeof this.db.markTableDirty === 'function') {
+            this.db.markTableDirty('incident_reports');
+          }
           if (typeof this.db.persistSnapshot === 'function') {
             await this.db.persistSnapshot(this.db.snapshot);
           }

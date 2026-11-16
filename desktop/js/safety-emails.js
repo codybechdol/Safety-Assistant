@@ -1427,6 +1427,9 @@ class SafetyEmailsEngine {
     scTable.maxRows = scTable.rows.length + 1;
     scTable.maxCols = scTable.headers.length;
 
+    if (typeof window.localDB.markTableDirty === 'function') {
+      window.localDB.markTableDirty('safety_compliance');
+    }
     if (typeof window.localDB.persistSnapshot === 'function') {
       window.localDB.persistSnapshot(window.localDB.snapshot);
     }
@@ -1639,6 +1642,9 @@ class SafetyEmailsEngine {
     });
 
     if (modified) {
+      if (typeof window.localDB.markTableDirty === 'function') {
+        window.localDB.markTableDirty(['jha_log', 'weekly_safety_log', 'monthly_checklist_log']);
+      }
       if (typeof window.localDB.persistSnapshot === 'function') {
         window.localDB.persistSnapshot(window.localDB.snapshot);
       }
@@ -3800,6 +3806,9 @@ class SafetyEmailsEngine {
       }
 
       // Persist snapshot to disk
+      if (typeof window.localDB.markTableDirty === 'function') {
+        window.localDB.markTableDirty('safety_compliance');
+      }
       if (typeof window.localDB.persistSnapshot === 'function') {
         window.localDB.persistSnapshot(snap);
       }

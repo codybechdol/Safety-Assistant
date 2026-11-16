@@ -2385,6 +2385,15 @@ class SyncEngine {
     if (window.drugTestingEngine && typeof window.drugTestingEngine.render === 'function') {
       window.drugTestingEngine.render();
     }
+    if (window.employeeResolver && typeof window.employeeResolver.rebuildIndex === 'function') {
+      window.employeeResolver.rebuildIndex();
+    }
+    if (window.weeklySummaryEngine && typeof window.weeklySummaryEngine.render === 'function' && document.getElementById('weekly-summary-view')?.classList.contains('active')) {
+      window.weeklySummaryEngine.render();
+    }
+    if (window.locationApprovalsEngine && typeof window.locationApprovalsEngine.render === 'function' && document.getElementById('location-approvals-modal')?.style.display === 'flex') {
+      window.locationApprovalsEngine.render();
+    }
     if (window.procurementEngine && typeof window.procurementEngine.buildPurchaseNeeds === 'function') {
       window.procurementEngine.buildPurchaseNeeds();
     }

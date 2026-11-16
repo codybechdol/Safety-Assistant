@@ -2616,6 +2616,9 @@ class SheetNavigator {
       r['Updated'] = new Date().toLocaleDateString('en-US') + ' ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     });
 
+    if (typeof this.db.markTableDirty === 'function') {
+      this.db.markTableDirty('safety_compliance');
+    }
     if (typeof this.db.persistSnapshot === 'function') {
       this.db.persistSnapshot();
     }

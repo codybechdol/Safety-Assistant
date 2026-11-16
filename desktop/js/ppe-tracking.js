@@ -2282,6 +2282,9 @@ class RubberPpeTrackingEngine {
       }
     }
 
+    if (this.db && typeof this.db.markTableDirty === 'function') {
+      this.db.markTableDirty('safety_equipment_needs');
+    }
     if (this.db && typeof this.db.persistSnapshot === 'function') {
       await this.db.persistSnapshot(snap);
     }

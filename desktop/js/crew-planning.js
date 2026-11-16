@@ -5648,6 +5648,9 @@ class CrewPlanningEngine {
         }
       });
       this.savePlansMap(allPlans);
+      if (typeof this.db.persistSnapshot === 'function') {
+        await this.db.persistSnapshot(this.db.snapshot);
+      }
 
       this.selectedWeek = publishWeek;
 

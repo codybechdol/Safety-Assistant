@@ -5406,6 +5406,12 @@ class TripPlannerApp {
           targetRow['Status'] = 'Scheduled';
           targetRow['Training Status'] = 'Scheduled';
           targetRow['Scheduled Date'] = dateKey;
+          if (typeof this.db.syncRowToRawGrid === 'function') {
+            this.db.syncRowToRawGrid(trainTable, targetRow);
+          }
+          if (typeof this.db.markTableDirty === 'function') {
+            this.db.markTableDirty('training_tracking');
+          }
         }
       }
 
@@ -5456,6 +5462,12 @@ class TripPlannerApp {
             targetRow['Status'] = 'Scheduled';
             targetRow['Training Status'] = 'Scheduled';
             targetRow['Scheduled Date'] = dateKey;
+            if (typeof this.db.syncRowToRawGrid === 'function') {
+              this.db.syncRowToRawGrid(trainTable, targetRow);
+            }
+            if (typeof this.db.markTableDirty === 'function') {
+              this.db.markTableDirty('training_tracking');
+            }
           }
         }
       });
@@ -6289,6 +6301,12 @@ class TripPlannerApp {
                 targetRow['Training Status'] = 'Pending';
                 targetRow['Scheduled Date'] = '';
                 delete targetRow['Scheduled Date'];
+                if (typeof this.db.syncRowToRawGrid === 'function') {
+                  this.db.syncRowToRawGrid(trainTable, targetRow);
+                }
+                if (typeof this.db.markTableDirty === 'function') {
+                  this.db.markTableDirty('training_tracking');
+                }
               }
             }
           }
@@ -6385,6 +6403,12 @@ class TripPlannerApp {
                 targetRow['Training Status'] = 'Pending';
                 targetRow['Scheduled Date'] = '';
                 delete targetRow['Scheduled Date'];
+                if (typeof this.db.syncRowToRawGrid === 'function') {
+                  this.db.syncRowToRawGrid(trainTable, targetRow);
+                }
+                if (typeof this.db.markTableDirty === 'function') {
+                  this.db.markTableDirty('training_tracking');
+                }
               }
             }
           }

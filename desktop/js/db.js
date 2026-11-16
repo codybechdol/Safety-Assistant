@@ -245,6 +245,30 @@ class LocalDatabase {
     this.listeners = [];
     this._rowIndices = new Map();
     this._empAliasMap = null;
+    this._lastSyncedStateSignature = '';
+    this._dirtyTablesForSync = new Set();
+  }
+
+  _computeSyncedStateSignature(snapshot = this.snapshot) {
+    if (!snapshot) return '';
+    try {
+      return JSON.stringify({
+        configs: snapshot.configs || {},
+        manualPicks: snapshot.manualPicks || {}
+      });
+    } catch {
+      return '';
+    }
+  }
+
+  markTableDirty(tableKeys) {
+    if (!tableKeys) return;
+    const list = Array.isArray(tableKeys) ? tableKeys : [tableKeys];
+    for (const k of list) {
+      if (k && typeof k === 'string') {
+        this._dirtyTablesForSync.add(k);
+      }
+    }
   }
 
   _invalidateHistoryEngines(tableKey = null) {
@@ -331,6 +355,7 @@ class LocalDatabase {
         }
       }
       this.normalizeSnapshot(this.snapshot);
+      this._lastSyncedStateSignature = this._computeSyncedStateSignature(this.snapshot);
     }
 
     this._invalidateIndices();
@@ -378,6 +403,8 @@ class LocalDatabase {
     }
     this.snapshot = snapshot;
     this.unpackSnapshotToLocalState(snapshot);
+    this._dirtyTablesForSync.clear();
+    this._lastSyncedStateSignature = this._computeSyncedStateSignature(snapshot);
 
     await this.persistSnapshot(snapshot);
     this._invalidateIndices();
@@ -543,8 +570,36 @@ class LocalDatabase {
       clearTimeout(this._persistTimer);
       this._persistTimer = null;
     }
+
+    const syncLocalChangesIfNeeded = () => {
+      if (snapshot !== this.snapshot || typeof window === 'undefined') return;
+      const sbSync = window.supabaseSync;
+      const isRemoteOrViewOnly = (sbSync && sbSync.isApplyingRemote) || window.currentRoleMode === 'view_only';
+      const nextSig = this._computeSyncedStateSignature(snapshot);
+
+      if (isRemoteOrViewOnly) {
+        this._lastSyncedStateSignature = nextSig;
+        this._dirtyTablesForSync.clear();
+        return;
+      }
+
+      if (nextSig && nextSig !== this._lastSyncedStateSignature) {
+        this._lastSyncedStateSignature = nextSig;
+        this._dirtyTablesForSync.add('__configs__');
+      }
+
+      if (this._dirtyTablesForSync.size > 0 && sbSync && typeof sbSync.isActive === 'function' && sbSync.isActive()) {
+        const keysToSync = Array.from(this._dirtyTablesForSync);
+        this._dirtyTablesForSync.clear();
+        if (typeof sbSync.scheduleDirectTablesSync === 'function') {
+          sbSync.scheduleDirectTablesSync(keysToSync);
+        }
+      }
+    };
+
     if (window.desktopAPI) {
       await window.desktopAPI.saveLocalSnapshot(snapshot);
+      syncLocalChangesIfNeeded();
       return;
     }
 
@@ -568,6 +623,8 @@ class LocalDatabase {
         console.warn('localStorage persist failed (quota exceeded):', lsErr);
       }
     }
+
+    syncLocalChangesIfNeeded();
   }
 
   schedulePersistSnapshot(snapshot = this.snapshot, delayMs = 600) {
@@ -1043,13 +1100,17 @@ class LocalDatabase {
     await this.persistSnapshot(this.snapshot);
     await this.addMutation({
       action: 'RETIRE_ITEM',
+      sheetName: 'Retired Equipment',
+      tableKey: 'retired_equipment',
       itemNum: itemIdentifier,
+      eslId: retRow['ESL ID / Serial #'],
       category: categoryKey,
       reason: reason,
       sourceSheet: catTable.name,
       lastAssignedTo: retRow['Last Assigned To'],
       lastLocation: retRow['Last Location'],
-      notes: retRow['Notes']
+      notes: retRow['Notes'],
+      rowData: retRow
     });
 
     this.notify();
@@ -1111,6 +1172,8 @@ class LocalDatabase {
 
           await this.addMutation({
             action: 'RETIRE_ITEM',
+            sheetName: 'Retired Equipment',
+            tableKey: 'retired_equipment',
             itemNum: itemNum,
             eslId: esl,
             category: catKey,
@@ -1174,6 +1237,8 @@ class LocalDatabase {
     await this.persistSnapshot(this.snapshot);
     await this.addMutation({
       action: 'LOG_DAILY_ACCOMPLISHMENT',
+      sheetName: 'Daily Accomplishments',
+      tableKey: 'daily_accomplishments',
       data: row
     });
 
@@ -1218,6 +1283,8 @@ class LocalDatabase {
     await this.persistSnapshot(this.snapshot);
     await this.addMutation({
       action: 'CREATE_TEST_BATCH',
+      sheetName: 'Testing Lab Batches',
+      tableKey: 'test_batches',
       data: row
     });
 
@@ -1261,7 +1328,10 @@ class LocalDatabase {
     await this.persistSnapshot(this.snapshot);
     await this.addMutation({
       action: 'FIELD_GPS_CHECK_IN',
-      data: checkInRecord
+      sheetName: 'Field GPS Log',
+      tableKey: 'field_gps_log',
+      data: row,
+      rawRecord: checkInRecord
     });
 
     this.notify();
@@ -1313,6 +1383,8 @@ class LocalDatabase {
     await this.persistSnapshot(this.snapshot);
     await this.addMutation({
       action: 'UPDATE_SYSTEM_CONFIG',
+      sheetName: 'System Config',
+      tableKey: 'system_config',
       key: keyTarget,
       value: valStr,
       description: description
@@ -4377,43 +4449,147 @@ class LocalDatabase {
     return mutRecord;
   }
 
+  _resolveMutationTable(mut) {
+    if (!mut || !this.snapshot || !this.snapshot.tables) return null;
+    const sheetLower = String(mut.sheetName || '').trim().toLowerCase();
+    if (mut.tableKey && this.snapshot.tables[mut.tableKey]) {
+      return this.snapshot.tables[mut.tableKey];
+    }
+    const mappedKey = mut.sheetName ? this.getTableKeyForSheet(mut.sheetName) : null;
+    if (mappedKey && this.snapshot.tables[mappedKey]) {
+      return this.snapshot.tables[mappedKey];
+    }
+    if (mut.sheetName && this.snapshot.tables[mut.sheetName]) {
+      return this.snapshot.tables[mut.sheetName];
+    }
+    if (sheetLower) {
+      return Object.values(this.snapshot.tables).find(t => t && t.name && String(t.name).trim().toLowerCase() === sheetLower) || null;
+    }
+    return null;
+  }
+
+  _extractPrimaryKeyFromRow(rowObj, sheetNameLower = '') {
+    if (!rowObj || typeof rowObj !== 'object') return '';
+    return String(
+      rowObj['HVT #'] || rowObj['HV Tester'] || rowObj['Phasing Set'] || rowObj['Phasing Set #'] ||
+      rowObj['PS #'] || rowObj['AED #'] || rowObj['Glove'] || rowObj['Sleeve'] || rowObj['Blanket'] ||
+      rowObj['MACK'] || rowObj['Item #'] || rowObj['Item'] || (sheetNameLower.includes('ground') ? rowObj['Serial #'] : '') ||
+      rowObj['Employee Name'] || rowObj['Name'] || rowObj['Employee'] ||
+      rowObj['Job Number'] || rowObj['Job #'] || rowObj['PO Number'] || rowObj['PO #'] ||
+      rowObj['Location'] || rowObj['City'] || rowObj['Config Key'] ||
+      Object.values(rowObj)[0] || ''
+    ).trim();
+  }
+
+  _findMutationTargetRow(table, mut, fieldsObj = null) {
+    if (!table || !Array.isArray(table.rows)) return null;
+    const sheetNameLower = String((mut && mut.sheetName) || table.name || '').toLowerCase();
+    const isPrimaryKeyedTracking = sheetNameLower === 'job tracking' || sheetNameLower === 'job_tracking';
+    const isMultiItemTable = !isPrimaryKeyedTracking && (
+      sheetNameLower.includes('history') || sheetNameLower.includes('log') ||
+      sheetNameLower.includes('swaps') || sheetNameLower.includes('tracking') ||
+      sheetNameLower.includes('training') || sheetNameLower.includes('compliance') ||
+      sheetNameLower.includes('certs')
+    );
+    const idSource = (mut && (mut.itemIdentifier || mut.employeeName || mut.jobNumber || mut.keyValue)) ||
+      (fieldsObj ? this._extractPrimaryKeyFromRow(fieldsObj, sheetNameLower) : '');
+    const idClean = String(idSource || '').trim().toLowerCase();
+    const numericRow = (mut && typeof mut.row === 'number' && mut.row >= 2) ? mut.row : null;
+
+    if (numericRow) {
+      const candidate = table.rows.find(r => r._rowIdx === numericRow) || table.rows[numericRow - 2] || null;
+      if (candidate) {
+        if (!idClean || isMultiItemTable) return candidate;
+        const pk = this._extractPrimaryKeyFromRow(candidate, sheetNameLower).toLowerCase();
+        const altName = String(candidate['Employee Name'] || candidate['Name'] || candidate['Job Number'] || candidate['PO Number'] || candidate['Item #'] || candidate['Serial #'] || '').trim().toLowerCase();
+        if (pk === idClean || altName === idClean) return candidate;
+      }
+    }
+
+    if (idClean && (!isMultiItemTable || !numericRow)) {
+      let found = table.rows.find(r => this._extractPrimaryKeyFromRow(r, sheetNameLower).toLowerCase() === idClean);
+      if (found) return found;
+      found = table.rows.find(r => {
+        for (const k in r) {
+          const kl = k.toLowerCase();
+          const isNonGroundsSerial = !sheetNameLower.includes('ground') && kl.includes('serial');
+          if (!isNonGroundsSerial && (kl.includes('item') || kl.includes('serial') || kl.includes('glove') || kl.includes('sleeve') || kl.includes('blanket') || kl.includes('mack') || kl.includes('employee') || kl.includes('name') || kl.includes('job') || kl === 'po number' || kl === 'po #' || (sheetNameLower === 'locations' && (kl === 'location' || kl === 'city')))) {
+            if (String(r[k] || '').trim().toLowerCase() === idClean) return true;
+          }
+        }
+        return false;
+      });
+      if (found) return found;
+    }
+
+    if (numericRow) {
+      return table.rows.find(r => r._rowIdx === numericRow) || table.rows[numericRow - 2] || null;
+    }
+    return null;
+  }
+
+  _syncFlatRowIndices(table) {
+    if (!table || !Array.isArray(table.rows) || !Array.isArray(table.rawGrid)) return;
+    if (table.rawGrid.length === table.rows.length + 1) {
+      table.rows.forEach((r, idx) => {
+        if (r && typeof r === 'object') r._rowIdx = idx + 2;
+      });
+    }
+  }
+
   async applyLocalMutation(mut) {
     if (!this.snapshot) return;
 
     // Config mutations
+    const syncConfigsState = () => {
+      this.unpackSnapshotToLocalState(this.snapshot);
+      this._lastSyncedStateSignature = this._computeSyncedStateSignature(this.snapshot);
+    };
     if (mut.action === 'SAVE_PLANNED_TRIPS') {
       if (!this.snapshot.configs) this.snapshot.configs = {};
       this.snapshot.configs.plannedTrips = mut.trips;
+      syncConfigsState();
       return;
     }
     if (mut.action === 'SAVE_MANUAL_TASKS') {
       if (!this.snapshot.configs) this.snapshot.configs = {};
       this.snapshot.configs.manual_tasks = mut.manual_tasks;
+      syncConfigsState();
       return;
     }
     if (mut.action === 'SAVE_CERT_PHOTOS') {
       if (!this.snapshot.configs) this.snapshot.configs = {};
       this.snapshot.configs.cert_photos = mut.cert_photos;
+      syncConfigsState();
       return;
     }
     if (mut.action === 'SAVE_SCHEDULED_SWAPS') {
       if (!this.snapshot.configs) this.snapshot.configs = {};
       this.snapshot.configs.scheduled_swaps = mut.scheduled_swaps;
+      syncConfigsState();
       return;
     }
     if (mut.action === 'SET_HOLIDAYS') {
       if (!this.snapshot.configs) this.snapshot.configs = {};
       this.snapshot.configs.holidays = mut.holidays;
+      syncConfigsState();
       return;
     }
     if (mut.action === 'SAVE_FLOATING_HOLIDAY_ASSIGNMENTS') {
       if (!this.snapshot.configs) this.snapshot.configs = {};
       this.snapshot.configs.floating_holiday_assignments = mut.assignments;
+      syncConfigsState();
       return;
     }
     if (mut.action === 'SET_TRIP_SCHEDULE') {
       if (!this.snapshot.configs) this.snapshot.configs = {};
-      this.snapshot.configs.workSchedule = mut.schedule;
+      if (mut.schedule !== undefined) {
+        this.snapshot.configs.workSchedule = mut.schedule;
+      }
+      if (mut.trips !== undefined && typeof mut.trips === 'object') {
+        this.snapshot.configs.plannedTrips = mut.trips;
+      }
+      syncConfigsState();
       return;
     }
 
@@ -4730,12 +4906,15 @@ class LocalDatabase {
           row = table.rows[mut.row - 2];
         }
 
-        const colHeader = mut.header || table.headers[mut.col - 1];
+        const headerTarget = mut.header || table.headers[mut.col - 1];
+        const colHeader = (headerTarget && table.headers.find(h => String(h || '').trim().toLowerCase() === String(headerTarget).trim().toLowerCase())) || headerTarget;
         if (row && colHeader) {
           row[colHeader] = mut.value;
 
           let gridRowIdx = -1;
-          if (typeof mut.row === 'number' && mut.row >= 2) {
+          if (!isMultiItemTable && row._rowIdx && row._rowIdx >= 2) {
+            gridRowIdx = row._rowIdx - 1;
+          } else if (typeof mut.row === 'number' && mut.row >= 2) {
             gridRowIdx = mut.row - 1;
           } else if (row._rowIdx && row._rowIdx >= 2) {
             gridRowIdx = row._rowIdx - 1;
@@ -4746,7 +4925,8 @@ class LocalDatabase {
             gridRowIdx = table.rawGrid.findIndex((gr, idx) => idx > 0 && String(gr[0] || '').trim().toLowerCase() === idClean);
           }
           if (gridRowIdx !== -1 && table.rawGrid && table.rawGrid[gridRowIdx]) {
-            const colIdx = (typeof mut.col === 'number' && mut.col >= 1) ? (mut.col - 1) : table.headers.indexOf(colHeader);
+            let colIdx = (typeof mut.col === 'number' && mut.col >= 1) ? (mut.col - 1) : table.headers.indexOf(colHeader);
+            if (colIdx === -1) colIdx = table.headers.indexOf(colHeader);
             if (colIdx !== -1) {
               table.rawGrid[gridRowIdx][colIdx] = mut.value;
             }
@@ -4963,14 +5143,213 @@ class LocalDatabase {
       }
     }
 
+    // Row update (supports updatedFields, updates, rowData, or object row)
+    if (mut.action === 'UPDATE_ROW') {
+      const table = this._resolveMutationTable(mut);
+      const rawFields = mut.updatedFields || mut.updates ||
+        (mut.rowData && typeof mut.rowData === 'object' ? mut.rowData : null) ||
+        (mut.row && typeof mut.row === 'object' ? mut.row : null);
+      if (table && Array.isArray(table.rows) && rawFields) {
+        const targetRow = this._findMutationTargetRow(table, mut, rawFields);
+        if (targetRow) {
+          const preservedIdx = targetRow._rowIdx;
+          for (const [k, v] of Object.entries(rawFields)) {
+            if (k !== '_rowIdx') {
+              targetRow[k] = v;
+            }
+          }
+          if (preservedIdx !== undefined) targetRow._rowIdx = preservedIdx;
+          this.syncRowToRawGrid(table, targetRow);
+        }
+      }
+    }
+
     // Row update by key
     if (mut.action === 'UPDATE_ROW_BY_KEY') {
-      const table = Object.values(this.snapshot.tables).find(t => t.name === mut.sheetName);
+      const table = this._resolveMutationTable(mut);
       if (table && table.rows) {
         const row = table.rows.find(r => String(r[mut.keyColName] || '').trim() === String(mut.keyValue || '').trim());
         if (row && mut.updates) {
           Object.assign(row, mut.updates);
+          this.syncRowToRawGrid(table, row);
         }
+      }
+    }
+
+    // System Config table update
+    if (mut.action === 'UPDATE_SYSTEM_CONFIG' && mut.key) {
+      if (!this.snapshot.tables.system_config) {
+        this.snapshot.tables.system_config = {
+          name: 'System Config',
+          headers: ['Config Key', 'Config Value', 'Description', 'Last Updated'],
+          rows: [],
+          rawGrid: [['Config Key', 'Config Value', 'Description', 'Last Updated']],
+          rowCount: 0,
+          maxRows: 1
+        };
+      }
+      const cfgTable = this.snapshot.tables.system_config;
+      if (!cfgTable.rows) cfgTable.rows = [];
+      const keyTarget = String(mut.key).trim().toUpperCase();
+      const valStr = typeof mut.value === 'string' ? mut.value : JSON.stringify(mut.value);
+      const nowStr = new Date().toLocaleString('en-US', { timeZone: 'America/Denver' });
+      let existing = cfgTable.rows.find(r => String(r['Config Key'] || '').trim().toUpperCase() === keyTarget);
+      if (existing) {
+        existing['Config Value'] = valStr;
+        if (mut.description) existing['Description'] = mut.description;
+        existing['Last Updated'] = nowStr;
+        this.syncRowToRawGrid(cfgTable, existing);
+      } else {
+        const newRow = {
+          'Config Key': keyTarget,
+          'Config Value': valStr,
+          'Description': mut.description || '',
+          'Last Updated': nowStr,
+          _rowIdx: cfgTable.rows.length + 2
+        };
+        cfgTable.rows.push(newRow);
+        cfgTable.rowCount = cfgTable.rows.length;
+        if (Array.isArray(cfgTable.rawGrid) && Array.isArray(cfgTable.headers)) {
+          cfgTable.rawGrid.push(cfgTable.headers.map(h => newRow[h] !== undefined ? newRow[h] : ''));
+          cfgTable.maxRows = cfgTable.rawGrid.length;
+        }
+      }
+      if (keyTarget === 'FY_TRANSITION_ALIAS_MAP') {
+        try {
+          const parsedAlias = typeof mut.value === 'string' ? JSON.parse(mut.value) : mut.value;
+          if (parsedAlias && typeof parsedAlias === 'object') {
+            if (!this.snapshot.configs) this.snapshot.configs = {};
+            this.snapshot.configs.FY_TRANSITION_ALIAS_MAP = parsedAlias;
+            syncConfigsState();
+          }
+        } catch { /* ignore */ }
+      }
+    }
+
+    // Retire inventory item replay
+    if (mut.action === 'RETIRE_ITEM' && mut.itemNum) {
+      const catKey = mut.category || (mut.sourceSheet ? this.getTableKeyForSheet(mut.sourceSheet) : null);
+      const catTable = catKey ? this.snapshot.tables[catKey] : null;
+      const idClean = String(mut.itemNum || '').trim().toLowerCase();
+      let matchedItem = null;
+      if (catTable && Array.isArray(catTable.rows)) {
+        const idx = catTable.rows.findIndex(r => {
+          const num = String(r['Item #'] || r['Glove'] || r['Sleeve'] || r['Blanket'] || r['MACK'] || r['Serial #'] || r['ESL ID'] || '').trim().toLowerCase();
+          return num === idClean;
+        });
+        if (idx !== -1) {
+          matchedItem = catTable.rows.splice(idx, 1)[0];
+          catTable.rowCount = catTable.rows.length;
+          if (Array.isArray(catTable.rawGrid)) {
+            catTable.rawGrid = catTable.rawGrid.filter((gr, gi) => gi === 0 || String(gr[0] || '').trim().toLowerCase() !== idClean);
+            catTable.maxRows = catTable.rawGrid.length;
+          }
+          this._syncFlatRowIndices(catTable);
+        }
+      }
+      if (!this.snapshot.tables.retired_equipment) {
+        this.snapshot.tables.retired_equipment = {
+          name: 'Retired Equipment',
+          headers: ['Item #', 'ESL ID / Serial #', 'Category', 'Class / KV', 'Size / Length', 'Date Retired', 'Reason', 'Last Assigned To', 'Last Location', 'Lab Ticket #', 'Notes'],
+          rows: []
+        };
+      }
+      const retTable = this.snapshot.tables.retired_equipment;
+      if (!retTable.rows) retTable.rows = [];
+      const alreadyRetired = retTable.rows.some(r =>
+        String(r['Item #'] || '').trim().toLowerCase() === idClean &&
+        String(r['Reason'] || '').trim().toLowerCase() === String(mut.reason || 'Retired').trim().toLowerCase()
+      );
+      if (!alreadyRetired) {
+        const srcRow = matchedItem || {};
+        const retRow = mut.rowData ? { ...mut.rowData } : {
+          'Item #': srcRow['Item #'] || srcRow['Glove'] || srcRow['Sleeve'] || srcRow['Blanket'] || srcRow['MACK'] || srcRow['Serial #'] || mut.itemNum,
+          'ESL ID / Serial #': mut.eslId || srcRow['ESL ID'] || srcRow['Serial #'] || '',
+          'Category': String(catKey || '').replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()),
+          'Class / KV': srcRow['Class'] || srcRow['KV'] || '',
+          'Size / Length': srcRow['Size'] || srcRow['Length'] || '',
+          'Date Retired': new Date().toLocaleDateString('en-US'),
+          'Reason': mut.reason || 'Retired',
+          'Last Assigned To': mut.lastAssignedTo || srcRow['Assigned To'] || '',
+          'Last Location': mut.lastLocation || srcRow['Location'] || '',
+          'Lab Ticket #': '',
+          'Notes': mut.notes || srcRow['Notes'] || ''
+        };
+        retTable.rows.unshift(retRow);
+        retTable.rowCount = retTable.rows.length;
+      }
+    }
+
+    // Daily accomplishment / Test batch / GPS check-in replay
+    if (mut.action === 'LOG_DAILY_ACCOMPLISHMENT' && mut.data) {
+      if (!this.snapshot.tables.daily_accomplishments) {
+        this.snapshot.tables.daily_accomplishments = {
+          name: 'Daily Accomplishments',
+          headers: ['Date', 'User / Coordinator', 'Crews Visited', 'Route / Cities', 'Drive Time', 'Swaps Completed', 'Trainings Conducted', 'Summary Text', 'Logged At'],
+          rows: []
+        };
+      }
+      const daTable = this.snapshot.tables.daily_accomplishments;
+      if (!daTable.rows) daTable.rows = [];
+      const exists = daTable.rows.some(r =>
+        String(r['Date'] || '') === String(mut.data['Date'] || '') &&
+        String(r['Logged At'] || '') === String(mut.data['Logged At'] || '') &&
+        String(r['Summary Text'] || '') === String(mut.data['Summary Text'] || '')
+      );
+      if (!exists) {
+        daTable.rows.unshift({ ...mut.data });
+        daTable.rowCount = daTable.rows.length;
+      }
+    }
+
+    if (mut.action === 'CREATE_TEST_BATCH' && mut.data) {
+      if (!this.snapshot.tables.test_batches) {
+        this.snapshot.tables.test_batches = {
+          name: 'Testing Lab Batches',
+          headers: ['Batch ID', 'Testing Lab', 'Category', 'Date Shipped', 'Tracking Number', 'Expected Return Date', 'Date Received', 'Total Items Sent', 'Passed Count', 'Failed Count', 'Status', 'Cert Link / Notes'],
+          rows: []
+        };
+      }
+      const tbTable = this.snapshot.tables.test_batches;
+      if (!tbTable.rows) tbTable.rows = [];
+      const bId = String(mut.data['Batch ID'] || '').trim();
+      const exists = bId && tbTable.rows.some(r => String(r['Batch ID'] || '').trim() === bId);
+      if (!exists) {
+        tbTable.rows.unshift({ ...mut.data });
+        tbTable.rowCount = tbTable.rows.length;
+      }
+    }
+
+    if (mut.action === 'FIELD_GPS_CHECK_IN' && mut.data) {
+      if (!this.snapshot.tables.field_gps_log) {
+        this.snapshot.tables.field_gps_log = {
+          name: 'Field GPS Log',
+          headers: ['Check-In ID', 'Timestamp', 'Job Number', 'Job / Crew Name', 'Nearest Montana Base', 'Distance (mi)', 'GPS Coordinates', 'Accuracy (m)', 'User / Inspector', 'Activity', 'Notes'],
+          rows: []
+        };
+      }
+      const gpsTable = this.snapshot.tables.field_gps_log;
+      if (!gpsTable.rows) gpsTable.rows = [];
+      const rowData = mut.data['Timestamp'] ? { ...mut.data } : {
+        'Check-In ID': mut.data.checkInId || ('GPS-' + new Date().toISOString().slice(0, 10) + '-' + Math.floor(1000 + Math.random() * 9000)),
+        'Timestamp': mut.data.timestamp || new Date().toLocaleString('en-US', { timeZone: 'America/Denver' }),
+        'Job Number': mut.data.jobId || mut.data.jobNumber || '',
+        'Job / Crew Name': mut.data.jobName || '',
+        'Nearest Montana Base': mut.data.locationLabel || mut.data.nearestBase || 'Helena Base',
+        'Distance (mi)': mut.data.distanceMiles !== undefined ? mut.data.distanceMiles : '',
+        'GPS Coordinates': mut.data.gpsCoordinates || '',
+        'Accuracy (m)': mut.data.accuracyMeters !== undefined ? mut.data.accuracyMeters : '',
+        'User / Inspector': mut.data.user || mut.data.inspector || 'Safety Coordinator',
+        'Activity': mut.data.activity || 'Field Check-In',
+        'Notes': mut.data.notes || ''
+      };
+      const exists = gpsTable.rows.some(r =>
+        (rowData['Check-In ID'] && r['Check-In ID'] === rowData['Check-In ID']) ||
+        (String(r['Timestamp'] || '') === String(rowData['Timestamp'] || '') && String(r['Job Number'] || '') === String(rowData['Job Number'] || ''))
+      );
+      if (!exists) {
+        gpsTable.rows.unshift(rowData);
+        gpsTable.rowCount = gpsTable.rows.length;
       }
     }
 
@@ -5038,7 +5417,7 @@ class LocalDatabase {
 
     // Add Row mutation replay
     if (mut.action === 'ADD_ROW' && mut.rowData) {
-      const table = Object.values(this.snapshot.tables).find(t => t.name === mut.sheetName) || this.snapshot.tables[mut.tableKey];
+      const table = this._resolveMutationTable(mut);
       if (table) {
         if (!table.rows) table.rows = [];
         if (!table.rawGrid) table.rawGrid = [table.headers || Object.keys(mut.rowData)];
@@ -5051,24 +5430,40 @@ class LocalDatabase {
         let exists = false;
         if (isHistoryTable) {
           const mDate = String(mut.rowData['Date Assigned'] || mut.rowData['Date'] || Object.values(mut.rowData)[0] || '').trim();
-          const mAssigned = String(mut.rowData['Assigned To'] || '').trim().toLowerCase();
-          const mItem = String(mut.rowData['Item #'] || mut.rowData['Serial #'] || Object.values(mut.rowData)[1] || '').trim().toLowerCase();
+          const mAssigned = String(mut.rowData['Assigned To'] || mut.rowData['Employee Name'] || mut.rowData['Name'] || '').trim().toLowerCase();
+          const mItem = String(mut.rowData['Item #'] || mut.rowData['Serial #'] || mut.rowData['Job Number'] || Object.values(mut.rowData)[1] || '').trim().toLowerCase();
           exists = table.rows.some(r => {
             const rDate = String(r['Date Assigned'] || r['Date'] || Object.values(r)[0] || '').trim();
-            const rAssigned = String(r['Assigned To'] || '').trim().toLowerCase();
-            const rItem = String(r['Item #'] || r['Serial #'] || Object.values(r)[1] || '').trim().toLowerCase();
+            const rAssigned = String(r['Assigned To'] || r['Employee Name'] || r['Name'] || '').trim().toLowerCase();
+            const rItem = String(r['Item #'] || r['Serial #'] || r['Job Number'] || Object.values(r)[1] || '').trim().toLowerCase();
             return rItem === mItem && rDate === mDate && rAssigned === mAssigned;
           });
         } else if (isLocationsTable) {
           const mLoc = String(mut.rowData['Location'] || mut.rowData['City'] || '').trim().toLowerCase();
           exists = !!mLoc && table.rows.some(r => String(r['Location'] || r['City'] || '').trim().toLowerCase() === mLoc);
         } else {
-          // Find item identifier for primary key tables
           const firstKey = Object.keys(mut.rowData)[0] || 'Item #';
-          const itemIdentifier = String(mut.rowData['Item #'] || mut.rowData['Glove'] || mut.rowData['Sleeve'] || mut.rowData['Blanket'] || mut.rowData['Serial #'] || mut.rowData['ESL ID'] || mut.rowData[firstKey] || '').trim();
-          
-          exists = table.rows.some(r => {
-            const rKey = String(r['Item #'] || r['Glove'] || r['Sleeve'] || r['Blanket'] || r['Serial #'] || r['ESL ID'] || Object.values(r)[0] || '').trim();
+          const itemIdentifier = String(
+            mut.itemIdentifier ||
+            mut.rowData['Employee Name'] || mut.rowData['Name'] ||
+            mut.rowData['Job Number'] || mut.rowData['Job #'] ||
+            mut.rowData['PO Number'] || mut.rowData['PO #'] ||
+            mut.rowData['Email ID'] || mut.rowData['Check-In ID'] || mut.rowData['Batch ID'] ||
+            mut.rowData['Item #'] || mut.rowData['Glove'] || mut.rowData['Sleeve'] ||
+            mut.rowData['Blanket'] || mut.rowData['Serial #'] || mut.rowData['ESL ID'] ||
+            mut.rowData[firstKey] || ''
+          ).trim().toLowerCase();
+
+          exists = !!itemIdentifier && table.rows.some(r => {
+            const rKey = String(
+              r['Employee Name'] || r['Name'] ||
+              r['Job Number'] || r['Job #'] ||
+              r['PO Number'] || r['PO #'] ||
+              r['Email ID'] || r['Check-In ID'] || r['Batch ID'] ||
+              r['Item #'] || r['Glove'] || r['Sleeve'] ||
+              r['Blanket'] || r['Serial #'] || r['ESL ID'] ||
+              Object.values(r)[0] || ''
+            ).trim().toLowerCase();
             return rKey === itemIdentifier;
           });
         }
@@ -5097,6 +5492,7 @@ class LocalDatabase {
           } else {
             table.rows.unshift(newRowObj);
             table.rawGrid.splice(1, 0, gridRow);
+            this._syncFlatRowIndices(table);
           }
           table.rowCount = table.rows.length;
           table.maxRows = table.rawGrid.length;
@@ -5106,7 +5502,7 @@ class LocalDatabase {
 
     // Delete Row mutation replay
     if (mut.action === 'DELETE_ROW') {
-      const table = Object.values(this.snapshot.tables).find(t => t.name === mut.sheetName) || this.snapshot.tables[mut.tableKey];
+      const table = this._resolveMutationTable(mut);
       if (table) {
         if (mut.rowData) {
           const mDate = String(mut.rowData['Date Assigned'] || mut.rowData['Date'] || Object.values(mut.rowData)[0] || '').trim();
@@ -5116,7 +5512,7 @@ class LocalDatabase {
 
           if (table.rows) {
             let rowIdx = -1;
-            if (mut.row && mut.row >= 2) {
+            if (typeof mut.row === 'number' && mut.row >= 2) {
               rowIdx = table.rows.findIndex((r, i) => (r._rowIdx || (i + 2)) === mut.row);
             }
             if (rowIdx === -1) {
@@ -5135,7 +5531,7 @@ class LocalDatabase {
           }
           if (table.rawGrid) {
             let gIdx = -1;
-            if (mut.row && mut.row >= 2 && mut.row <= table.rawGrid.length) {
+            if (typeof mut.row === 'number' && mut.row >= 2 && mut.row <= table.rawGrid.length) {
               gIdx = mut.row - 1;
             } else {
               gIdx = table.rawGrid.findIndex((gr, idx) => {
@@ -5149,24 +5545,43 @@ class LocalDatabase {
               table.maxRows = table.rawGrid.length;
             }
           }
-        } else if (mut.itemIdentifier) {
-          const idLower = String(mut.itemIdentifier).trim().toLowerCase();
-          if (table.rows) {
-            const rowIdx = table.rows.findIndex(r => {
-              return Object.values(r).some(val => String(val || '').trim().toLowerCase() === idLower);
-            });
-            if (rowIdx !== -1) {
-              table.rows.splice(rowIdx, 1);
-              table.rowCount = table.rows.length;
+          this._syncFlatRowIndices(table);
+        } else {
+          let removedByRow = false;
+          const idLower = mut.itemIdentifier ? String(mut.itemIdentifier).trim().toLowerCase() : '';
+          if (typeof mut.row === 'number' && mut.row >= 2 && table.rows) {
+            const idx = table.rows.findIndex((r, i) => (r._rowIdx || (i + 2)) === mut.row);
+            if (idx !== -1) {
+              const cand = table.rows[idx];
+              const matchesId = !idLower || Object.values(cand).some(v => String(v || '').trim().toLowerCase() === idLower);
+              if (matchesId) {
+                table.rows.splice(idx, 1);
+                table.rowCount = table.rows.length;
+                if (table.rawGrid && mut.row <= table.rawGrid.length) {
+                  table.rawGrid.splice(mut.row - 1, 1);
+                  table.maxRows = table.rawGrid.length;
+                }
+                removedByRow = true;
+              }
             }
           }
-          if (table.rawGrid) {
-            table.rawGrid = table.rawGrid.filter((gr, idx) => {
-              if (idx === 0) return true;
-              return !gr.some(cell => String(cell || '').trim().toLowerCase() === idLower);
-            });
-            table.maxRows = table.rawGrid.length;
+          if (!removedByRow && idLower) {
+            if (table.rows) {
+              const rowIdx = table.rows.findIndex(r => Object.values(r).some(val => String(val || '').trim().toLowerCase() === idLower));
+              if (rowIdx !== -1) {
+                table.rows.splice(rowIdx, 1);
+                table.rowCount = table.rows.length;
+              }
+            }
+            if (table.rawGrid) {
+              const gIdx = table.rawGrid.findIndex((gr, idx) => idx > 0 && gr.some(cell => String(cell || '').trim().toLowerCase() === idLower));
+              if (gIdx !== -1) {
+                table.rawGrid.splice(gIdx, 1);
+                table.maxRows = table.rawGrid.length;
+              }
+            }
           }
+          this._syncFlatRowIndices(table);
         }
       }
     }

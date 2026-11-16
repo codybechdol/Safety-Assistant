@@ -3143,6 +3143,9 @@ class EmployeeProfileEngine {
       this.db.saveManualPick(swapKey, displayName, oldItem, pickedItemNum, pickStatus, false);
     }
 
+    if (typeof this.db.markTableDirty === 'function') {
+      this.db.markTableDirty(swapKey);
+    }
     await this.db.persistSnapshot(this.db.snapshot);
 
     if (window.sheetNavigator && window.sheetNavigator.currentSheetKey === swapKey) {
@@ -3512,6 +3515,9 @@ class EmployeeProfileEngine {
           nRow['Class'] = normClass;
           nRow['Urgency'] = 'Immediate';
         }
+      }
+      if (typeof this.db.markTableDirty === 'function') {
+        this.db.markTableDirty([swapKey, 'safety_equipment_needs']);
       }
       if (typeof this.db.persistSnapshot === 'function') {
         await this.db.persistSnapshot(snap);
@@ -4191,6 +4197,9 @@ class EmployeeProfileEngine {
     }
 
     // Persist snapshot
+    if (typeof this.db.markTableDirty === 'function') {
+      this.db.markTableDirty('safety_equipment_needs');
+    }
     if (typeof this.db.persistSnapshot === 'function') {
       await this.db.persistSnapshot(snap);
     }

@@ -38,9 +38,20 @@ class SupabaseSyncEngine {
 
     this.lastSeq = Number(localStorage.getItem('sa_supabase_last_seq') || 0);
     this.seenMutIds = new Set();
+    this._seenSeqs = new Set();
+    this._tableUpdatedAt = this._loadTableTimestamps();
     this.ws = null;
     this.wsHeartbeatTimer = null;
+    this._wsReconnectTimer = null;
+    this._wsReconnectAttempt = 0;
     this.pollTimer = null;
+    this._pollPromise = null;
+    this._pollRequestedAgain = false;
+    this._tableSyncPromise = null;
+    this._wsQueue = Promise.resolve();
+    this._stopped = true;
+    this._lastWakeSyncAt = 0;
+    this._pollTickCount = 0;
     this.isApplyingRemote = false;
     this.isFlushingQueue = false;
     this._tablePushTimers = new Map();
@@ -51,8 +62,19 @@ class SupabaseSyncEngine {
 
     if (typeof window !== 'undefined') {
       window.addEventListener('online', () => {
-        if (this.isActive()) {
-          this._pollMissedMutations().then(() => this._flushPendingOfflineQueue());
+        this._handleDeviceWake('online');
+      });
+      window.addEventListener('focus', () => {
+        this._handleDeviceWake('focus');
+      });
+      window.addEventListener('pageshow', () => {
+        this._handleDeviceWake('pageshow');
+      });
+    }
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+          this._handleDeviceWake('visibility');
         }
       });
     }
@@ -329,7 +351,7 @@ class SupabaseSyncEngine {
         this.db.saveSnapshot(this.db.snapshot).catch(() => {});
       }
       if (this.isActive()) {
-        this._scheduleTableSnapshotPush('__configs__');
+        this._scheduleTableUpsert('__configs__');
       }
     }
     this.applyActiveUserPermissions();
@@ -857,6 +879,43 @@ class SupabaseSyncEngine {
     return id;
   }
 
+  _loadTableTimestamps() {
+    try {
+      const raw = localStorage.getItem('sa_supabase_table_timestamps');
+      const parsed = raw ? JSON.parse(raw) : {};
+      return (parsed && typeof parsed === 'object') ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  _saveTableTimestamps() {
+    try {
+      localStorage.setItem('sa_supabase_table_timestamps', JSON.stringify(this._tableUpdatedAt || {}));
+    } catch { /* ignore */ }
+  }
+
+  _handleDeviceWake(source = 'wake') {
+    if (!this.isActive()) return;
+    const now = Date.now();
+    if (source !== 'online' && now - this._lastWakeSyncAt < 1500) return;
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+    this._lastWakeSyncAt = now;
+
+    if (!this.ws || this.ws.readyState === WebSocket.CLOSED || this.ws.readyState === WebSocket.CLOSING) {
+      this._connectRealtimeWebSocket();
+    }
+    Promise.resolve()
+      .then(() => this._pollMissedMutations())
+      .then(() => this._syncRemoteTables())
+      .then(() => {
+        if (this.pendingQueue && this.pendingQueue.length > 0) {
+          return this._flushPendingOfflineQueue();
+        }
+      })
+      .catch(() => {});
+  }
+
   isConfigured() {
     return Boolean(this.url && this.anonKey && this.url.startsWith('https://'));
   }
@@ -1099,6 +1158,12 @@ class SupabaseSyncEngine {
       }
 
       this._modifiedTables.clear();
+      for (const row of payloadRows) {
+        if (row && row.table_key) {
+          this._tableUpdatedAt[row.table_key] = nowIso;
+        }
+      }
+      this._saveTableTimestamps();
 
       // Sync latest mutation seq cursor
       await this._refreshLatestSeqCursor();
@@ -1171,6 +1236,9 @@ class SupabaseSyncEngine {
         if (r.updated_at && r.updated_at > latestUpdatedAt) {
           latestUpdatedAt = r.updated_at;
         }
+        if (r.table_key && r.updated_at) {
+          this._tableUpdatedAt[r.table_key] = r.updated_at;
+        }
         if (r.table_key === '__configs__') {
           if (Array.isArray(r.rows) && r.rows[0] && typeof r.rows[0] === 'object') {
             configs = r.rows[0];
@@ -1224,6 +1292,7 @@ class SupabaseSyncEngine {
         this.googleSync.refreshAllViewsAfterSnapshotLoad();
       }
 
+      this._saveTableTimestamps();
       await this._refreshLatestSeqCursor();
 
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(1) + 's';
@@ -1419,11 +1488,43 @@ class SupabaseSyncEngine {
       };
       if (invMap[tableKey]) tablesToSync.add(invMap[tableKey]);
     }
+    if (mutRecord.action === 'RETIRE_ITEM') {
+      if (mutRecord.category) tablesToSync.add(mutRecord.category);
+      tablesToSync.add('retired_equipment');
+    } else if (mutRecord.action === 'LOG_DAILY_ACCOMPLISHMENT') {
+      tablesToSync.add('daily_accomplishments');
+    } else if (mutRecord.action === 'CREATE_TEST_BATCH') {
+      tablesToSync.add('test_batches');
+    } else if (mutRecord.action === 'FIELD_GPS_CHECK_IN') {
+      tablesToSync.add('field_gps_log');
+    } else if (mutRecord.action === 'UPDATE_SYSTEM_CONFIG') {
+      tablesToSync.add('system_config');
+      tablesToSync.add('__configs__');
+    }
     if (mutRecord.action && (mutRecord.action.startsWith('SAVE_') || mutRecord.action.startsWith('SET_'))) {
       tablesToSync.add('__configs__');
     }
 
     for (const tKey of tablesToSync) {
+      this._modifiedTables.add(tKey);
+      this._scheduleTableUpsert(tKey);
+    }
+  }
+
+  scheduleDirectTablesSync(tableKeys = []) {
+    if (!this.isActive() || this.isApplyingRemote) return;
+    if (typeof window !== 'undefined' && window.currentRoleMode === 'view_only') return;
+    const list = Array.isArray(tableKeys) ? tableKeys : [tableKeys];
+    const normalized = new Set();
+    for (const key of list) {
+      if (!key) continue;
+      if (key === '__manual_picks__') {
+        normalized.add('__configs__');
+      } else {
+        normalized.add(key);
+      }
+    }
+    for (const tKey of normalized) {
       this._modifiedTables.add(tKey);
       this._scheduleTableUpsert(tKey);
     }
@@ -1482,6 +1583,9 @@ class SupabaseSyncEngine {
           }
         ]
       });
+      this._tableUpdatedAt['__configs__'] = nowIso;
+      this._tableUpdatedAt['__manual_picks__'] = nowIso;
+      this._saveTableTimestamps();
       return;
     }
 
@@ -1506,6 +1610,8 @@ class SupabaseSyncEngine {
         updated_at: nowIso
       }]
     });
+    this._tableUpdatedAt[tableKey] = nowIso;
+    this._saveTableTimestamps();
   }
 
   async _refreshLatestSeqCursor() {
@@ -1518,46 +1624,287 @@ class SupabaseSyncEngine {
     } catch { /* ignore if empty */ }
   }
 
+  async _syncRemoteTables({ targetKeys = null } = {}) {
+    if (!this.isActive() || !this.db || this.isApplyingRemote) return { updatedCount: 0 };
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return { updatedCount: 0 };
+    if (this._tableSyncPromise) return this._tableSyncPromise;
+
+    this._tableSyncPromise = (async () => {
+      try {
+        const snap = this.db.snapshot;
+        if (!snap || !snap.tables || Object.keys(snap.tables).length === 0) {
+          const dlRes = await this.downloadSnapshotFromSupabase({ showModal: false });
+          return { updatedCount: dlRes && dlRes.success ? Object.keys((dlRes.snapshot && dlRes.snapshot.tables) || {}).length : 0, downloadedFull: Boolean(dlRes && dlRes.success) };
+        }
+
+        const metaRows = await this._request('/rest/v1/sa_tables?select=table_key,updated_at,updated_by,revision,row_count', {
+          method: 'GET',
+          timeoutMs: 12000
+        });
+        if (!Array.isArray(metaRows) || metaRows.length === 0) return { updatedCount: 0 };
+
+        const snapBaselineMs = Date.parse(snap.timestamp || snap.exportedAt || '') || 0;
+        const filterSet = Array.isArray(targetKeys) && targetKeys.length > 0 ? new Set(targetKeys) : null;
+        const staleKeys = [];
+
+        for (const mr of metaRows) {
+          const tKey = mr && mr.table_key;
+          if (!tKey || (filterSet && !filterSet.has(tKey))) continue;
+
+          if (this._tablePushTimers && this._tablePushTimers.has(tKey)) continue;
+          if (tKey === '__manual_picks__' && this._tablePushTimers && this._tablePushTimers.has('__configs__')) continue;
+          if (this.pendingQueue && this.pendingQueue.some(pm => {
+            const pKey = pm.tableKey || (pm.sheetName && this.db.getTableKeyForSheet ? this.db.getTableKeyForSheet(pm.sheetName) : null);
+            return pKey === tKey || (tKey === '__configs__' && pm.action && (pm.action.startsWith('SAVE_') || pm.action.startsWith('SET_') || pm.action === 'UPDATE_SYSTEM_CONFIG'));
+          })) {
+            continue;
+          }
+
+          const remoteMs = Date.parse(mr.updated_at || '') || 0;
+          const recordedStr = this._tableUpdatedAt && this._tableUpdatedAt[tKey];
+          const localMs = recordedStr ? (Date.parse(recordedStr) || 0) : snapBaselineMs;
+
+          if (remoteMs > localMs + 500) {
+            staleKeys.push(tKey);
+          }
+        }
+
+        if (staleKeys.length === 0) return { updatedCount: 0 };
+
+        const fetchedRows = [];
+        for (let i = 0; i < staleKeys.length; i += 15) {
+          const batchKeys = staleKeys.slice(i, i + 15);
+          const inList = batchKeys.map(k => `"${String(k).replace(/"/g, '')}"`).join(',');
+          const rows = await this._request(`/rest/v1/sa_tables?table_key=in.(${encodeURIComponent(inList)})&select=*`, {
+            method: 'GET',
+            timeoutMs: 30000
+          });
+          if (Array.isArray(rows)) fetchedRows.push(...rows);
+        }
+
+        if (fetchedRows.length === 0) return { updatedCount: 0 };
+
+        let configsUpdated = false;
+        let maxRev = Number(snap.revision || 1);
+        let newestTs = snap.timestamp || snap.exportedAt || '';
+        let lastUpdatedBy = 'Remote Device';
+        const updatedNames = [];
+
+        this.isApplyingRemote = true;
+        try {
+          for (const r of fetchedRows) {
+            if (!r || !r.table_key) continue;
+            if (Number(r.revision || 0) > maxRev) maxRev = Number(r.revision);
+            if (r.updated_at && (!newestTs || r.updated_at > newestTs)) newestTs = r.updated_at;
+            if (r.updated_by) lastUpdatedBy = r.updated_by;
+
+            if (r.table_key === '__configs__') {
+              if (Array.isArray(r.rows) && r.rows[0] && typeof r.rows[0] === 'object') {
+                const prevDriveMap = snap.configs && snap.configs.driveTimeMap;
+                snap.configs = { ...r.rows[0] };
+                if (prevDriveMap && !snap.configs.driveTimeMap) {
+                  snap.configs.driveTimeMap = prevDriveMap;
+                }
+                configsUpdated = true;
+                updatedNames.push('Settings & Plans');
+              }
+              if (r.updated_at) this._tableUpdatedAt['__configs__'] = r.updated_at;
+              continue;
+            }
+
+            if (r.table_key === '__manual_picks__') {
+              if (Array.isArray(r.rows) && r.rows[0] && typeof r.rows[0] === 'object') {
+                snap.manualPicks = { ...r.rows[0] };
+                configsUpdated = true;
+              }
+              if (r.updated_at) this._tableUpdatedAt['__manual_picks__'] = r.updated_at;
+              continue;
+            }
+
+            const headers = Array.isArray(r.headers) ? r.headers : [];
+            const tableRows = Array.isArray(r.rows) ? r.rows : [];
+            let rawGrid = Array.isArray(r.raw_grid) && r.raw_grid.length > 0 ? r.raw_grid : null;
+            if (!rawGrid && headers.length > 0) {
+              rawGrid = [
+                headers,
+                ...tableRows.map(rowObj => headers.map(h => (rowObj && rowObj[h] !== undefined && rowObj[h] !== null) ? rowObj[h] : ''))
+              ];
+            }
+
+            const tableObj = {
+              name: r.sheet_name || r.table_key,
+              headers,
+              rows: tableRows,
+              rawGrid: rawGrid || [],
+              rowCount: tableRows.length,
+              maxRows: rawGrid ? rawGrid.length : (tableRows.length + 1),
+              maxCols: headers.length
+            };
+            if (typeof this.db.normalizeTableData === 'function') {
+              this.db.normalizeTableData(tableObj, r.table_key);
+            }
+            snap.tables[r.table_key] = tableObj;
+            if (typeof this.db._invalidateIndices === 'function') {
+              this.db._invalidateIndices(r.table_key);
+            }
+            if (r.updated_at) this._tableUpdatedAt[r.table_key] = r.updated_at;
+            updatedNames.push(r.sheet_name || r.table_key);
+          }
+
+          snap.revision = maxRev;
+          if (newestTs) {
+            snap.timestamp = newestTs;
+            snap.exportedAt = newestTs;
+          }
+
+          if (configsUpdated && typeof this.db.unpackSnapshotToLocalState === 'function') {
+            this.db.unpackSnapshotToLocalState(snap);
+          }
+          if (typeof this.db._computeSyncedStateSignature === 'function') {
+            this.db._lastSyncedStateSignature = this.db._computeSyncedStateSignature(snap);
+          }
+          this._saveTableTimestamps();
+
+          if (updatedNames.length > 0 && typeof this.db.persistSnapshot === 'function') {
+            await this.db.persistSnapshot(snap);
+          }
+        } finally {
+          this.isApplyingRemote = false;
+        }
+
+        if (updatedNames.length > 0) {
+          this.db.notify();
+          if (typeof window !== 'undefined' && window.employeeResolver && typeof window.employeeResolver.rebuildIndex === 'function') {
+            window.employeeResolver.rebuildIndex();
+          }
+          if (this.googleSync && typeof this.googleSync.refreshAllViewsAfterSnapshotLoad === 'function') {
+            this.googleSync.refreshAllViewsAfterSnapshotLoad();
+          }
+          if (typeof window.showToast === 'function') {
+            const label = updatedNames.length <= 2 ? updatedNames.join(', ') : `${updatedNames.length} tables`;
+            window.showToast(`⚡ Synced ${label} from ${lastUpdatedBy}`);
+          }
+        }
+        return { updatedCount: updatedNames.length };
+      } catch (err) {
+        console.warn('[SupabaseSync] Incremental table sync warning:', err && err.message ? err.message : err);
+        return { updatedCount: 0 };
+      } finally {
+        this._tableSyncPromise = null;
+      }
+    })();
+
+    return this._tableSyncPromise;
+  }
+
   /**
-   * Starts real-time multi-user listener (WebSocket + 5s delta catch-up poll).
+   * Starts real-time multi-user listener (WebSocket + 5s delta catch-up poll + 15s table sync).
    */
   async startRealtimeSync() {
     this.stopRealtimeSync();
     if (!this.isActive()) return;
+    this._stopped = false;
+    this._pollTickCount = 0;
+
+    if (this.lastSeq === 0 && this.db && this.db.snapshot && this.db.snapshot.tables) {
+      // Establish safe seq baseline slightly before table pull so we don't replay ancient mutations over newer tables
+      let recentSeq = 0;
+      try {
+        const cutoffIso = new Date(Date.now() - 15000).toISOString();
+        const older = await this._request(
+          `/rest/v1/sa_mutations?select=seq&created_at=lt.${encodeURIComponent(cutoffIso)}&order=seq.desc&limit=1`,
+          { method: 'GET', timeoutMs: 10000 }
+        );
+        if (Array.isArray(older) && older[0] && older[0].seq) {
+          recentSeq = Number(older[0].seq);
+        }
+      } catch { /* ignore */ }
+
+      const tblRes = await this._syncRemoteTables();
+      if (this.lastSeq === 0 && recentSeq > 0 && !(tblRes && tblRes.downloadedFull)) {
+        this.lastSeq = recentSeq;
+        try { localStorage.setItem('sa_supabase_last_seq', String(this.lastSeq)); } catch { /* ignore */ }
+      }
+    } else {
+      await this._syncRemoteTables();
+    }
 
     await this._pollMissedMutations();
 
-    // 1. Lightweight 5-second delta poll (catches any mutations across cellular/Wi-Fi drops and flushes offline queue)
+    // 1. Lightweight 5-second delta poll + periodic 15-second full-table freshness check
     this.pollTimer = setInterval(async () => {
+      if (this._stopped || !this.isActive()) return;
+      this._pollTickCount = (this._pollTickCount + 1) % 3;
       await this._pollMissedMutations();
+      if (this._pollTickCount === 0) {
+        await this._syncRemoteTables();
+      }
       if (this.pendingQueue && this.pendingQueue.length > 0) {
         await this._flushPendingOfflineQueue();
+      }
+      if ((!this.ws || this.ws.readyState === WebSocket.CLOSED) && !this._wsReconnectTimer && (typeof navigator === 'undefined' || navigator.onLine !== false)) {
+        this._connectRealtimeWebSocket();
       }
     }, 5000);
 
     // 2. Live Supabase Realtime WebSocket for instant <200ms push notifications
+    this._connectRealtimeWebSocket();
+  }
+
+  _scheduleWsReconnect() {
+    if (this._stopped || !this.isActive() || this._wsReconnectTimer) return;
+    const delays = [2000, 5000, 10000, 20000, 30000];
+    const delay = delays[Math.min(this._wsReconnectAttempt, delays.length - 1)];
+    this._wsReconnectAttempt += 1;
+    this._wsReconnectTimer = setTimeout(() => {
+      this._wsReconnectTimer = null;
+      if (!this._stopped && this.isActive()) {
+        this._connectRealtimeWebSocket();
+      }
+    }, delay);
+  }
+
+  _connectRealtimeWebSocket() {
+    if (this._stopped || !this.isActive()) return;
+    if (this.ws) {
+      try {
+        if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) return;
+        this.ws.onclose = null;
+        this.ws.close();
+      } catch { /* ignore */ }
+      this.ws = null;
+    }
+    if (this.wsHeartbeatTimer) {
+      clearInterval(this.wsHeartbeatTimer);
+      this.wsHeartbeatTimer = null;
+    }
+
     try {
       const wsUrl = this.url.replace(/^http/, 'ws') + `/realtime/v1/websocket?apikey=${encodeURIComponent(this.anonKey)}&vsn=1.0.0`;
       const ws = new WebSocket(wsUrl);
       this.ws = ws;
 
       ws.onopen = () => {
+        if (this._stopped || this.ws !== ws) return;
+        this._wsReconnectAttempt = 0;
         const joinMsg = {
-          topic: 'realtime:public:sa_mutations',
+          topic: 'realtime:public:sa_changes',
           event: 'phx_join',
           payload: {
             config: {
-               broadcast: { self: false },
+              broadcast: { self: false },
               presence: { key: '' },
               postgres_changes: [
-                { event: 'INSERT', schema: 'public', table: 'sa_mutations' }
+                { event: 'INSERT', schema: 'public', table: 'sa_mutations' },
+                { event: 'INSERT', schema: 'public', table: 'sa_tables' },
+                { event: 'UPDATE', schema: 'public', table: 'sa_tables' }
               ]
-            }
+            },
+            access_token: this.anonKey
           },
           ref: '1'
         };
         ws.send(JSON.stringify(joinMsg));
-        this.updateSettingsBadge('Live (Realtime WebSocket)');
 
         this.wsHeartbeatTimer = setInterval(() => {
           if (ws.readyState === WebSocket.OPEN) {
@@ -1569,26 +1916,75 @@ class SupabaseSyncEngine {
       ws.onmessage = (evt) => {
         try {
           const msg = JSON.parse(evt.data);
-          if (msg && (msg.event === 'postgres_changes' || msg.event === 'INSERT')) {
-            const record = (msg.payload && (msg.payload.record || (msg.payload.data && msg.payload.data.record))) || null;
-            if (record) {
-              this._handleIncomingMutationRecord(record);
+          if (!msg) return;
+
+          if (msg.event === 'phx_reply' && msg.ref === '1') {
+            if (msg.payload && msg.payload.status === 'ok') {
+              this.updateSettingsBadge('Live (Realtime WebSocket)');
             } else {
-              this._pollMissedMutations();
+              console.warn('[SupabaseSync] Realtime join reply:', msg.payload);
+              this.updateSettingsBadge('Active (Auto Poll Catch-Up)');
+            }
+            return;
+          }
+
+          if (msg.event === 'postgres_changes' || msg.event === 'INSERT' || msg.event === 'UPDATE') {
+            const pgData = (msg.payload && msg.payload.data) || null;
+            const tableName = (pgData && pgData.table) || (msg.payload && msg.payload.table) || '';
+            const record = (msg.payload && (msg.payload.record || (pgData && pgData.record))) || null;
+
+            if (tableName === 'sa_tables' || (record && record.table_key && record.mutation === undefined)) {
+              if (record && record.updated_by === this.deviceName && record.updated_at && this._tableUpdatedAt[record.table_key] === record.updated_at) {
+                return;
+              }
+              const targetKey = record && record.table_key ? [record.table_key] : null;
+              this._wsQueue = this._wsQueue.then(() => this._syncRemoteTables({ targetKeys: targetKey })).catch(() => {});
+              return;
+            }
+
+            if (record) {
+              this._wsQueue = this._wsQueue.then(async () => {
+                const seq = Number(record.seq || 0);
+                if (this.lastSeq > 0 && seq > this.lastSeq + 1) {
+                  await this._pollMissedMutations();
+                  return;
+                }
+                await this._handleIncomingMutationRecord(record, { deferRefresh: false });
+              }).catch(() => {});
+            } else {
+              this._wsQueue = this._wsQueue.then(() => this._pollMissedMutations()).catch(() => {});
             }
           }
         } catch { /* ignore non-JSON frames */ }
       };
 
+      ws.onerror = () => {
+        // Error triggers onclose; reconnect handled there
+      };
+
       ws.onclose = () => {
-        if (this.wsHeartbeatTimer) clearInterval(this.wsHeartbeatTimer);
+        if (this.wsHeartbeatTimer) {
+          clearInterval(this.wsHeartbeatTimer);
+          this.wsHeartbeatTimer = null;
+        }
+        if (this.ws === ws) this.ws = null;
+        if (!this._stopped && this.isActive()) {
+          this.updateSettingsBadge('Reconnecting (Auto Poll Active)');
+          this._scheduleWsReconnect();
+        }
       };
     } catch (e) {
       console.warn('[SupabaseSync] WebSocket init fallback to delta polling:', e.message);
+      this._scheduleWsReconnect();
     }
   }
 
   stopRealtimeSync() {
+    this._stopped = true;
+    if (this._wsReconnectTimer) {
+      clearTimeout(this._wsReconnectTimer);
+      this._wsReconnectTimer = null;
+    }
     if (this.pollTimer) {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
@@ -1598,31 +1994,99 @@ class SupabaseSyncEngine {
       this.wsHeartbeatTimer = null;
     }
     if (this.ws) {
-      try { this.ws.close(); } catch { /* ignore */ }
+      try {
+        this.ws.onclose = null;
+        this.ws.close();
+      } catch { /* ignore */ }
       this.ws = null;
     }
   }
 
   async _pollMissedMutations() {
-    if (!this.isActive() || this.isApplyingRemote) return;
-    try {
-      const rows = await this._request(
-        `/rest/v1/sa_mutations?select=*&seq=gt.${this.lastSeq}&order=seq.asc&limit=100`,
-        { method: 'GET', timeoutMs: 10000 }
-      );
-      if (Array.isArray(rows) && rows.length > 0) {
-        for (const r of rows) {
-          await this._handleIncomingMutationRecord(r);
-        }
-      }
-    } catch {
-      // Silent ignore during brief offline moments
+    if (!this.isActive()) return;
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+    if (this._pollPromise) {
+      this._pollRequestedAgain = true;
+      return this._pollPromise;
     }
+
+    this._pollPromise = (async () => {
+      try {
+        do {
+          this._pollRequestedAgain = false;
+          let totalAppliedInPass = 0;
+          let lastRemoteDevice = 'Another Device';
+          let lastLabel = 'Database';
+
+          while (true) {
+            const rows = await this._request(
+              `/rest/v1/sa_mutations?select=*&seq=gt.${this.lastSeq}&order=seq.asc&limit=100`,
+              { method: 'GET', timeoutMs: 10000 }
+            );
+            if (!Array.isArray(rows) || rows.length === 0) break;
+
+            this.isApplyingRemote = true;
+            try {
+              for (const r of rows) {
+                const res = await this._handleIncomingMutationRecord(r, { deferRefresh: true });
+                if (res && res.applied) {
+                  totalAppliedInPass++;
+                  if (res.remoteDevice) lastRemoteDevice = res.remoteDevice;
+                  if (res.label) lastLabel = res.label;
+                }
+              }
+            } finally {
+              this.isApplyingRemote = false;
+            }
+
+            if (rows.length < 100) break;
+          }
+
+          if (totalAppliedInPass > 0) {
+            this.isApplyingRemote = true;
+            try {
+              if (typeof this.db.persistSnapshot === 'function') {
+                await this.db.persistSnapshot(this.db.snapshot);
+              }
+            } finally {
+              this.isApplyingRemote = false;
+            }
+            this.db.notify();
+            if (typeof window !== 'undefined' && window.employeeResolver && typeof window.employeeResolver.rebuildIndex === 'function') {
+              window.employeeResolver.rebuildIndex();
+            }
+            if (this.googleSync && typeof this.googleSync.refreshAllViewsAfterSnapshotLoad === 'function') {
+              this.googleSync.refreshAllViewsAfterSnapshotLoad();
+            }
+            if (typeof window.showToast === 'function') {
+              const summary = totalAppliedInPass === 1 ? lastLabel : `${totalAppliedInPass} updates`;
+              window.showToast(`⚡ Live update from ${lastRemoteDevice}: ${summary}`);
+            }
+          }
+        } while (this._pollRequestedAgain);
+      } catch {
+        // Silent ignore during brief offline moments
+      } finally {
+        this._pollPromise = null;
+      }
+    })();
+
+    return this._pollPromise;
   }
 
-  async _handleIncomingMutationRecord(record) {
-    if (!record) return;
+  async _handleIncomingMutationRecord(record, options = {}) {
+    if (!record) return { applied: false };
     const seq = Number(record.seq || 0);
+    if (seq > 0 && this._seenSeqs.has(seq)) {
+      return { applied: false };
+    }
+    if (seq > 0) {
+      this._seenSeqs.add(seq);
+      if (this._seenSeqs.size > 5000) {
+        const firstVal = this._seenSeqs.values().next().value;
+        this._seenSeqs.delete(firstVal);
+      }
+    }
     if (seq > this.lastSeq) {
       this.lastSeq = seq;
       try { localStorage.setItem('sa_supabase_last_seq', String(seq)); } catch { /* ignore */ }
@@ -1630,16 +2094,17 @@ class SupabaseSyncEngine {
 
     // Ignore mutations that originated from this device
     if (record.device_id === this.deviceId || (record.mut_id && this.seenMutIds.has(record.mut_id))) {
-      return;
+      return { applied: false };
     }
     if (record.mut_id) this.seenMutIds.add(record.mut_id);
 
     const mut = record.mutation;
-    if (!mut || !this.db) return;
+    if (!mut || !this.db) return { applied: false };
 
     const cellKey = this._getCellKey(mut);
     const remoteTime = new Date(mut.timestamp || record.created_at || Date.now()).getTime();
     const remoteDevice = record.device_name || mut.deviceName || 'Another Device';
+    const label = record.sheet_name || record.table_key || mut.action || 'Database';
 
     // Check 1: Does this incoming remote mutation collide with an unsent offline edit in our pendingQueue?
     if (cellKey && this.pendingQueue && this.pendingQueue.length > 0) {
@@ -1661,7 +2126,7 @@ class SupabaseSyncEngine {
           remoteTime: mut.timestamp || record.created_at,
           remoteDevice: remoteDevice
         });
-        return;
+        return { applied: false };
       }
     }
 
@@ -1687,10 +2152,11 @@ class SupabaseSyncEngine {
           remoteTime: mut.timestamp || record.created_at,
           remoteDevice: remoteDevice
         });
-        return;
+        return { applied: false };
       }
     }
 
+    const prevApplying = this.isApplyingRemote;
     try {
       this.isApplyingRemote = true;
       await this.db.applyLocalMutation(mut);
@@ -1702,20 +2168,27 @@ class SupabaseSyncEngine {
           mutId: record.mut_id
         });
       }
-      this.db.schedulePersistSnapshot(this.db.snapshot, 400);
-      this.db.notify();
-
-      if (this.googleSync && typeof this.googleSync.refreshAllViewsAfterSnapshotLoad === 'function') {
-        this.googleSync.refreshAllViewsAfterSnapshotLoad();
+      if (!options.deferRefresh) {
+        if (typeof this.db.persistSnapshot === 'function') {
+          await this.db.persistSnapshot(this.db.snapshot);
+        }
+        this.db.notify();
+        if (typeof window !== 'undefined' && window.employeeResolver && typeof window.employeeResolver.rebuildIndex === 'function') {
+          window.employeeResolver.rebuildIndex();
+        }
+        if (this.googleSync && typeof this.googleSync.refreshAllViewsAfterSnapshotLoad === 'function') {
+          this.googleSync.refreshAllViewsAfterSnapshotLoad();
+        }
+        if (typeof window.showToast === 'function') {
+          window.showToast(`⚡ Live update from ${remoteDevice}: ${label}`);
+        }
       }
-      if (typeof window.showToast === 'function') {
-        const label = record.sheet_name || record.table_key || mut.action || 'Database';
-        window.showToast(`⚡ Live update from ${remoteDevice}: ${label}`);
-      }
+      return { applied: true, remoteDevice, label };
     } catch (err) {
       console.warn('[SupabaseSync] Error applying remote mutation:', err);
+      return { applied: false };
     } finally {
-      this.isApplyingRemote = false;
+      this.isApplyingRemote = prevApplying;
     }
   }
 

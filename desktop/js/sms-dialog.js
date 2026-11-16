@@ -738,6 +738,9 @@ Please let me know so we can get this updated. Thanks!`;
         if (matchedRow) {
           matchedRow['SMS Notified'] = todayStr;
         }
+        if (this.db && typeof this.db.markTableDirty === 'function') {
+          this.db.markTableDirty('safety_compliance');
+        }
         if (this.db && typeof this.db.persistSnapshot === 'function') {
           try {
             await this.db.persistSnapshot(snap);
