@@ -15,6 +15,7 @@ class SiteAuditsEngine {
     this.selectedQuarter = 'all'; // 'all', 'Q1', 'Q2', 'Q3', 'Q4'
     this.selectedLocation = 'all';
     this.selectedForeman = 'all';
+    this.selectedInspector = 'all';
     this.selectedCorrectionFilter = 'all'; // 'all', 'corrections', 'clean', 'reviewed'
     this.viewMode = localStorage.getItem('sa_site_audits_view_mode') || 'cards'; // 'cards' | 'table'
     this.showUncoveredDrawer = false;
@@ -302,15 +303,44 @@ class SiteAuditsEngine {
     }
 
     // Apply filters
-    let filtered = yearAudits;
-    if (this.selectedQuarter !== 'all') {
-      filtered = filtered.filter(a => a.quarter === this.selectedQuarter);
+    const scopeAudits = (this.selectedQuarter === 'all')
+      ? yearAudits
+      : yearAudits.filter(a => a.quarter === this.selectedQuarter);
+
+    // Aggregate counts by Inspector (within selected Year + Quarter)
+    const inspectorCountsMap = new Map();
+    scopeAudits.forEach(a => {
+      const rawInsp = String(a.inspector || '').trim();
+      const key = rawInsp ? rawInsp.toLowerCase().replace(/\s+/g, ' ') : '__unspecified__';
+      const label = rawInsp || 'Unspecified';
+      if (!inspectorCountsMap.has(key)) {
+        inspectorCountsMap.set(key, { key, name: label, count: 0, isUnspecified: !rawInsp });
+      }
+      inspectorCountsMap.get(key).count++;
+    });
+    const inspectorCounts = Array.from(inspectorCountsMap.values()).sort((a, b) => {
+      if (a.isUnspecified !== b.isUnspecified) return a.isUnspecified ? 1 : -1;
+      if (b.count !== a.count) return b.count - a.count;
+      return a.name.localeCompare(b.name);
+    });
+
+    if (this.selectedInspector !== 'all' && !inspectorCountsMap.has(this.selectedInspector)) {
+      this.selectedInspector = 'all';
     }
+
+    let filtered = scopeAudits;
     if (this.selectedLocation !== 'all') {
       filtered = filtered.filter(a => a.locationPrimary === this.selectedLocation);
     }
     if (this.selectedForeman !== 'all') {
       filtered = filtered.filter(a => a.foremanPrimary === this.selectedForeman);
+    }
+    if (this.selectedInspector !== 'all') {
+      filtered = filtered.filter(a => {
+        const rawInsp = String(a.inspector || '').trim();
+        const key = rawInsp ? rawInsp.toLowerCase().replace(/\s+/g, ' ') : '__unspecified__';
+        return key === this.selectedInspector;
+      });
     }
     if (this.selectedCorrectionFilter === 'corrections') {
       filtered = filtered.filter(a => a.hasCorrections);
@@ -341,9 +371,6 @@ class SiteAuditsEngine {
 
     // Active Field Jobs Coverage (for selected quarter or year)
     const activeJobs = this._activeFieldJobs || [];
-    const scopeAudits = (this.selectedQuarter === 'all')
-      ? yearAudits
-      : yearAudits.filter(a => a.quarter === this.selectedQuarter);
     const auditedJobKeys = new Set();
     scopeAudits.forEach(a => {
       if (a.jobNumber) {
@@ -402,6 +429,32 @@ class SiteAuditsEngine {
             <div style="font-size: 11px; color: #94a3b8; margin-top: 2px;">Fall / Early Winter</div>
           </div>
         </div>
+
+        <!-- Audits by Inspector Counts Bar -->
+        ${inspectorCounts.length > 0 ? `
+          <div style="background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: 8px; padding: 10px 14px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+            <span style="font-size: 11.5px; font-weight: 700; color: #94a3b8; text-transform: uppercase; margin-right: 2px;">
+              🕵️ Audits by Inspector (${this.selectedQuarter === 'all' ? (this.selectedYear === 'all' ? 'All' : this.selectedYear) : `${this.selectedYear === 'all' ? 'All' : this.selectedYear} ${this.selectedQuarter}`}):
+            </span>
+            <button class="tag-pill-btn ${this.selectedInspector === 'all' ? 'active' : ''}" onclick="window.siteAuditsEngine.setInspectorFilter('all')" style="${this.selectedInspector === 'all' ? 'background: rgba(56, 189, 248, 0.22); color: #bae6fd; border-color: #38bdf8;' : 'background: rgba(148, 163, 184, 0.12); color: #cbd5e1; border-color: rgba(148, 163, 184, 0.3);'}">
+              <span>All Inspectors</span>
+              <span style="background: rgba(0, 0, 0, 0.25); padding: 1px 6px; border-radius: 10px; font-size: 11px; font-weight: 800;">${scopeAudits.length}</span>
+            </button>
+            ${inspectorCounts.map(item => {
+              const isSelected = this.selectedInspector === item.key;
+              return `
+                <button class="tag-pill-btn ${isSelected ? 'active' : ''}" onclick="window.siteAuditsEngine.setInspectorFilter('${this.escapeJs(item.key)}')" style="${isSelected
+                  ? 'background: #a855f7; color: #fff; border-color: #c084fc;'
+                  : (item.isUnspecified
+                      ? 'background: rgba(148, 163, 184, 0.12); color: #94a3b8; border-color: rgba(148, 163, 184, 0.25);'
+                      : 'background: rgba(168, 85, 247, 0.14); color: #d8b4fe; border-color: rgba(168, 85, 247, 0.35);')}">
+                  <span>${item.isUnspecified ? '❓' : '🕵️'} ${this.escapeHtml(item.name)}</span>
+                  <span style="background: ${isSelected ? 'rgba(0, 0, 0, 0.25)' : 'rgba(15, 23, 42, 0.55)'}; padding: 1px 7px; border-radius: 10px; font-size: 11px; font-weight: 800;">${item.count}</span>
+                </button>
+              `;
+            }).join('')}
+          </div>
+        ` : ''}
 
         ${this.showUncoveredDrawer ? `
           <div style="background: rgba(15, 23, 42, 0.7); border: 1px solid rgba(56, 189, 248, 0.35); border-radius: 8px; padding: 14px 18px;">
@@ -499,7 +552,7 @@ class SiteAuditsEngine {
             </select>
           </div>
 
-          ${(this.selectedLocation !== 'all' || this.selectedForeman !== 'all' || this.selectedCorrectionFilter !== 'all' || this.searchQuery) ? `
+          ${(this.selectedLocation !== 'all' || this.selectedForeman !== 'all' || this.selectedInspector !== 'all' || this.selectedCorrectionFilter !== 'all' || this.searchQuery) ? `
             <button class="btn btn-secondary" style="font-size: 11px; padding: 4px 10px; margin-left: auto;" onclick="window.siteAuditsEngine.clearFilters()">
               ✕ Clear Filters
             </button>
@@ -782,6 +835,11 @@ class SiteAuditsEngine {
     this.render();
   }
 
+  setInspectorFilter(key) {
+    this.selectedInspector = (key !== 'all' && this.selectedInspector === key) ? 'all' : key;
+    this.render();
+  }
+
   setCorrectionFilter(val) {
     this.selectedCorrectionFilter = val;
     this.render();
@@ -803,6 +861,7 @@ class SiteAuditsEngine {
   clearFilters() {
     this.selectedLocation = 'all';
     this.selectedForeman = 'all';
+    this.selectedInspector = 'all';
     this.selectedCorrectionFilter = 'all';
     this.searchQuery = '';
     const searchEl = document.getElementById('site-audits-search-input');
