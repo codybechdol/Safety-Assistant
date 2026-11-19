@@ -32,6 +32,8 @@ class SheetNavigator {
     } catch { /* ignore */ }
     this.employeeViewMode = savedEmpView;
     this.editingCrewBaseJob = null;
+    this.editingNotesBaseJob = null;
+    this.editingNotesDraft = '';
 
     let savedCertsView = 'cards';
     try {
@@ -6079,7 +6081,7 @@ class SheetNavigator {
     const stat = String(r['Status'] || '').toLowerCase().trim();
     const job = String(r['Job Number'] || r['Job #'] || '').toLowerCase().trim();
     if (loc === 'previous employee' || loc.includes('previous') ||
-        (!loc && (stat === 'previous employee' || stat.includes('inactive') || stat.includes('terminated'))) ||
+        stat === 'previous employee' || stat.includes('previous') || stat.includes('inactive') || stat.includes('terminated') ||
         job.includes('previous') || (job.startsWith('002-') && (eName.includes('lost') || eName.includes('destroyed'))) || eName.includes('former')) {
       return true;
     }
@@ -8594,6 +8596,10 @@ class SheetNavigator {
       tableData = this.db.getTable('employees') || { headers: [], rows: [] };
     }
 
+    const prevWrapper = container.querySelector ? container.querySelector('.employee-cards-wrapper') : null;
+    const prevScrollTop = prevWrapper ? prevWrapper.scrollTop : 0;
+    const prevScrollLeft = prevWrapper ? prevWrapper.scrollLeft : 0;
+
     const jobTable = this.db ? this.db.getTable('job_tracking') : null;
     const jtRows = (jobTable && jobTable.rows) || [];
     const prevEmpNames = this.getPreviousEmployeeNamesSet();
@@ -8627,6 +8633,7 @@ class SheetNavigator {
           if (c.schedule && !bestMatch.schedule) bestMatch.schedule = c.schedule;
           if (c.status && !bestMatch.status) bestMatch.status = c.status;
           if (c.crewType && !bestMatch.crewType) bestMatch.crewType = c.crewType;
+          if (c.notes && !bestMatch.notes) bestMatch.notes = c.notes;
         }
       }
       if (cleanTarget === '031-27' && (!bestMatch?.jobName || bestMatch.jobName.toLowerCase() === '031-27')) {
@@ -8670,7 +8677,8 @@ class SheetNavigator {
           jtMetaMap.set(jn, {
             jobName: String(j['Job Name'] || '').toLowerCase(),
             location: String(j['Location'] || '').toLowerCase(),
-            foreman: String(j['Foreman'] || '').toLowerCase()
+            foreman: String(j['Foreman'] || '').toLowerCase(),
+            notes: String(j['Notes'] || '').toLowerCase()
           });
         }
       });
@@ -8682,13 +8690,13 @@ class SheetNavigator {
         });
         if (matchesEmployeeVal) return true;
 
-        // Check if employee's job number matches a job_tracking Job Name, location, or foreman
+        // Check if employee's job number matches a job_tracking Job Name, location, foreman, or notes
         const job = String(r['Job Number'] || r['Job #'] || '').replace(/\.\d+.*$/, '').trim().toLowerCase();
         const secJob = String(r['Secondary Job Number'] || r['Secondary Job #'] || '').replace(/\.\d+.*$/, '').trim().toLowerCase();
         const meta1 = job ? jtMetaMap.get(job) : null;
         const meta2 = secJob ? jtMetaMap.get(secJob) : null;
-        if (meta1 && (meta1.jobName.includes(searchTerm) || meta1.location.includes(searchTerm) || meta1.foreman.includes(searchTerm))) return true;
-        if (meta2 && (meta2.jobName.includes(searchTerm) || meta2.location.includes(searchTerm) || meta2.foreman.includes(searchTerm))) return true;
+        if (meta1 && (meta1.jobName.includes(searchTerm) || meta1.location.includes(searchTerm) || meta1.foreman.includes(searchTerm) || meta1.notes.includes(searchTerm))) return true;
+        if (meta2 && (meta2.jobName.includes(searchTerm) || meta2.location.includes(searchTerm) || meta2.foreman.includes(searchTerm) || meta2.notes.includes(searchTerm))) return true;
 
         return false;
       });
@@ -8873,10 +8881,7 @@ class SheetNavigator {
       if (!baseJob || baseJob.toLowerCase() === 'job number' || baseJob.toLowerCase() === 'job #' || baseJob.startsWith('002')) return;
 
       // Find matching job_tracking row
-      let jt = jtRows.find(j => {
-        const jn = String(j['Job Number'] || j['Job #'] || '').trim();
-        return jn === baseJob || jn.replace(/\.\d+.*$/, '').trim() === baseJob;
-      });
+      let jt = this._findJobTrackingRow(jtRows, baseJob);
       const plannedMeta = lookupPlannedCrewMeta(baseJob);
       if (jt && plannedMeta && plannedMeta.jobName && (!jt['Job Name'] || String(jt['Job Name']).trim() === '' || String(jt['Job Name']).trim() === baseJob)) {
         jt['Job Name'] = plannedMeta.jobName;
@@ -8923,6 +8928,7 @@ class SheetNavigator {
       if ((!jobName || jobName.toLowerCase() === baseJob.toLowerCase()) && plannedMeta?.jobName) {
         jobName = String(plannedMeta.jobName).trim();
       }
+      const crewNotes = jt ? this._getJobTrackingNotes(jt) : String(plannedMeta?.notes || '').trim();
 
       // Helper: match foreman name against an employee, including their alternate names.
       // Handles cases where JT stores a nickname (Matt) but the employee row uses the full name (Matthew)
@@ -9024,6 +9030,7 @@ class SheetNavigator {
         crewType,
         schedule,
         jobName,
+        notes: crewNotes,
         isSkipSun, isSkipMon, isSkipTue, isSkipWed, isSkipThu, isSkipFri, isSkipSat,
         skipMtg, skipChk,
         members,
@@ -9125,8 +9132,9 @@ class SheetNavigator {
 
     // Helper for rendering a single employee row inside a card
     const renderMemberRow = (e, isLead = false, baseJob = '') => {
-      // Check if employee was a confirmed moved employee in a published plan (carries yellow highlighting)
-      const isYellowConfirmedMove = Boolean(this.isEmployeeConfirmedYellowMove(e.name, this.selectedEmployeeWeek));
+      const hasSecondJob = Boolean((e.isSecondaryMember && e.primaryJobNumber) || e.secondaryJob);
+      // 2nd-job / split-crew members render in cyan/teal rather than the yellow "Moved for the week" highlight
+      const isYellowConfirmedMove = Boolean(!hasSecondJob && this.isEmployeeConfirmedYellowMove(e.name, this.selectedEmployeeWeek));
       const yellowMoveBadge = isYellowConfirmedMove
         ? `<span class="badge" style="background: rgba(234, 179, 8, 0.2); color: #fde047; border: 1px solid rgba(234, 179, 8, 0.45); font-size: 9.5px; font-weight: 800; padding: 1px 5px; border-radius: 3px;" title="Confirmed crew move from Crew Structure Planning">🟡 Moved</span>`
         : '';
@@ -9148,10 +9156,14 @@ class SheetNavigator {
         ? `<span class="badge" style="background: rgba(52, 211, 153, 0.16); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.4); font-size: 9.5px; font-weight: 700; padding: 1px 5px; border-radius: 3px;" title="On Light Duty — Also listed in the Light Duty status section">🩺 Light Duty</span>`
         : '';
 
-      const rowBg = isYellowConfirmedMove ? 'background: rgba(234, 179, 8, 0.12);' : '';
+      const rowBg = isYellowConfirmedMove
+        ? 'background: rgba(234, 179, 8, 0.12);'
+        : (hasSecondJob ? 'background: rgba(6, 182, 212, 0.12);' : '');
       const rowBorder = isYellowConfirmedMove
         ? 'border: 1px solid rgba(234, 179, 8, 0.35); border-left: 3.5px solid #facc15;'
-        : 'border-bottom: 1px dashed rgba(255,255,255,0.06);';
+        : (hasSecondJob
+          ? 'border: 1px solid rgba(34, 211, 238, 0.42); border-left: 3.5px solid #06b6d4;'
+          : 'border-bottom: 1px dashed rgba(255,255,255,0.06);');
 
       // Secondary / Primary job badge logic:
       // If one crew is Active and the other is Pending Start / On Hold, the Active crew is always the 1st (working) job,
@@ -9197,17 +9209,27 @@ class SheetNavigator {
         secondJobPill = `
           <span class="badge second-job-pill" 
                 onclick="event.stopPropagation(); window.sheetNavigator.promptEditSecondJob('${this.escapeJs(e.name)}', '${this.escapeJs(baseJob)}', ${Boolean(e.isSecondaryMember)})"
-                style="background: rgba(245, 158, 11, 0.18); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.45); font-size: 9.5px; font-weight: 700; padding: 1px 6px; border-radius: 3px; cursor: pointer; transition: all 0.15s ease; display: inline-flex; align-items: center; gap: 3px;"
-                onmouseover="this.style.background='rgba(245, 158, 11, 0.35)'; this.style.borderColor='#f59e0b';"
-                onmouseout="this.style.background='rgba(245, 158, 11, 0.18)'; this.style.borderColor='rgba(245, 158, 11, 0.45)';"
+                style="background: rgba(6, 182, 212, 0.22); color: #67e8f9; border: 1px solid rgba(34, 211, 238, 0.55); font-size: 9.5px; font-weight: 700; padding: 1px 6px; border-radius: 3px; cursor: pointer; transition: all 0.15s ease; display: inline-flex; align-items: center; gap: 3px;"
+                onmouseover="this.style.background='rgba(6, 182, 212, 0.38)'; this.style.borderColor='#22d3ee';"
+                onmouseout="this.style.background='rgba(6, 182, 212, 0.22)'; this.style.borderColor='rgba(34, 211, 238, 0.55)';"
                 title="${this.escapeHtml(pillTitle)}${otherCrewName ? ' — ' + this.escapeHtml(otherCrewName) : ''} — Click to edit, swap, or remove 1st/2nd job">
             ⚡ ${pillType}: ${this.escapeHtml(otherDisplayLabel)} <span style="font-size: 8.5px; opacity: 0.85;">✏️</span>
           </span>
         `;
       }
 
+      const rowStatusClass = isYellowConfirmedMove
+        ? 'member-row-yellow'
+        : (hasSecondJob ? 'member-row-second-job' : '');
+      const rowHoverBg = isYellowConfirmedMove
+        ? 'rgba(234, 179, 8, 0.22)'
+        : (hasSecondJob ? 'rgba(6, 182, 212, 0.22)' : 'rgba(255,255,255,0.04)');
+      const rowRestBg = isYellowConfirmedMove
+        ? 'rgba(234, 179, 8, 0.12)'
+        : (hasSecondJob ? 'rgba(6, 182, 212, 0.12)' : 'transparent');
+
       return `
-        <div class="crew-member-row ${isYellowConfirmedMove ? 'member-row-yellow' : ''}"
+        <div class="crew-member-row ${rowStatusClass}"
              draggable="true"
              data-emp-name="${this.escapeHtml(e.name)}"
              data-job-number="${this.escapeHtml(e.jobNumber || '')}"
@@ -9216,8 +9238,8 @@ class SheetNavigator {
              data-primary-job="${this.escapeHtml(e.primaryJobNumber || e.jobNumber || '')}"
              data-location="${this.escapeHtml(e.location || '')}"
              style="display: flex; justify-content: space-between; align-items: center; padding: 5px 6px; ${rowBorder} ${rowBg} gap: 6px; border-radius: 4px; transition: background 0.15s ease; cursor: grab;"
-             onmouseover="this.style.background='${isYellowConfirmedMove ? 'rgba(234, 179, 8, 0.22)' : 'rgba(255,255,255,0.04)'}';"
-             onmouseout="this.style.background='${isYellowConfirmedMove ? 'rgba(234, 179, 8, 0.12)' : 'transparent'}';">
+             onmouseover="this.style.background='${rowHoverBg}';"
+             onmouseout="this.style.background='${rowRestBg}';">
           <div style="display: flex; align-items: center; gap: 5px; flex-wrap: wrap; flex: 1; min-width: 0;">
             <span class="drag-handle" style="cursor: grab; color: var(--text-muted); font-size: 13px; user-select: none; padding: 0 2px;" title="Drag to move this employee to another crew • Hold Alt/Ctrl+Drag to duplicate">
               ⠿
@@ -9575,6 +9597,12 @@ class SheetNavigator {
                   <span>Skip Monthly Checklist</span>
                 </label>
               </div>
+
+              <div>
+                <label style="font-size: 10.5px; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 3px;">📝 Crew Notes</label>
+                <textarea id="edit-crew-notes-${this.escapeHtml(crew.baseJob)}" rows="2" placeholder="Optional notes displayed at the bottom of this crew's card..."
+                          style="width: 100%; box-sizing: border-box; padding: 5px 8px; font-size: 11.5px; line-height: 1.4; background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: 4px; color: var(--text-primary); resize: vertical; font-family: inherit;">${this.escapeHtml(crew.notes || '')}</textarea>
+              </div>
             </div>
 
             <!-- Member List inside edit mode -->
@@ -9700,7 +9728,7 @@ class SheetNavigator {
           </div>
 
           <!-- Member List (Drop Zone) -->
-          <div class="crew-drop-zone" data-crew-job="${this.escapeHtml(crew.baseJob)}" style="flex: 1; font-size: 12px; min-height: 48px; border-radius: 6px; padding: 2px;">
+          <div class="crew-drop-zone" data-crew-job="${this.escapeHtml(crew.baseJob)}" style="font-size: 12px; min-height: 48px; border-radius: 6px; padding: 2px;">
             ${crew.members.length > 0 ? crew.members.map(e => {
               const isLead = crew.nameMatchesForeman ? crew.nameMatchesForeman(e, crew.foreman) : (crew.foreman && e.name.toLowerCase() === crew.foreman.toLowerCase());
               return renderMemberRow(e, isLead, crew.baseJob, Boolean(e.isSecondaryMember));
@@ -9710,6 +9738,7 @@ class SheetNavigator {
               </div>
             `}
           </div>
+          ${this.renderLiveCrewNotesFooter(crew, searchTerm)}
         </div>
       `;
     };
@@ -9802,6 +9831,13 @@ class SheetNavigator {
 
       </div>
     `;
+
+    // Restore scroll position when re-rendering cards (e.g. opening/saving inline crew notes)
+    const newWrapper = container.querySelector ? container.querySelector('.employee-cards-wrapper') : null;
+    if (newWrapper) {
+      if (prevScrollTop > 0) newWrapper.scrollTop = prevScrollTop;
+      if (prevScrollLeft > 0) newWrapper.scrollLeft = prevScrollLeft;
+    }
 
     // Attach interactive drag & drop and card events
     this.attachCrewCardInteractiveHandlers(container);
@@ -11060,11 +11096,10 @@ class SheetNavigator {
 
   async saveCrewCardEdit(baseJob) {
     const jtTable = this.db.getTable('job_tracking');
-    if (!jtTable || !jtTable.rows) return;
-    const jt = jtTable.rows.find(j => {
-      const jn = String(j['Job Number'] || j['Job #'] || '').trim();
-      return jn === baseJob || jn.replace(/\.\d+.*$/, '').trim() === baseJob;
-    });
+    if (!jtTable) return;
+    if (!jtTable.rows) jtTable.rows = [];
+    const jt = this._findJobTrackingRow(jtTable.rows, baseJob);
+    const notesHeader = this._ensureJobTrackingNotesHeader(jtTable);
 
     const locInput = document.getElementById(`edit-crew-loc-${baseJob}`);
     const statusSelect = document.getElementById(`edit-crew-status-${baseJob}`);
@@ -11095,6 +11130,8 @@ class SheetNavigator {
 
     const skipMtg = document.getElementById(`edit-skip-mtg-${baseJob}`)?.checked || false;
     const skipChk = document.getElementById(`edit-skip-chk-${baseJob}`)?.checked || false;
+    const notesEl = document.getElementById(`edit-crew-notes-${baseJob}`);
+    const newNotes = notesEl ? notesEl.value.trim() : this._getJobTrackingNotes(jt);
     const todayFormatted = new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
 
     const oldLoc = jt ? String(jt['Location'] || '').trim() : '';
@@ -11115,6 +11152,8 @@ class SheetNavigator {
       jt['Skip Sun'] = isSkipSun;
       jt['Skip Weekly Meeting'] = skipMtg;
       jt['Skip Monthly Checklist'] = skipChk;
+      jt[notesHeader] = newNotes;
+      jt['Notes'] = newNotes;
       jt['Last Updated'] = todayFormatted;
 
       const jtRowIdx = jt._rowIdx || (jtTable.rows.indexOf(jt) + 2);
@@ -11144,6 +11183,7 @@ class SheetNavigator {
           'Skip Sun': isSkipSun,
           'Skip Weekly Meeting': skipMtg,
           'Skip Monthly Checklist': skipChk,
+          'Notes': newNotes,
           'Last Updated': todayFormatted
         }
       });
@@ -11193,6 +11233,7 @@ class SheetNavigator {
         'Skip Sun': isSkipSun,
         'Skip Weekly Meeting': skipMtg,
         'Skip Monthly Checklist': skipChk,
+        'Notes': newNotes,
         'Last Updated': todayFormatted
       };
       jtTable.rows.push(newJtRow);
@@ -11249,6 +11290,265 @@ class SheetNavigator {
     this.renderCurrentSheet();
     if (typeof window.showToast === 'function') {
       window.showToast(`✅ Saved changes for Job ${baseJob}`);
+    }
+  }
+
+  /**
+   * Resolves a Job Tracking row matching baseJob (exact match first, then suffix-stripped match).
+   */
+  _findJobTrackingRow(jtRows, baseJob) {
+    if (!Array.isArray(jtRows) || !baseJob) return null;
+    const targetClean = String(baseJob).trim().toLowerCase();
+    const exactMatch = jtRows.find(j => String(j['Job Number'] || j['Job #'] || '').trim().toLowerCase() === targetClean);
+    if (exactMatch) return exactMatch;
+    return jtRows.find(j => String(j['Job Number'] || j['Job #'] || '').trim().replace(/\.\d+.*$/, '').trim().toLowerCase() === targetClean) || null;
+  }
+
+  /**
+   * Reads the Crew Notes field from a Job Tracking row, supporting case variants.
+   */
+  _getJobTrackingNotes(jtRow) {
+    if (!jtRow || typeof jtRow !== 'object') return '';
+    const direct = jtRow['Notes'] ?? jtRow['notes'] ?? jtRow['Note'] ?? jtRow['Crew Notes'];
+    if (direct !== undefined && direct !== null) return String(direct).trim();
+    const matchedKey = Object.keys(jtRow).find(k => /^notes?$/i.test(String(k || '').trim()));
+    return matchedKey ? String(jtRow[matchedKey] || '').trim() : '';
+  }
+
+  /**
+   * Resolves (or adds if missing) the Notes column header on job_tracking so rawGrid sync preserves notes.
+   */
+  _ensureJobTrackingNotesHeader(jtTable) {
+    if (!jtTable) return 'Notes';
+    if (!Array.isArray(jtTable.headers)) jtTable.headers = [];
+    const existing = jtTable.headers.find(h => /^notes?$/i.test(String(h || '').trim()));
+    if (existing) return existing;
+    jtTable.headers.push('Notes');
+    if (Array.isArray(jtTable.rawGrid) && Array.isArray(jtTable.rawGrid[0])) {
+      jtTable.rawGrid[0].push('Notes');
+      for (let r = 1; r < jtTable.rawGrid.length; r++) {
+        if (Array.isArray(jtTable.rawGrid[r]) && jtTable.rawGrid[r].length < jtTable.headers.length) {
+          jtTable.rawGrid[r].push('');
+        }
+      }
+    }
+    return 'Notes';
+  }
+
+  /**
+   * Renders the Crew Notes section at the bottom of a live field crew card.
+   */
+  renderLiveCrewNotesFooter(crew, searchTerm = '') {
+    const baseJob = String(crew?.baseJob || '').trim();
+    const notesText = String(crew?.notes || '').trim();
+    const isReadOnly = typeof window !== 'undefined' && window.currentRoleMode === 'view_only';
+    const isEditing = !isReadOnly && this.editingNotesBaseJob === baseJob;
+    const isMatch = Boolean(searchTerm && notesText.toLowerCase().includes(searchTerm));
+
+    if (isEditing) {
+      const draftText = this.editingNotesDraft !== undefined ? this.editingNotesDraft : notesText;
+      return `
+        <div class="crew-notes-footer"
+             draggable="false"
+             onclick="event.stopPropagation()"
+             ondragstart="event.preventDefault(); event.stopPropagation();"
+             style="margin-top: 8px; padding: 8px; background: var(--bg-primary); border: 1px solid rgba(245, 158, 11, 0.5); border-radius: 6px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px; gap: 6px;">
+            <span style="font-size: 10.5px; font-weight: 700; color: #fbbf24;">📝 Crew Notes</span>
+            <span style="font-size: 9.5px; color: var(--text-muted);">Ctrl+Enter to save · Esc to cancel</span>
+          </div>
+          <textarea id="live-crew-notes-input-${this.escapeHtml(baseJob)}"
+                    rows="3"
+                    draggable="false"
+                    placeholder="Add crew notes for ${this.escapeHtml(baseJob)}..."
+                    oninput="window.sheetNavigator.editingNotesDraft = this.value;"
+                    onkeydown="if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); event.stopPropagation(); window.sheetNavigator.saveLiveCrewNotes('${this.escapeJs(baseJob)}'); } else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); window.sheetNavigator.cancelLiveCrewNotes(); }"
+                    style="width: 100%; box-sizing: border-box; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 5px; padding: 6px 8px; color: var(--text-primary); font-size: 11.5px; line-height: 1.4; resize: vertical; outline: none; font-family: inherit;">${this.escapeHtml(draftText)}</textarea>
+          <div style="display: flex; justify-content: space-between; align-items: center; gap: 6px; margin-top: 6px;">
+            ${notesText ? `
+              <button type="button"
+                      class="btn btn-xs"
+                      onclick="event.stopPropagation(); window.sheetNavigator.saveLiveCrewNotes('${this.escapeJs(baseJob)}', '');"
+                      style="font-size: 10.5px; padding: 3px 8px; background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.35); color: #fca5a5; border-radius: 4px; cursor: pointer;"
+                      title="Clear crew notes">
+                🗑️ Clear
+              </button>
+            ` : '<span></span>'}
+            <div style="display: flex; gap: 6px;">
+              <button type="button"
+                      class="btn btn-xs btn-secondary"
+                      onclick="event.stopPropagation(); window.sheetNavigator.cancelLiveCrewNotes();"
+                      style="font-size: 10.5px; padding: 3px 9px; cursor: pointer;">
+                Cancel
+              </button>
+              <button type="button"
+                      class="btn btn-xs"
+                      onclick="event.stopPropagation(); window.sheetNavigator.saveLiveCrewNotes('${this.escapeJs(baseJob)}');"
+                      style="font-size: 10.5px; font-weight: 700; padding: 3px 10px; background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); border: none; color: #0f172a; border-radius: 4px; cursor: pointer;">
+                💾 Save Notes
+              </button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    if (notesText) {
+      const clickAttr = isReadOnly
+        ? ''
+        : `onclick="event.stopPropagation(); window.sheetNavigator.startLiveCrewNotes('${this.escapeJs(baseJob)}')"`;
+      return `
+        <div class="crew-notes-footer"
+             draggable="false"
+             ${clickAttr}
+             ondragstart="event.preventDefault(); event.stopPropagation();"
+             style="margin-top: 8px; padding: 6px 8px; background: rgba(245, 158, 11, 0.08); border: 1px solid ${isMatch ? '#f59e0b' : 'rgba(245, 158, 11, 0.25)'}; border-left: 3px solid #f59e0b; border-radius: 5px; ${isReadOnly ? '' : 'cursor: pointer;'}"
+             ${isReadOnly ? '' : 'title="Click to edit crew notes"'}>
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 3px; gap: 6px;">
+            <span style="font-size: 10px; font-weight: 700; color: #fbbf24; text-transform: uppercase; letter-spacing: 0.4px; display: inline-flex; align-items: center; gap: 4px;">
+              📝 Crew Notes
+              ${isMatch ? `<span class="badge" style="background: #f59e0b; color: #000; font-size: 9px; font-weight: 800; padding: 0 4px; border-radius: 3px;">🔍 Match</span>` : ''}
+            </span>
+            ${isReadOnly ? '' : '<span style="font-size: 10px; color: var(--text-muted);">✏️ Edit</span>'}
+          </div>
+          <div style="font-size: 11.5px; color: var(--text-primary); line-height: 1.4; white-space: pre-wrap; word-break: break-word;">${this.escapeHtml(notesText)}</div>
+        </div>
+      `;
+    }
+
+    if (isReadOnly) return '';
+
+    return `
+      <div class="crew-notes-footer" draggable="false" style="margin-top: 6px; padding-top: 5px; border-top: 1px dashed rgba(255,255,255,0.08);">
+        <button type="button"
+                class="btn btn-xs"
+                onclick="event.stopPropagation(); window.sheetNavigator.startLiveCrewNotes('${this.escapeJs(baseJob)}')"
+                style="width: 100%; background: rgba(255,255,255,0.02); border: 1px dashed rgba(255,255,255,0.14); color: var(--text-muted); font-size: 11px; font-weight: 600; padding: 4px 8px; border-radius: 5px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 5px;"
+                title="Add notes for Crew ${this.escapeHtml(baseJob)}">
+          <span>📝</span> + Add Crew Notes
+        </button>
+      </div>
+    `;
+  }
+
+  startLiveCrewNotes(baseJob) {
+    if (typeof window !== 'undefined' && window.currentRoleMode === 'view_only') return;
+    const jtTable = this.db?.getTable('job_tracking');
+    const jt = this._findJobTrackingRow(jtTable?.rows, baseJob);
+
+    this.editingNotesBaseJob = baseJob;
+    this.editingNotesDraft = jt ? this._getJobTrackingNotes(jt) : '';
+    this.renderCurrentSheet();
+
+    if (typeof document !== 'undefined') {
+      const focusEl = () => {
+        const el = document.getElementById('live-crew-notes-input-' + baseJob);
+        if (el) {
+          try {
+            el.focus({ preventScroll: true });
+          } catch {
+            el.focus();
+          }
+          if (typeof el.setSelectionRange === 'function') {
+            const len = el.value.length;
+            el.setSelectionRange(len, len);
+          }
+        }
+      };
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(focusEl);
+      } else {
+        setTimeout(focusEl, 0);
+      }
+    }
+  }
+
+  cancelLiveCrewNotes() {
+    this.editingNotesBaseJob = null;
+    this.editingNotesDraft = '';
+    this.renderCurrentSheet();
+  }
+
+  async saveLiveCrewNotes(baseJob, explicitValue) {
+    if (typeof window !== 'undefined' && window.currentRoleMode === 'view_only') return;
+    const jtTable = this.db?.getTable('job_tracking');
+    if (!jtTable) return;
+    if (!jtTable.rows) jtTable.rows = [];
+
+    let nextNotes = '';
+    if (explicitValue !== undefined) {
+      nextNotes = String(explicitValue || '').trim();
+    } else {
+      const inputEl = typeof document !== 'undefined'
+        ? document.getElementById('live-crew-notes-input-' + baseJob)
+        : null;
+      nextNotes = String(inputEl ? inputEl.value : (this.editingNotesDraft || '')).trim();
+    }
+
+    const notesHeader = this._ensureJobTrackingNotesHeader(jtTable);
+    const jt = this._findJobTrackingRow(jtTable.rows, baseJob);
+    const todayFormatted = new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
+
+    if (jt) {
+      jt[notesHeader] = nextNotes;
+      jt['Notes'] = nextNotes;
+      jt['Last Updated'] = todayFormatted;
+      const jtRowIdx = jt._rowIdx || (jtTable.rows.indexOf(jt) + 2);
+      if (typeof this.db.syncRowToRawGrid === 'function') {
+        this.db.syncRowToRawGrid(jtTable, jt);
+      } else if (jtTable.rawGrid && jtTable.rawGrid[jtRowIdx - 1] && Array.isArray(jtTable.headers)) {
+        jtTable.rawGrid[jtRowIdx - 1] = jtTable.headers.map(h => jt[h] !== undefined ? jt[h] : '');
+      }
+      await this.db.addMutation({
+        action: 'UPDATE_ROW',
+        sheetName: jtTable.name || 'Job Tracking',
+        tableKey: 'job_tracking',
+        itemIdentifier: String(jt['Job Number'] || jt['Job #'] || baseJob).trim(),
+        row: jtRowIdx,
+        updatedFields: {
+          [notesHeader]: nextNotes,
+          'Notes': nextNotes,
+          'Last Updated': todayFormatted
+        }
+      });
+    } else {
+      const newJtRow = {
+        'Job Number': baseJob,
+        'Job Name': baseJob,
+        'Location': 'Helena',
+        'Status': 'Active',
+        [notesHeader]: nextNotes,
+        'Notes': nextNotes,
+        'Last Updated': todayFormatted
+      };
+      jtTable.rows.push(newJtRow);
+      newJtRow._rowIdx = jtTable.rows.length + 1;
+      if (jtTable.rawGrid && Array.isArray(jtTable.headers)) {
+        jtTable.rawGrid.push(jtTable.headers.map(h => newJtRow[h] !== undefined ? newJtRow[h] : ''));
+      }
+      await this.db.addMutation({
+        action: 'ADD_ROW',
+        sheetName: jtTable.name || 'Job Tracking',
+        tableKey: 'job_tracking',
+        itemIdentifier: baseJob,
+        row: newJtRow._rowIdx,
+        rowData: newJtRow
+      });
+    }
+
+    if (this.db._dirtyTablesForSync && typeof this.db._dirtyTablesForSync.add === 'function') {
+      this.db._dirtyTablesForSync.add('job_tracking');
+    }
+
+    this.editingNotesBaseJob = null;
+    this.editingNotesDraft = '';
+    await this.db.persistSnapshot(this.db.snapshot);
+    this.renderCurrentSheet();
+    if (typeof window !== 'undefined' && typeof window.showToast === 'function') {
+      window.showToast(
+        nextNotes ? `📝 Saved notes for Job ${baseJob}` : `🗑️ Cleared notes for Job ${baseJob}`,
+        'info'
+      );
     }
   }
 
