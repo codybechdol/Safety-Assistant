@@ -2376,6 +2376,16 @@ class EmployeeProfileEngine {
       });
     }
 
+    // 10b. Site Audits
+    if (canSee('site-audits-view')) {
+      functions.push({
+        icon: '📋',
+        title: 'Project Site Audits',
+        mode: canEdit('site-audits-view') ? 'Can Log & Review Audits' : 'View Only',
+        desc: 'Inspect field site audit reports, job coverage, foreman notes, corrective actions, and attached site photos.'
+      });
+    }
+
     // 11. Procurement & POs
     if (canSee('procurement-view')) {
       functions.push({

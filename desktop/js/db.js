@@ -2567,6 +2567,8 @@ class LocalDatabase {
       'drug_test_clinics': 'drug_test_clinics',
       'incident reports': 'incident_reports',
       'incident_reports': 'incident_reports',
+      'site audits': 'site_audits',
+      'site_audits': 'site_audits',
       'expiring certs': 'expiring_certs',
       'expiring_certs': 'expiring_certs',
       'training tracking': 'training_tracking',
@@ -2637,7 +2639,9 @@ class LocalDatabase {
       'drug_test_clinics': 'Drug Test Clinics',
       'drug test clinics': 'Drug Test Clinics',
       'incident_reports': 'Incident Reports',
-      'incident reports': 'Incident Reports'
+      'incident reports': 'Incident Reports',
+      'site_audits': 'Site Audits',
+      'site audits': 'Site Audits'
     };
     if (map[clean]) return map[clean];
     if (this.snapshot && this.snapshot.tables && this.snapshot.tables[clean]) {

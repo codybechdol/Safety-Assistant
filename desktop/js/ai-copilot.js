@@ -694,6 +694,7 @@ class AICopilotEngine {
                   'crew-import-view',
                   'safety-compliance-view',
                   'incident-reports-view',
+                  'site-audits-view',
                   'expiring-certs-view',
                   'training-view',
                   'drug-testing-view',

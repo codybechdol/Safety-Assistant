@@ -682,6 +682,54 @@ class WeeklySummaryEngine {
       recentIncidents.sort((a, b) => b.dt.getTime() - a.dt.getTime());
     }
 
+    // 6b. Recent Site Audits (past 14 days)
+    const recentSiteAudits = [];
+    let auditItems = [];
+    if (window.siteAuditsEngine && typeof window.siteAuditsEngine.loadAudits === 'function') {
+      auditItems = window.siteAuditsEngine.loadAudits();
+    } else {
+      const saTable = this.db ? this.db.getTable('site_audits') : null;
+      if (saTable && Array.isArray(saTable.rows)) {
+        auditItems = saTable.rows.map(r => ({
+          dateObj: this.parseDate(r['Audit Date'] || r['Date Received'] || r['Date']),
+          jobNumber: String(r['Job #'] || r['Job Number'] || '—').replace(/^job\s*#?\s*/i, '').trim(),
+          locationPrimary: String(r['Location'] || '—').trim(),
+          locationDisplay: String(r['Location'] || '—').trim(),
+          foremanDisplay: String(r['Foreman'] || '—').trim(),
+          inspector: String(r['Inspector'] || '').trim(),
+          siteInspection: String(r['Site Inspection'] || '').trim(),
+          correctionsNeeded: String(r['Corrections Needed'] || '').trim(),
+          hasCorrections: /^yes\b/i.test(String(r['Corrections Needed'] || '').trim()),
+          photoCount: parseInt(r['Photo Count'] || 0, 10) || 0
+        }));
+      }
+    }
+
+    if (Array.isArray(auditItems)) {
+      auditItems.forEach(sa => {
+        const dt = sa.dateObj instanceof Date ? sa.dateObj : this.parseDate(sa.auditDate || sa.dateReceived);
+        if (dt && dt >= fourteenDaysAgo) {
+          if (this.selectedLocation !== 'all') {
+            const locLower = String(sa.locationPrimary || sa.locationDisplay || '').toLowerCase();
+            if (!locLower.includes(this.selectedLocation.toLowerCase())) return;
+          }
+          recentSiteAudits.push({
+            date: this.formatDateOnly(dt),
+            dt,
+            job: sa.jobNumber || '—',
+            location: sa.locationDisplay || sa.locationPrimary || '—',
+            foreman: sa.foremanDisplay || sa.foremanPrimary || '—',
+            inspector: sa.inspector || '',
+            summary: sa.siteInspection || 'Site audit completed.',
+            correctionsNeeded: sa.correctionsNeeded || 'No',
+            hasCorrections: !!sa.hasCorrections,
+            hasPhotos: (sa.photoCount > 0)
+          });
+        }
+      });
+      recentSiteAudits.sort((a, b) => b.dt.getTime() - a.dt.getTime());
+    }
+
     // 7. Notification Recipients (from Notification Emails column on Employees page)
     const recipientsData = this.getNotificationRecipients();
 
@@ -1134,7 +1182,8 @@ class WeeklySummaryEngine {
         totalExpiring: certsUrgent.length + certsUpcoming.length
       },
       training: trainingThisWeek,
-      incidents: recentIncidents
+      incidents: recentIncidents,
+      siteAudits: recentSiteAudits
     };
   }
 
@@ -1290,6 +1339,20 @@ class WeeklySummaryEngine {
               Past 14 days (tablet reports)
             </div>
           </div>
+
+          <!-- Recent Site Audits Card -->
+          <div onclick="if(window.navigateToView){window.navigateToView('site-audits-view');}" style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 8px; padding: 14px 16px; cursor: pointer; transition: transform 0.15s, border-color 0.15s;" onmouseover="this.style.borderColor='#38bdf8'" onmouseout="this.style.borderColor='var(--border-color)'">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+              <span style="font-size: 11px; font-weight: 700; color: #94a3b8; text-transform: uppercase;">Site Audits</span>
+              <span style="font-size: 16px;">📋</span>
+            </div>
+            <div style="font-size: 24px; font-weight: 800; color: #38bdf8;">
+              ${data.siteAudits.length}
+            </div>
+            <div style="font-size: 11px; color: #64748b; margin-top: 4px;">
+              Past 14 days (${data.siteAudits.filter(s => s.hasCorrections).length} with corrections)
+            </div>
+          </div>
         </div>
 
         <!-- Section 0: Planned Tasks & Field Itinerary (Trip Planner) -->
@@ -1436,6 +1499,26 @@ class WeeklySummaryEngine {
 
           <div style="padding: 16px;">
             ${this.renderIncidentsSectionHtml(data.incidents)}
+          </div>
+        </div>
+
+        <!-- Section 5: Recent Site Audits Digest -->
+        <div style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden;">
+          <div style="padding: 14px 18px; background: rgba(30, 41, 59, 0.7); border-bottom: 1px solid var(--border-color); display: flex; justify-content: space-between; align-items: center;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span style="font-size: 16px;">📋</span>
+              <h3 style="font-size: 14px; font-weight: 700; margin: 0; color: #f8fafc;">Recent Site Audits (Past 14 Days)</h3>
+              <span class="brand-badge" style="background: rgba(56, 189, 248, 0.2); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, 0.4);">
+                ${data.siteAudits.length} Completed
+              </span>
+            </div>
+            <button class="btn btn-secondary" onclick="if(window.navigateToView){window.navigateToView('site-audits-view');}" style="font-size: 11.5px; padding: 4px 10px;">
+              Open Site Audits →
+            </button>
+          </div>
+
+          <div style="padding: 16px;">
+            ${this.renderSiteAuditsSectionHtml(data.siteAudits)}
           </div>
         </div>
 
@@ -1998,6 +2081,36 @@ class WeeklySummaryEngine {
           <div style="font-size: 13px; font-weight: 700; color: #f8fafc; margin-bottom: 4px;">Job ${this.escapeHtml(inc.job)} · Foreman ${this.escapeHtml(inc.foreman)}</div>
           <div style="font-size: 12px; color: #cbd5e1; line-height: 1.4;">${this.escapeHtml(inc.description)}</div>
           ${inc.hasPhotos ? '<div style="margin-top: 6px; font-size: 11px; color: #60a5fa; font-weight: 600;">📷 High-Res Photos Attached</div>' : ''}
+        </div>
+      `;
+    });
+
+    html += `</div>`;
+    return html;
+  }
+
+  renderSiteAuditsSectionHtml(audits) {
+    if (!audits || audits.length === 0) {
+      return `<div style="text-align: center; padding: 24px; color: #94a3b8; font-size: 13px;">No project site audits logged in the past 14 days.</div>`;
+    }
+
+    let html = `
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px;">
+    `;
+
+    audits.forEach(sa => {
+      html += `
+        <div style="background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 6px; padding: 12px 14px; border-left: 3px solid ${sa.hasCorrections ? '#f59e0b' : '#38bdf8'};">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+            <span style="font-size: 11px; font-weight: 700; color: #7dd3fc;">📍 ${this.escapeHtml(sa.location)}</span>
+            <span style="font-size: 11.5px; color: #94a3b8;">${this.escapeHtml(sa.date)}</span>
+          </div>
+          <div style="font-size: 13px; font-weight: 700; color: #f8fafc; margin-bottom: 4px;">Job ${this.escapeHtml(sa.job)} · Foreman ${this.escapeHtml(sa.foreman)}</div>
+          <div style="font-size: 12px; color: #cbd5e1; line-height: 1.4;">${this.escapeHtml(sa.summary)}</div>
+          <div style="margin-top: 6px; display: flex; justify-content: space-between; align-items: center; font-size: 11px;">
+            <span style="font-weight: 700; color: ${sa.hasCorrections ? '#fcd34d' : '#6ee7b7'};">${sa.hasCorrections ? '⚠️ Corrections Needed' : '✅ No Corrections'}</span>
+            ${sa.inspector ? `<span style="color: #94a3b8;">By: ${this.escapeHtml(sa.inspector)}</span>` : ''}
+          </div>
         </div>
       `;
     });
@@ -2962,6 +3075,44 @@ class WeeklySummaryEngine {
     }
 
     emailHtml += `
+      <!-- Site Audits Section -->
+      <h2 style="font-size: 15px; font-weight: 700; color: #0f172a; border-bottom: 2px solid #2563eb; padding-bottom: 6px;">📋 7. Recent Site Audits (Past 14 Days: ${data.siteAudits.length})</h2>
+    `;
+
+    if (data.siteAudits.length === 0) {
+      emailHtml += `<p style="font-size: 12.5px; color: #64748b;">No project site audits logged in the past 14 days.</p>`;
+    } else {
+      emailHtml += `
+        <table style="width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 20px;">
+          <thead>
+            <tr style="background: #f1f5f9; color: #334155; font-weight: 700; text-align: left;">
+              <th style="padding: 8px 10px; border: 1px solid #cbd5e1;">Date</th>
+              <th style="padding: 8px 10px; border: 1px solid #cbd5e1;">Job #</th>
+              <th style="padding: 8px 10px; border: 1px solid #cbd5e1;">Location</th>
+              <th style="padding: 8px 10px; border: 1px solid #cbd5e1;">Foreman</th>
+              <th style="padding: 8px 10px; border: 1px solid #cbd5e1;">Corrections</th>
+            </tr>
+          </thead>
+          <tbody>
+      `;
+      data.siteAudits.forEach(sa => {
+        emailHtml += `
+          <tr style="background: ${sa.hasCorrections ? '#fffbeb' : '#ffffff'};">
+            <td style="padding: 6px 10px; border: 1px solid #e2e8f0; font-weight: 700; color: #0284c7;">${this.escapeHtml(sa.date)}</td>
+            <td style="padding: 6px 10px; border: 1px solid #e2e8f0; font-weight: 700;">${this.escapeHtml(sa.job)}</td>
+            <td style="padding: 6px 10px; border: 1px solid #e2e8f0;">${this.escapeHtml(sa.location)}</td>
+            <td style="padding: 6px 10px; border: 1px solid #e2e8f0;">${this.escapeHtml(sa.foreman)}</td>
+            <td style="padding: 6px 10px; border: 1px solid #e2e8f0; color: ${sa.hasCorrections ? '#d97706' : '#16a34a'}; font-weight: 600;">${this.escapeHtml(sa.correctionsNeeded)}</td>
+          </tr>
+        `;
+      });
+      emailHtml += `
+          </tbody>
+        </table>
+      `;
+    }
+
+    emailHtml += `
       <div style="margin-top: 30px; padding-top: 16px; border-top: 1px solid #e2e8f0; font-size: 11px; color: #94a3b8; text-align: center;">
         Generated on demand by Safety Assistant Desktop Edition · All data originates from the offline-first repository.
       </div>
@@ -2988,7 +3139,8 @@ class WeeklySummaryEngine {
     text += `- Equipment Swaps Action Required: ${data.swaps.totalActionRequired} (${data.swaps.overdue.length} overdue, ${data.swaps.dueThisWeek.length} due this week)\n`;
     text += `- Urgent Cert Expirations (< 30d): ${data.certs.urgent.length}\n`;
     text += `- Scheduled Training Sessions: ${data.training.length}\n`;
-    text += `- Incidents Reported (Past 14d): ${data.incidents.length}\n\n`;
+    text += `- Incidents Reported (Past 14d): ${data.incidents.length}\n`;
+    text += `- Site Audits Completed (Past 14d): ${data.siteAudits.length}\n\n`;
 
     text += `PLANNED TASKS & FIELD ITINERARY (${data.plannedWeek.weekRangeStr}):\n`;
     let hasAnyPlanned = false;
@@ -3062,6 +3214,14 @@ class WeeklySummaryEngine {
       text += `RECENT INCIDENT REPORTS (PAST 14d):\n`;
       data.incidents.forEach(inc => {
         text += `• [${inc.type}] Job #${inc.job} (Foreman: ${inc.foreman}) — ${inc.date}: ${inc.description}\n`;
+      });
+      text += `\n`;
+    }
+
+    if (data.siteAudits.length > 0) {
+      text += `RECENT SITE AUDITS (PAST 14d):\n`;
+      data.siteAudits.forEach(sa => {
+        text += `• Job #${sa.job} (${sa.location}) | Foreman: ${sa.foreman} — ${sa.date} | Corrections: ${sa.correctionsNeeded}\n`;
       });
       text += `\n`;
     }

@@ -109,6 +109,26 @@ function ensureRecommendedCompanionSheetsExist(ss) {
         'Notes'
       ],
       color: '#991b1b'
+    },
+    {
+      name: typeof SHEET_SITE_AUDITS !== 'undefined' ? SHEET_SITE_AUDITS : 'Site Audits',
+      headers: [
+        'Date Received',
+        'Audit Date',
+        'Quarter',
+        'Job #',
+        'Location',
+        'Foreman',
+        'Inspector',
+        'Site Inspection',
+        'Corrections Needed',
+        'Photo Count',
+        'Email ID',
+        'PDF Filename',
+        'Status',
+        'Notes'
+      ],
+      color: '#0369a1'
     }
   ];
 
@@ -314,7 +334,8 @@ function exportFullDatabaseSnapshot(tableKeysFilter) {
     { key: 'field_gps_log', name: typeof SHEET_FIELD_GPS_LOG !== 'undefined' ? SHEET_FIELD_GPS_LOG : 'Field GPS Log' },
     { key: 'daily_accomplishments', name: typeof SHEET_DAILY_ACCOMPLISHMENTS !== 'undefined' ? SHEET_DAILY_ACCOMPLISHMENTS : 'Daily Accomplishments' },
     { key: 'system_config', name: typeof SHEET_SYSTEM_CONFIG !== 'undefined' ? SHEET_SYSTEM_CONFIG : 'System Config' },
-    { key: 'incident_reports', name: typeof SHEET_INCIDENT_REPORTS !== 'undefined' ? SHEET_INCIDENT_REPORTS : 'Incident Reports' }
+    { key: 'incident_reports', name: typeof SHEET_INCIDENT_REPORTS !== 'undefined' ? SHEET_INCIDENT_REPORTS : 'Incident Reports' },
+    { key: 'site_audits', name: typeof SHEET_SITE_AUDITS !== 'undefined' ? SHEET_SITE_AUDITS : 'Site Audits' }
   ];
 
   var tables = {};
@@ -1329,7 +1350,8 @@ function patchSyncSnapshotInDrive(sheetsModified, configsModified, extraConfigs,
       'field gps log': 'field_gps_log',
       'daily accomplishments': 'daily_accomplishments',
       'system config': 'system_config',
-      'incident reports': 'incident_reports'
+      'incident reports': 'incident_reports',
+      'site audits': 'site_audits'
     };
 
     function fastDateStr(d) {
@@ -2668,6 +2690,24 @@ function applyBatchSyncMutations(mutations, returnSnapshot, options) {
 
               var updateDupRowsToDelete = [];
               if (targetRowIdx === -1 && idStr) {
+                var emailIdColIdx = -1;
+                for (var eh = 0; eh < headers.length; eh++) {
+                  if (headers[eh].toLowerCase().trim() === 'email id') {
+                    emailIdColIdx = eh;
+                    break;
+                  }
+                }
+                if ((sheetLower === 'site audits' || sheetLower === 'incident reports') && emailIdColIdx !== -1) {
+                  for (var er = 1; er < data.length; er++) {
+                    var eVal = String(data[er][emailIdColIdx] || '').trim().toLowerCase();
+                    if (eVal && eVal === idStr) {
+                      targetRowIdx = er + 1;
+                      break;
+                    }
+                  }
+                }
+              }
+              if (targetRowIdx === -1 && idStr) {
                 var cleanId = idStr.replace(/^[#bBsS\-_]+/, '').trim();
                 var normId = normalizeEquipmentKey(idStr);
                 for (var r = 1; r < data.length; r++) {
@@ -3227,6 +3267,7 @@ function applyBatchSyncMutations(mutations, returnSnapshot, options) {
             var isInvSheet = ['gloves', 'sleeves', 'blankets', 'macks', 'hv testers', 'phasing sets', 'aed', 'grounds', 'hot sticks', 'hv_testers', 'phasing_sets', 'hot_sticks'].indexOf(sheetLower) !== -1;
             var isEmpSheet = (sheetLower === 'employees' || sheetLower === 'previous employees' || sheetLower === 'previous_employees');
             var isJtSheet = (sheetLower === 'job tracking' || sheetLower === 'job_tracking');
+            var isLogEmailSheet = (sheetLower === 'site audits' || sheetLower === 'site_audits' || sheetLower === 'incident reports' || sheetLower === 'incident_reports');
 
             var itemKey = '';
             if (isInvSheet) {
@@ -3235,6 +3276,8 @@ function applyBatchSyncMutations(mutations, returnSnapshot, options) {
               itemKey = String(mut.rowData['Name'] || mut.rowData['Employee Name'] || mut.rowData['Employee'] || mut.itemIdentifier || '').trim();
             } else if (isJtSheet) {
               itemKey = String(mut.rowData['Job Number'] || mut.rowData['Job #'] || mut.itemIdentifier || '').trim();
+            } else if (isLogEmailSheet) {
+              itemKey = String(mut.rowData['Email ID'] || mut.itemIdentifier || '').trim();
             }
 
             var existingTargetRow = -1;
@@ -3247,7 +3290,24 @@ function applyBatchSyncMutations(mutations, returnSnapshot, options) {
                 activeSheetData[sheetName] = sData;
               }
               var cleanKey = itemKey.replace(/^[#\-_]+/, '').trim().toLowerCase();
+              var emailColScanIdx = -1;
+              if (isLogEmailSheet) {
+                for (var ehScan = 0; ehScan < headers.length; ehScan++) {
+                  if (headers[ehScan].toLowerCase().trim() === 'email id') {
+                    emailColScanIdx = ehScan;
+                    break;
+                  }
+                }
+              }
               for (var rScan = 1; rScan < sData.length; rScan++) {
+                if (isLogEmailSheet) {
+                  var eScanVal = (emailColScanIdx !== -1 && sData[rScan].length > emailColScanIdx) ? String(sData[rScan][emailColScanIdx] || '').trim().toLowerCase() : '';
+                  if (eScanVal && eScanVal === itemKey.toLowerCase()) {
+                    if (existingTargetRow === -1) existingTargetRow = rScan + 1;
+                    else duplicateRowsToDelete.push(rScan + 1);
+                  }
+                  continue;
+                }
                 var c0 = String(sData[rScan][0] || '').trim().toLowerCase();
                 var c0Clean = c0.replace(/^[#\-_]+/, '').trim();
                 var isMatch = (c0 === cleanKey || c0Clean === cleanKey);
@@ -5844,6 +5904,744 @@ function scanIncidentReportEmails(options) {
     };
   } catch (err) {
     Logger.log('scanIncidentReportEmails error: ' + err);
+    return { success: false, error: err.toString() };
+  }
+}
+
+/**
+ * Helper to normalize a Site Audit date string (e.g. "Nov 04, 2026", "11-04-2026", "11/04/2026", "2026-11-04")
+ * into canonical YYYY-MM-DD without timezone drift.
+ */
+function _normalizeSiteAuditDateYmd(rawStr) {
+  if (!rawStr) return '';
+  var s = String(rawStr).trim();
+  if (!s) return '';
+
+  // YYYY-MM-DD
+  var isoMatch = s.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/);
+  if (isoMatch) {
+    var iy = parseInt(isoMatch[1], 10);
+    var im = parseInt(isoMatch[2], 10);
+    var id = parseInt(isoMatch[3], 10);
+    if (im >= 1 && im <= 12 && id >= 1 && id <= 31) {
+      return iy + '-' + (im < 10 ? '0' + im : im) + '-' + (id < 10 ? '0' + id : id);
+    }
+  }
+
+  // MM-DD-YYYY or MM/DD/YYYY
+  var usMatch = s.match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{2,4})/);
+  if (usMatch) {
+    var um = parseInt(usMatch[1], 10);
+    var ud = parseInt(usMatch[2], 10);
+    var uy = parseInt(usMatch[3], 10);
+    if (uy < 100) uy += 2000;
+    if (um >= 1 && um <= 12 && ud >= 1 && ud <= 31) {
+      return uy + '-' + (um < 10 ? '0' + um : um) + '-' + (ud < 10 ? '0' + ud : ud);
+    }
+  }
+
+  // Month DD, YYYY (e.g. "Nov 04, 2026" or "November 4, 2026")
+  var months = {
+    jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3,
+    apr: 4, april: 4, may: 5, jun: 6, june: 6, jul: 7, july: 7,
+    aug: 8, august: 8, sep: 9, sept: 9, september: 9, oct: 10, october: 10,
+    nov: 11, november: 11, dec: 12, december: 12
+  };
+  var txtMatch = s.match(/^([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})/);
+  if (txtMatch) {
+    var mNum = months[txtMatch[1].toLowerCase()];
+    var dNum = parseInt(txtMatch[2], 10);
+    var yNum = parseInt(txtMatch[3], 10);
+    if (mNum && dNum >= 1 && dNum <= 31) {
+      return yNum + '-' + (mNum < 10 ? '0' + mNum : mNum) + '-' + (dNum < 10 ? '0' + dNum : dNum);
+    }
+  }
+
+  return '';
+}
+
+/**
+ * Helper to merge Job Tracking value (winner) with PDF value (variation in parens).
+ */
+function _mergeSiteAuditFieldWithJT(jtVal, pdfVal) {
+  var jt = String(jtVal || '').trim();
+  var pdf = String(pdfVal || '').trim();
+  if (jt && pdf) {
+    var jtNorm = jt.toLowerCase().replace(/\s+/g, ' ');
+    var pdfNorm = pdf.toLowerCase().replace(/\s+/g, ' ');
+    if (jtNorm === pdfNorm) return jt;
+    return jt + ' (' + pdf + ')';
+  }
+  return jt || pdf || '';
+}
+
+/**
+ * Parses extracted PDF/body text from a Project Site Audit Report.
+ */
+function _parseSiteAuditPdfText(fullContent) {
+  var res = {
+    auditDate: '',
+    jobNumber: '',
+    foreman: '',
+    location: '',
+    inspector: '',
+    siteInspection: '',
+    correctionsNeeded: ''
+  };
+  if (!fullContent || !String(fullContent).trim()) return res;
+
+  var text = String(fullContent).replace(/\r\n/g, '\n');
+
+  function cleanCaptured(val) {
+    if (!val) return '';
+    var s = String(val).replace(/\s+/g, ' ').trim();
+    if (/^(?:Audit\s*Date|Foreman|Job\s*Number|Job\s*#|Crew\s*Location|Site\s*Inspection|Correction\(s\)|Work\s*Practices|Were\s*there|Were\s*tools|Were\s*all|Inspection\s*completed)\b/i.test(s)) {
+      return '';
+    }
+    return s;
+  }
+
+  var dMatch = text.match(/Audit\s*Date\s*:\s*([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}|\d{1,2}[-\/]\d{1,2}[-\/]\d{2,4})/i);
+  if (dMatch) {
+    res.auditDate = _normalizeSiteAuditDateYmd(dMatch[1]);
+  }
+
+  var jMatch = text.match(/Job\s*(?:Number|#)\s*:\s*(?:Job\s*#?)?\s*([0-9]{2,3}-[0-9]{2}(?:\.[0-9]+)?)/i);
+  if (jMatch) {
+    res.jobNumber = jMatch[1].trim();
+  }
+
+  var fMatch = text.match(/Foreman\s*:\s*([^\n]+?)(?=\s+(?:Audit\s*Date|Job\s*Number|Job\s*#|Crew\s*Location|Site\s*Inspection)\b|\n|$)/i);
+  if (fMatch) {
+    res.foreman = cleanCaptured(fMatch[1]);
+  }
+
+  var lMatch = text.match(/Crew\s*Location\s*:\s*([^\n]+?)(?=\s+(?:Audit\s*Date|Foreman|Job\s*Number|Job\s*#|Site\s*Inspection)\b|\n|$)/i);
+  if (lMatch) {
+    res.location = cleanCaptured(lMatch[1]);
+  }
+
+  var inspMatch = text.match(/Inspection\s*completed\s*by\s*:\s*([^\n]+?)(?=\s+(?:Signature|Date|$)|\n|$)/i);
+  if (inspMatch) {
+    res.inspector = cleanCaptured(inspMatch[1]);
+  }
+
+  var siteInspText = '';
+  var siMatch = text.match(/Site\s*Inspection\s*:\s*([\s\S]*?)(?=\s*(?:Correction\(s\)\s*Needed|Work\s*Practices\s*Observed|Were\s*there\s*any|Were\s*tools|Were\s*all\s*crew|Inspection\s*completed|$))/i);
+  if (siMatch) {
+    siteInspText = cleanCaptured(siMatch[1]);
+  }
+
+  var workPracText = '';
+  var wpMatch = text.match(/Work\s*Practices\s*Observed\s*:\s*([\s\S]*?)(?=\s*(?:Were\s*there\s*any|Correction\(s\)\s*Needed|Were\s*tools|Were\s*all\s*crew|Inspection\s*completed|$))/i);
+  if (wpMatch) {
+    workPracText = cleanCaptured(wpMatch[1]);
+  }
+
+  if (siteInspText && workPracText) {
+    res.siteInspection = 'Site Inspection: ' + siteInspText + ' | Work Practices: ' + workPracText;
+  } else if (siteInspText) {
+    res.siteInspection = siteInspText;
+  } else if (workPracText) {
+    res.siteInspection = 'Work Practices: ' + workPracText;
+  }
+
+  // Check all Correction(s) Needed blocks and Yes/No safety flags
+  var corrItems = [];
+  var corrRegex = /Correction\(s\)\s*Needed\s*:\s*([\s\S]*?)(?=\s*(?:Work\s*Practices\s*Observed|Were\s*there\s*any|Were\s*tools|Were\s*all\s*crew|Inspection\s*completed|$))/gi;
+  var cm;
+  while ((cm = corrRegex.exec(text)) !== null) {
+    var rawC = String(cm[1] || '').replace(/\s+/g, ' ').replace(/^[\s,.;:-]+|[\s,.;:-]+$/g, '').trim();
+    if (rawC && !/^(?:no|none|n\/?a|na)$/i.test(rawC) && !/^(?:Work\s*Practices|Were\s*there|Were\s*tools|Were\s*all|Inspection\s*completed)/i.test(rawC)) {
+      corrItems.push(rawC);
+    }
+  }
+
+  var unsafeMatch = text.match(/Were\s*there\s*any\s*unsafe\s*work\s*practices\s*observed\??\s*:?\s*([^\n]*?)(?=\s*(?:Correction\(s\)|Were\s*tools|$))/i);
+  if (unsafeMatch) {
+    var uAns = String(unsafeMatch[1] || '').replace(/[\s,.;]+$/g, '').trim();
+    if (/^yes\b/i.test(uAns)) {
+      corrItems.unshift('Unsafe work practices: ' + uAns);
+    }
+  }
+
+  var toolsMatch = text.match(/Were\s*tools\s*being\s*used\s*properly\??\s*:?\s*([^\n]*?)(?=\s*(?:Correction\(s\)|Were\s*all|$))/i);
+  if (toolsMatch) {
+    var tAns = String(toolsMatch[1] || '').replace(/[\s,.;]+$/g, '').trim();
+    if (/^no\b/i.test(tAns)) {
+      corrItems.push('Tools issue: ' + tAns);
+    }
+  }
+
+  var ppeMatch = text.match(/Were\s*all\s*crew\s*members\s*wearing\s*required\s*PPE\??\s*:?\s*([^\n]*?)(?=\s*(?:Correction\(s\)|Inspection\s*completed|$))/i);
+  if (ppeMatch) {
+    var pAns = String(ppeMatch[1] || '').replace(/[\s,.;]+$/g, '').trim();
+    if (/^no\b/i.test(pAns)) {
+      corrItems.push('PPE issue: ' + pAns);
+    }
+  }
+
+  if (corrItems.length > 0) {
+    res.correctionsNeeded = 'Yes — ' + corrItems.join(' | ');
+  } else {
+    res.correctionsNeeded = 'No';
+  }
+
+  return res;
+}
+
+/**
+ * Fetches PDF and photo attachments for a specific Site Audit email on demand.
+ *
+ * @param {string} emailId - Gmail message ID
+ * @param {string} [subject] - Fallback email subject
+ * @param {Object} [options] - { photoIndex, includePhotos, includePdf }
+ * @return {Object} Attachment payload
+ */
+function getSiteAuditEmailAttachments(emailId, subject, options) {
+  try {
+    options = options || {};
+    var message = null;
+    if (emailId) {
+      var baseId = String(emailId).trim().split('_')[0];
+      try {
+        message = GmailApp.getMessageById(baseId);
+      } catch (e) {
+        Logger.log('getSiteAuditEmailAttachments: Could not find message by ID ' + baseId + ': ' + e);
+      }
+
+      if (!message) {
+        try {
+          var thread = GmailApp.getThreadById(baseId);
+          if (thread) {
+            var tmsgs = thread.getMessages();
+            if (tmsgs && tmsgs.length > 0) {
+              message = tmsgs[0];
+            }
+          }
+        } catch (tErr) {
+          Logger.log('getSiteAuditEmailAttachments: Could not find thread by ID ' + baseId + ': ' + tErr);
+        }
+      }
+    }
+
+    if (!message && subject && String(subject).trim()) {
+      try {
+        var cleanSubj = String(subject).trim().replace(/["']/g, ' ').replace(/\s+/g, ' ');
+        var threads = GmailApp.search('subject:"' + cleanSubj + '"', 0, 1);
+        if (threads && threads.length > 0) {
+          var msgs = threads[0].getMessages();
+          if (msgs && msgs.length > 0) message = msgs[0];
+        }
+      } catch (searchErr) {
+        Logger.log('getSiteAuditEmailAttachments search error: ' + searchErr);
+      }
+    }
+
+    if (!message) {
+      return { success: false, error: 'Email message not found in Gmail' };
+    }
+
+    // Inspect target message; if a reply message ID was stored and lacks PDF/photos, check thread messages
+    function splitAttachments(msgObj) {
+      var atts = msgObj ? msgObj.getAttachments() : [];
+      var pdf = null;
+      var photos = [];
+      for (var i = 0; i < atts.length; i++) {
+        var att = atts[i];
+        var aName = (att.getName() || '').toLowerCase();
+        var aType = (att.getContentType() || '').toLowerCase();
+        if (aType === 'application/pdf' || aName.endsWith('.pdf')) {
+          if (!pdf) pdf = att;
+        } else if (aType.indexOf('image/') !== -1 || aName.endsWith('.jpg') || aName.endsWith('.jpeg') || aName.endsWith('.png') || aName.endsWith('.heic') || aName.endsWith('.heif')) {
+          photos.push(att);
+        }
+      }
+      return { pdf: pdf, photos: photos };
+    }
+
+    var targetMsg = message;
+    var split = splitAttachments(targetMsg);
+    if (!split.pdf) {
+      try {
+        var th = targetMsg.getThread();
+        if (th) {
+          var thMsgs = th.getMessages();
+          for (var tm = 0; tm < thMsgs.length; tm++) {
+            var candidateSplit = splitAttachments(thMsgs[tm]);
+            if (candidateSplit.pdf || (split.photos.length === 0 && candidateSplit.photos.length > 0)) {
+              targetMsg = thMsgs[tm];
+              split = candidateSplit;
+              if (candidateSplit.pdf) break;
+            }
+          }
+        }
+      } catch (eTh) {}
+    }
+
+    var targetPdf = split.pdf;
+    var targetPhotos = split.photos;
+
+    // Specific photo requested by index
+    if (options.photoIndex !== undefined && options.photoIndex !== null) {
+      var pIdx = parseInt(options.photoIndex, 10);
+      if (pIdx >= 0 && pIdx < targetPhotos.length) {
+        var targetPhoto = targetPhotos[pIdx];
+        var photoBytes = targetPhoto.getBytes();
+        return {
+          success: true,
+          photo: {
+            index: pIdx,
+            filename: targetPhoto.getName(),
+            contentType: targetPhoto.getContentType() || 'image/jpeg',
+            sizeBytes: photoBytes.length,
+            base64: Utilities.base64Encode(photoBytes)
+          }
+        };
+      }
+      return { success: false, error: 'Photo index ' + pIdx + ' not found' };
+    }
+
+    var result = {
+      success: true,
+      emailId: targetMsg.getId(),
+      subject: targetMsg.getSubject(),
+      dateReceived: targetMsg.getDate().toISOString(),
+      photoCount: targetPhotos.length,
+      photos: []
+    };
+
+    if (targetPdf && options.includePdf !== false) {
+      var pdfBytes = targetPdf.getBytes();
+      result.pdf = {
+        filename: targetPdf.getName(),
+        sizeBytes: pdfBytes.length,
+        contentType: 'application/pdf',
+        base64: Utilities.base64Encode(pdfBytes)
+      };
+    } else if (targetPdf) {
+      result.pdf = {
+        filename: targetPdf.getName(),
+        sizeBytes: targetPdf.getSize(),
+        contentType: 'application/pdf'
+      };
+    }
+
+    for (var p = 0; p < targetPhotos.length; p++) {
+      var ph = targetPhotos[p];
+      var phInfo = {
+        index: p,
+        filename: ph.getName(),
+        contentType: ph.getContentType() || 'image/jpeg',
+        sizeBytes: ph.getSize()
+      };
+      if (options.includePhotos) {
+        phInfo.base64 = Utilities.base64Encode(ph.getBytes());
+      }
+      result.photos.push(phInfo);
+    }
+
+    return result;
+  } catch (err) {
+    Logger.log('getSiteAuditEmailAttachments error: ' + err);
+    return { success: false, error: err.toString() };
+  }
+}
+
+/**
+ * Scans Gmail for Project Site Audit Report emails (current year by default),
+ * extracts Date, Job Number, Location, Foreman, Inspector, Site Inspection & Corrections Needed
+ * (using Job Tracking as the primary source for Location/Foreman with PDF variations in parentheses),
+ * and logs them to the 'Site Audits' sheet.
+ *
+ * @param {Object} [options] - { year: number, allYears: boolean, maxThreads: number, rescan: boolean }
+ * @return {Object} Scanning statistics and refreshed table payload
+ */
+function scanSiteAuditEmails(options) {
+  try {
+    options = options || {};
+    var ss = typeof getActiveSpreadsheetSafe === 'function' ? getActiveSpreadsheetSafe() : SpreadsheetApp.getActiveSpreadsheet();
+    if (!ss) return { success: false, error: 'Active spreadsheet not accessible' };
+
+    ensureRecommendedCompanionSheetsExist(ss);
+
+    var sheetName = typeof SHEET_SITE_AUDITS !== 'undefined' ? SHEET_SITE_AUDITS : 'Site Audits';
+    var sheet = ss.getSheetByName(sheetName);
+    if (!sheet) return { success: false, error: 'Site Audits sheet could not be created' };
+
+    var targetYear = parseInt(options.year, 10) || new Date().getFullYear();
+    var allYears = options.allYears === true;
+
+    var lastRow = sheet.getLastRow();
+    if (options.rescan === true && lastRow > 1) {
+      sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn()).clearContent();
+      lastRow = 1;
+    }
+
+    // Index existing logged rows by Email ID and track OCR_PENDING rows for automatic backfill
+    var existingIds = {};
+    var existingJobDateById = {};
+    var ocrPendingById = {};
+    if (lastRow > 1) {
+      var allExisting = sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn()).getValues();
+      for (var e = 0; e < allExisting.length; e++) {
+        var erRow = allExisting[e];
+        var eid = String(erRow[10] || '').trim(); // col 11 = Email ID (0-indexed 10)
+        if (eid) {
+          existingIds[eid] = true;
+          var eJob = String(erRow[3] || '').trim().replace(/^job\s*#?\s*/i, '');
+          var eDateYmd = _normalizeSiteAuditDateYmd(erRow[1]);
+          if (eJob && eDateYmd) {
+            existingJobDateById[eid] = eJob + '__' + eDateYmd;
+          }
+          var eNotes = String(erRow[13] || '').trim();
+          if (eNotes.indexOf('OCR_PENDING') !== -1) {
+            ocrPendingById[eid] = {
+              rowIndex: e + 2,
+              notes: eNotes,
+              jobNumber: eJob,
+              auditDate: String(erRow[1] || '').trim(),
+              status: String(erRow[12] || 'Logged').trim()
+            };
+          }
+        }
+      }
+    }
+
+    // Build Job Tracking lookup (Location & Foreman) — Job Tracking wins over PDF
+    var jtByJob = {};
+    var jtSheet = ss.getSheetByName(typeof SHEET_JOB_TRACKING !== 'undefined' ? SHEET_JOB_TRACKING : 'Job Tracking');
+    if (jtSheet && jtSheet.getLastRow() > 1) {
+      var jtData = jtSheet.getDataRange().getValues();
+      var jtHeaders = jtData[0].map(function(h) { return String(h || '').trim().toLowerCase(); });
+      var colJob = jtHeaders.indexOf('job number') !== -1 ? jtHeaders.indexOf('job number') : (jtHeaders.indexOf('job #') !== -1 ? jtHeaders.indexOf('job #') : 0);
+      var colLead = jtHeaders.indexOf('foreman') !== -1 ? jtHeaders.indexOf('foreman') : (jtHeaders.indexOf('crew lead') !== -1 ? jtHeaders.indexOf('crew lead') : (jtHeaders.indexOf('lead') !== -1 ? jtHeaders.indexOf('lead') : 1));
+      var colLoc = jtHeaders.indexOf('location') !== -1 ? jtHeaders.indexOf('location') : (jtHeaders.indexOf('job location') !== -1 ? jtHeaders.indexOf('job location') : -1);
+
+      for (var j = 1; j < jtData.length; j++) {
+        var jNum = String(jtData[j][colJob] || '').trim().replace(/^job\s*#?\s*/i, '');
+        if (!jNum) continue;
+        var fMan = String(jtData[j][colLead] || '').trim();
+        var rawLoc = colLoc !== -1 ? String(jtData[j][colLoc] || '').trim() : '';
+        if (rawLoc && typeof getPhysicalLocation === 'function') {
+          var phys = getPhysicalLocation(rawLoc);
+          if (typeof isStatusLocation === 'function' && isStatusLocation(rawLoc) && !phys) {
+            rawLoc = '';
+          } else if (phys) {
+            rawLoc = phys;
+          }
+        }
+        var entryObj = { foreman: fMan, location: rawLoc };
+        jtByJob[jNum] = entryObj;
+        var noZero = jNum.replace(/^0+/, '');
+        if (noZero && !jtByJob[noZero]) jtByJob[noZero] = entryObj;
+        var baseJob = jNum.replace(/\s*\([^)]*\)/g, '').trim();
+        if (baseJob && !jtByJob[baseJob]) jtByJob[baseJob] = entryObj;
+      }
+    }
+
+    // Search Gmail for Project Site Audit Report emails (buffered by -1 day on Dec 31 to avoid timezone cutoff)
+    var maxThreads = options.maxThreads || 250;
+    var dateFilter = allYears ? '' : (' after:' + (targetYear - 1) + '/12/31');
+    var searchQueries = [
+      'subject:"Project Site Audit Report"' + dateFilter,
+      'from:mptablets@mountainpower.com "Project Site Audit"' + dateFilter
+    ];
+
+    var threadsMap = {};
+    var threads = [];
+    for (var q = 0; q < searchQueries.length; q++) {
+      try {
+        var found = GmailApp.search(searchQueries[q], 0, maxThreads);
+        if (found && found.length > 0) {
+          for (var f = 0; f < found.length; f++) {
+            var tid = found[f].getId();
+            if (!threadsMap[tid]) {
+              threadsMap[tid] = true;
+              threads.push(found[f]);
+            }
+          }
+        }
+      } catch (qErr) {
+        Logger.log('scanSiteAuditEmails search error for "' + searchQueries[q] + '": ' + qErr);
+      }
+    }
+
+    // Sort newest threads first
+    threads.sort(function(a, b) {
+      var da = a.getLastMessageDate() ? a.getLastMessageDate().getTime() : 0;
+      var db = b.getLastMessageDate() ? b.getLastMessageDate().getTime() : 0;
+      return db - da;
+    });
+
+    var tz = Session.getScriptTimeZone() || 'America/Denver';
+    var newCount = 0;
+    var updatedOcrCount = 0;
+    var skippedCount = 0;
+    var pendingOcrCount = 0;
+    var newRows = [];
+    var startTime = new Date().getTime();
+
+    for (var t = 0; t < threads.length; t++) {
+      // 22-second circuit breaker to avoid Web App HTTP gateway timeout
+      if (new Date().getTime() - startTime > 22000) {
+        Logger.log('scanSiteAuditEmails: Approaching 22s Web App limit; saving ' + newRows.length + ' new audits.');
+        break;
+      }
+
+      var thread = threads[t];
+      var msgs = thread.getMessages();
+
+      // Collect matching messages in chronological order so thread replies don't create duplicates
+      var matchingMsgs = [];
+      for (var mIdx = 0; mIdx < msgs.length; mIdx++) {
+        var cand = msgs[mIdx];
+        var candSubj = cand.getSubject() || '';
+        var subjLower = candSubj.toLowerCase();
+        if (subjLower.indexOf('project site audit') === -1 && subjLower.indexOf('site audit report') === -1) {
+          continue;
+        }
+        matchingMsgs.push(cand);
+      }
+      if (matchingMsgs.length === 0) continue;
+
+      // Inspect attachments across thread candidates to prefer PDF-bearing message(s)
+      var candidatesWithAtts = [];
+      var threadHasPdf = false;
+      var threadHasExisting = false;
+      for (var cm = 0; cm < matchingMsgs.length; cm++) {
+        var cMsg = matchingMsgs[cm];
+        var cId = cMsg.getId();
+
+        // Fast skip if already logged and NOT pending OCR (or if OCR budget is already spent)
+        if (existingIds[cId]) {
+          threadHasExisting = true;
+          if (!ocrPendingById[cId] || (new Date().getTime() - startTime >= 16000)) {
+            if (ocrPendingById[cId]) pendingOcrCount++;
+            candidatesWithAtts.push({ msg: cMsg, alreadyDone: true, pdfAtt: null, photoCount: 0 });
+            continue;
+          }
+        }
+
+        var cAtts = cMsg.getAttachments();
+        var cPdf = null;
+        var cPhotos = 0;
+        for (var a = 0; a < cAtts.length; a++) {
+          var att = cAtts[a];
+          var aName = (att.getName() || '').toLowerCase();
+          var aType = (att.getContentType() || '').toLowerCase();
+          if (aType === 'application/pdf' || aName.endsWith('.pdf')) {
+            if (!cPdf) cPdf = att;
+          } else if (aType.indexOf('image/') !== -1 || aName.endsWith('.jpg') || aName.endsWith('.jpeg') || aName.endsWith('.png') || aName.endsWith('.heic') || aName.endsWith('.heif')) {
+            cPhotos++;
+          }
+        }
+        if (cPdf) threadHasPdf = true;
+        candidatesWithAtts.push({ msg: cMsg, alreadyDone: false, pdfAtt: cPdf, photoCount: cPhotos });
+      }
+
+      var seenThreadAuditKeys = {};
+      for (var pIdx = 0; pIdx < candidatesWithAtts.length; pIdx++) {
+        var item = candidatesWithAtts[pIdx];
+        if (item.alreadyDone) {
+          var exKey = existingJobDateById[item.msg.getId()];
+          if (exKey) seenThreadAuditKeys[exKey] = true;
+          skippedCount++;
+          continue;
+        }
+        // Ignore reply messages in a thread if another message in the thread has the PDF or is already logged
+        if ((threadHasPdf || threadHasExisting) && !item.pdfAtt) {
+          continue;
+        }
+        // If no message in thread had a PDF, keep only the first message
+        if (!threadHasPdf && pIdx > 0) {
+          continue;
+        }
+
+        var msg = item.msg;
+        var msgId = msg.getId();
+        var subject = msg.getSubject() || '';
+        var receivedDate = msg.getDate();
+        var pdfAtt = item.pdfAtt;
+        var photoCount = item.photoCount;
+
+        // Parse baseline Job # and Date from Subject (e.g. "Project Site Audit Report 034-27 11-04-2026")
+        var subjJob = '';
+        var subjDateYmd = '';
+        var sjMatch = subject.match(/Project\s+Site\s+Audit(?:\s+Report)?\s+(?:Job\s*#?\s*)?([0-9]{2,3}-[0-9]{2}(?:\.[0-9]+)?)/i) ||
+                      subject.match(/\b([0-9]{2,3}-[0-9]{2}(?:\.[0-9]+)?)\b/);
+        if (sjMatch) subjJob = sjMatch[1].trim();
+
+        var sdMatch = subject.match(/\b(\d{1,2}[-\/]\d{1,2}[-\/]\d{2,4})\b/);
+        if (sdMatch) subjDateYmd = _normalizeSiteAuditDateYmd(sdMatch[1]);
+
+        var threadAuditKey = (subjJob || '') + '__' + (subjDateYmd || '');
+        if (threadAuditKey !== '__' && seenThreadAuditKeys[threadAuditKey]) {
+          continue;
+        }
+        seenThreadAuditKeys[threadAuditKey] = true;
+
+        // Attempt PDF OCR within 16s budget
+        var pdfParsed = {
+          auditDate: '',
+          jobNumber: '',
+          foreman: '',
+          location: '',
+          inspector: '',
+          siteInspection: '',
+          correctionsNeeded: ''
+        };
+        var ocrDone = false;
+        var rowNotes = '';
+
+        if (pdfAtt && typeof extractTextFromPDF === 'function') {
+          var pdfSize = pdfAtt.getSize();
+          if (pdfSize > 2.5 * 1024 * 1024) {
+            rowNotes = 'PDF_OVER_OCR_LIMIT';
+          } else if (new Date().getTime() - startTime < 16000) {
+            try {
+              var pdfText = extractTextFromPDF(pdfAtt, 2.5 * 1024 * 1024) || '';
+              if (pdfText && pdfText.trim().length > 10) {
+                pdfParsed = _parseSiteAuditPdfText(pdfText + '\n' + (msg.getPlainBody() || ''));
+                ocrDone = true;
+              } else {
+                rowNotes = 'OCR_PENDING';
+                pendingOcrCount++;
+              }
+            } catch (ocrErr) {
+              Logger.log('scanSiteAuditEmails OCR error for ' + subject + ': ' + ocrErr);
+              rowNotes = 'OCR_PENDING';
+              pendingOcrCount++;
+            }
+          } else {
+            rowNotes = 'OCR_PENDING';
+            pendingOcrCount++;
+          }
+        } else {
+          // Parse email plain body even if no PDF attached
+          var bodyText = msg.getPlainBody() || '';
+          if (bodyText.trim().length > 10) {
+            pdfParsed = _parseSiteAuditPdfText(bodyText);
+          }
+          ocrDone = true;
+        }
+
+        var finalJob = pdfParsed.jobNumber || subjJob || '';
+        var finalAuditDate = pdfParsed.auditDate || subjDateYmd || Utilities.formatDate(receivedDate, tz, 'yyyy-MM-dd');
+
+        // Enforce targetYear filter when not scanning allYears
+        var auditYr = parseInt(String(finalAuditDate).substring(0, 4), 10) || receivedDate.getFullYear();
+        if (!allYears && auditYr !== targetYear && receivedDate.getFullYear() !== targetYear) {
+          continue;
+        }
+
+        // Cross-reference Job Tracking (Job Tracking wins, PDF variation in parentheses)
+        var jtLookup = finalJob
+          ? (jtByJob[finalJob] || jtByJob[finalJob.replace(/^0+/, '')] || jtByJob[finalJob.replace(/\s*\([^)]*\)/g, '').trim()] || {})
+          : {};
+        var finalLocation = _mergeSiteAuditFieldWithJT(jtLookup.location, pdfParsed.location);
+        var finalForeman = _mergeSiteAuditFieldWithJT(jtLookup.foreman, pdfParsed.foreman);
+
+        // Compute Quarter from finalAuditDate (YYYY-MM-DD)
+        var dParts = String(finalAuditDate).split('-');
+        var qYear = dParts.length === 3 ? parseInt(dParts[0], 10) : receivedDate.getFullYear();
+        var qMonth = dParts.length === 3 ? parseInt(dParts[1], 10) : (receivedDate.getMonth() + 1);
+        var qNum = Math.floor((Math.max(1, qMonth) - 1) / 3) + 1;
+        var quarterKey = qYear + '-Q' + qNum;
+
+        var corrStr = pdfParsed.correctionsNeeded || (ocrDone ? 'No' : '');
+        var statusStr = (corrStr.indexOf('Yes') === 0) ? 'Corrections Needed' : 'Logged';
+
+        // Handle OCR_PENDING backfill update for an already-logged row
+        if (ocrPendingById[msgId]) {
+          if (ocrDone) {
+            var pendingInfo = ocrPendingById[msgId];
+            var updRow = pendingInfo.rowIndex;
+            var cleanedNotes = pendingInfo.notes.replace(/\bOCR_PENDING\b/g, '').trim();
+            var keepStatus = (pendingInfo.status === 'Reviewed') ? 'Reviewed' : statusStr;
+            sheet.getRange(updRow, 2, 1, 8).setValues([[
+              finalAuditDate,
+              quarterKey,
+              finalJob,
+              finalLocation,
+              finalForeman,
+              pdfParsed.inspector || '',
+              pdfParsed.siteInspection || '',
+              corrStr
+            ]]);
+            sheet.getRange(updRow, 13, 1, 2).setValues([[keepStatus, cleanedNotes]]);
+            delete ocrPendingById[msgId];
+            updatedOcrCount++;
+          }
+          continue;
+        }
+
+        var rowVals = [
+          Utilities.formatDate(receivedDate, tz, 'yyyy-MM-dd HH:mm:ss'),
+          finalAuditDate,
+          quarterKey,
+          finalJob,
+          finalLocation,
+          finalForeman,
+          pdfParsed.inspector || '',
+          pdfParsed.siteInspection || '',
+          corrStr,
+          photoCount,
+          msgId,
+          pdfAtt ? pdfAtt.getName() : '',
+          statusStr,
+          rowNotes
+        ];
+
+        newRows.push(rowVals);
+        existingIds[msgId] = true;
+        newCount++;
+      }
+    }
+
+    if (newRows.length > 0) {
+      sheet.getRange(sheet.getLastRow() + 1, 1, newRows.length, newRows[0].length).setValues(newRows);
+      Logger.log('scanSiteAuditEmails: Added ' + newRows.length + ' site audits to ' + sheetName);
+    }
+
+    if ((newRows.length > 0 || updatedOcrCount > 0) && typeof patchSyncSnapshotInDrive === 'function') {
+      try {
+        var modMap = {};
+        modMap[sheetName] = true;
+        patchSyncSnapshotInDrive(modMap, false);
+      } catch (snapErr) {
+        Logger.log('scanSiteAuditEmails Drive snapshot patch warning: ' + snapErr);
+      }
+    }
+
+    // Return complete updated table object for instant desktop DB update
+    var fullData = sheet.getDataRange().getValues();
+    var tableHeaders = fullData.length > 0 ? fullData[0] : [];
+    var tableRows = [];
+    for (var r = 1; r < fullData.length; r++) {
+      var rObj = { _rowIdx: r + 1 };
+      for (var c = 0; c < tableHeaders.length; c++) {
+        rObj[tableHeaders[c]] = fullData[r][c];
+      }
+      tableRows.push(rObj);
+    }
+
+    return {
+      success: true,
+      newCount: newCount,
+      updatedOcrCount: updatedOcrCount,
+      skippedCount: skippedCount,
+      pendingOcrCount: pendingOcrCount,
+      totalInSheet: Math.max(0, fullData.length - 1),
+      table: {
+        name: sheetName,
+        headers: tableHeaders,
+        rows: tableRows,
+        rowCount: tableRows.length
+      }
+    };
+  } catch (err) {
+    Logger.log('scanSiteAuditEmails error: ' + err);
     return { success: false, error: err.toString() };
   }
 }

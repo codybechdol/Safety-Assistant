@@ -68530,6 +68530,38 @@ function doGet(e) {
 
         .setMimeType(ContentService.MimeType.JSON);
 
+    } else if (action === 'getSiteAuditAttachments') {
+
+      var saEmailId = e.parameter.emailId || '';
+
+      var saSubj = e.parameter.subject || '';
+
+      var saPhotoIdx = e.parameter.photoIndex;
+
+      var saOptions = { photoIndex: saPhotoIdx, includePhotos: e.parameter.includePhotos === 'true', includePdf: e.parameter.includePdf !== 'false' };
+
+      var saRes = (typeof getSiteAuditEmailAttachments === 'function')
+
+        ? getSiteAuditEmailAttachments(saEmailId, saSubj, saOptions)
+
+        : { success: false, error: 'getSiteAuditEmailAttachments function not found in backend' };
+
+      return ContentService.createTextOutput(JSON.stringify(saRes))
+
+        .setMimeType(ContentService.MimeType.JSON);
+
+    } else if (action === 'scanSiteAuditEmails') {
+
+      var scanSaRes = (typeof scanSiteAuditEmails === 'function')
+
+        ? scanSiteAuditEmails({ year: parseInt(e.parameter.year || String(new Date().getFullYear()), 10), allYears: e.parameter.allYears === 'true', rescan: e.parameter.rescan === 'true' })
+
+        : { success: false, error: 'scanSiteAuditEmails function not found in backend' };
+
+      return ContentService.createTextOutput(JSON.stringify(scanSaRes))
+
+        .setMimeType(ContentService.MimeType.JSON);
+
     } else if (action === 'scanCertEmails') {
 
       var scanCertRes = (typeof scanCertRenewalEmails === 'function')
@@ -68973,6 +69005,38 @@ function doPost(e) {
         : { success: false, error: 'scanIncidentReportEmails function not found in backend' };
 
       return ContentService.createTextOutput(JSON.stringify(scanIncResult))
+
+        .setMimeType(ContentService.MimeType.JSON);
+
+    }
+
+
+
+    if (action === 'getSiteAuditAttachments') {
+
+      var saAttResult = (typeof getSiteAuditEmailAttachments === 'function')
+
+        ? getSiteAuditEmailAttachments(payload.emailId, payload.subject, payload)
+
+        : { success: false, error: 'getSiteAuditEmailAttachments function not found in backend' };
+
+      return ContentService.createTextOutput(JSON.stringify(saAttResult))
+
+        .setMimeType(ContentService.MimeType.JSON);
+
+    }
+
+
+
+    if (action === 'scanSiteAuditEmails') {
+
+      var scanSaResult = (typeof scanSiteAuditEmails === 'function')
+
+        ? scanSiteAuditEmails(payload)
+
+        : { success: false, error: 'scanSiteAuditEmails function not found in backend' };
+
+      return ContentService.createTextOutput(JSON.stringify(scanSaResult))
 
         .setMimeType(ContentService.MimeType.JSON);
 

@@ -2372,6 +2372,9 @@ class SyncEngine {
     if (window.incidentReportsEngine && typeof window.incidentReportsEngine.render === 'function') {
       window.incidentReportsEngine.render();
     }
+    if (window.siteAuditsEngine && typeof window.siteAuditsEngine.render === 'function') {
+      window.siteAuditsEngine.render();
+    }
     if (window.historyIssuesEngine) {
       window.historyIssuesEngine.invalidateCache();
       window.historyIssuesEngine.updateTabBadges();

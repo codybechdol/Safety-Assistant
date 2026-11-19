@@ -165,6 +165,7 @@ class SupabaseSyncEngine {
       { key: 'crew-import-view', label: '👥 Crew Import (Excel)', tabs: [] },
       { key: 'safety-compliance-view', label: '🛡️ Safety Compliance', tabs: [] },
       { key: 'incident-reports-view', label: '⚠️ Incident Reports', tabs: [] },
+      { key: 'site-audits-view', label: '📋 Site Audits', tabs: [] },
       { key: 'expiring-certs-view', label: '📜 Expiring Certs', tabs: [] },
       { key: 'training-view', label: '🎓 Training', tabs: [] },
       { 

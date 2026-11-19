@@ -65,6 +65,7 @@ var SHEET_FIELD_GPS_LOG = 'Field GPS Log';
 var SHEET_DAILY_ACCOMPLISHMENTS = 'Daily Accomplishments';
 var SHEET_SYSTEM_CONFIG = 'System Config';
 var SHEET_INCIDENT_REPORTS = 'Incident Reports';
+var SHEET_SITE_AUDITS = 'Site Audits';
 
 // =============================================================================
 // VISUAL CONSTANTS
@@ -505,6 +506,24 @@ var COLS = {
     PDF_FILENAME: 16,      // P - Attached PDF Filename
     STATUS: 17,            // Q - Review Status
     NOTES: 18              // R - Coordinator Notes
+  },
+
+  // Site Audits Sheet (November 2026)
+  SITE_AUDITS: {
+    DATE_RECEIVED: 1,       // A - Timestamp email received in Gmail
+    AUDIT_DATE: 2,          // B - Audit Date (YYYY-MM-DD)
+    QUARTER: 3,             // C - Yearly Quarter (e.g. 2026-Q4)
+    JOB_NUMBER: 4,          // D - Job #
+    LOCATION: 5,            // E - Crew Location (Job Tracking wins, PDF variation in parens)
+    FOREMAN: 6,             // F - Foreman (Job Tracking wins, PDF variation in parens)
+    INSPECTOR: 7,           // G - Inspection completed by
+    SITE_INSPECTION: 8,     // H - Site Inspection & Work Practices Observed summary
+    CORRECTIONS_NEEDED: 9,  // I - Corrections Needed flag & details
+    PHOTO_COUNT: 10,        // J - Attached photos count
+    EMAIL_ID: 11,           // K - Gmail Message ID
+    PDF_FILENAME: 12,       // L - Attached PDF Filename
+    STATUS: 13,             // M - Review Status (Logged / Corrections Needed / Reviewed)
+    NOTES: 14               // N - Coordinator Notes / OCR status
   }
 };
 

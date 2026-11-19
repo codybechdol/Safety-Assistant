@@ -1347,6 +1347,7 @@ class IncidentReportsEngine {
     const modal = document.getElementById('incident-photos-lightbox-modal');
     if (!modal) return;
 
+    window._activeLightboxEngine = this;
     modal.style.display = 'flex';
     this.lightboxState = {
       isOpen: true,

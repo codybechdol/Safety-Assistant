@@ -10,7 +10,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <link rel="stylesheet" href="css/leaflet.css">
-  <link rel="stylesheet" href="css/app.css?v=20261109_03">
+  <link rel="stylesheet" href="css/app.css?v=20261119_01">
 </head>
 <body>
 
@@ -227,6 +227,9 @@
           </div>
           <div class="nav-item nav-sub-item" data-view="incident-reports-view">
             <span class="nav-item-icon">⚠️</span> Incident Reports
+          </div>
+          <div class="nav-item nav-sub-item" data-view="site-audits-view">
+            <span class="nav-item-icon">📋</span> Site Audits
           </div>
           <div class="nav-item nav-sub-item" data-view="expiring-certs-view">
             <span class="nav-item-icon">📜</span> Expiring Certs
@@ -554,6 +557,29 @@
           </div>
         </div>
         <div class="grid-wrapper" id="incident-reports-content" style="overflow-y: auto; height: calc(100% - 50px); padding: 0;"></div>
+      </section>
+
+      <!-- View: Site Audits Workspace -->
+      <section id="site-audits-view" class="view-container">
+        <div class="sheet-toolbar">
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <h2 style="font-size: 16px;">📋 Site Audits</h2>
+            <span class="brand-badge" id="site-audits-row-count">0 audits</span>
+          </div>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <button class="btn btn-secondary" id="btn-refresh-site-audits" style="font-size: 12px; font-weight: 600; display: flex; align-items: center; gap: 6px;" onclick="window.siteAuditsEngine.refresh()" title="Refresh view">
+              <span>🔄</span> Refresh
+            </button>
+            <button class="btn btn-secondary admin-only-control" id="btn-add-site-audit" style="font-size: 12px; font-weight: 600; display: flex; align-items: center; gap: 6px; border-color: #38bdf8; color: #7dd3fc; background: rgba(56, 189, 248, 0.1);" onclick="window.siteAuditsEngine.openAddAuditModal()" title="Manually log a project site audit">
+              <span>➕</span> Log Site Audit
+            </button>
+            <button class="btn btn-primary admin-only-control" id="btn-scan-site-audit-emails" style="font-size: 12px; font-weight: 700; background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%); border: none; display: flex; align-items: center; gap: 6px; box-shadow: 0 2px 6px rgba(2, 132, 199, 0.3);" onclick="window.siteAuditsEngine.scanEmails()">
+              <span>📬</span> Scan Gmail for Audits
+            </button>
+            <input type="text" id="site-audits-search-input" class="sheet-search" placeholder="Search job #, location, foreman, inspector..." oninput="window.siteAuditsEngine.onSearchInput(this.value)">
+          </div>
+        </div>
+        <div class="grid-wrapper" id="site-audits-content" style="overflow-y: auto; height: calc(100% - 50px); padding: 0;"></div>
       </section>
 
       <!-- View: Expiring Certs Workspace -->
@@ -1308,7 +1334,7 @@
               </label>
             </div>
             <p style="font-size: 12px; color: var(--text-secondary); margin-bottom: 0; line-height: 1.5;">
-              Automatically scan Gmail in the background when the app is opened for new Incident Reports and Safety Emails (JHAs, Safety Meetings, Monthly Checklists). You can track live progress from the floating notification pill and continue working without interruption.
+              Automatically scan Gmail in the background when the app is opened for new Incident Reports, Site Audits, and Safety Emails (JHAs, Safety Meetings, Monthly Checklists). You can track live progress from the floating notification pill and continue working without interruption.
             </p>
           </div>
 
@@ -2725,6 +2751,25 @@
         <button class="safety-bg-dismiss-btn" id="incident-bg-dismiss-btn" title="Dismiss" style="display: none;" onclick="event.stopPropagation(); window.incidentReportsEngine.dismissBackgroundWidget();">✕</button>
       </div>
     </div>
+
+    <!-- Floating Background Site Audits Scanner Widget -->
+    <div id="site-audit-emails-bg-widget" class="safety-bg-pill site-audit-bg-pill" style="display: none;" onclick="window.siteAuditsEngine.openSiteAuditsViewFromWidget()">
+      <div class="safety-bg-spinner" id="site-audit-bg-spinner"></div>
+      <div class="safety-bg-info">
+        <div class="safety-bg-title">
+          <span id="site-audit-bg-title-text">📋 Scanning Site Audits</span>
+          <span id="site-audit-bg-pct" style="color: #7dd3fc; font-weight: 800; margin-left: 4px;">0%</span>
+        </div>
+        <div class="safety-bg-sub" id="site-audit-bg-sub">Connecting to Gmail...</div>
+        <div class="safety-bg-bar-track">
+          <div id="site-audit-bg-bar" class="safety-bg-bar" style="width: 5%;"></div>
+        </div>
+      </div>
+      <div class="safety-bg-actions">
+        <button class="safety-bg-expand-btn" title="Open Site Audits Workspace" onclick="event.stopPropagation(); window.siteAuditsEngine.openSiteAuditsViewFromWidget();">↗️</button>
+        <button class="safety-bg-dismiss-btn" id="site-audit-bg-dismiss-btn" title="Dismiss" style="display: none;" onclick="event.stopPropagation(); window.siteAuditsEngine.dismissBackgroundWidget();">✕</button>
+      </div>
+    </div>
   </div>
 
   <!-- Safety PDF Document Viewer Modal -->
@@ -3352,29 +3397,29 @@
           </div>
         </div>
         <div style="display: flex; align-items: center; gap: 8px;">
-          <button id="incident-photo-btn-download" class="btn btn-secondary" onclick="window.incidentReportsEngine.downloadCurrentPhoto()" style="font-size: 12px; padding: 6px 12px; display: inline-flex; align-items: center; gap: 6px;">
+          <button id="incident-photo-btn-download" class="btn btn-secondary" onclick="(window._activeLightboxEngine || window.incidentReportsEngine).downloadCurrentPhoto()" style="font-size: 12px; padding: 6px 12px; display: inline-flex; align-items: center; gap: 6px;">
             ⬇️ Download
           </button>
-          <button id="incident-photo-btn-popout" class="btn btn-secondary" onclick="window.incidentReportsEngine.popoutCurrentPhoto()" style="font-size: 12px; padding: 6px 12px; display: inline-flex; align-items: center; gap: 6px;">
+          <button id="incident-photo-btn-popout" class="btn btn-secondary" onclick="(window._activeLightboxEngine || window.incidentReportsEngine).popoutCurrentPhoto()" style="font-size: 12px; padding: 6px 12px; display: inline-flex; align-items: center; gap: 6px;">
             ↗ Open Tab
           </button>
-          <button id="incident-photo-btn-gmail" class="btn btn-secondary" onclick="window.incidentReportsEngine.openCurrentPhotoInGmail()" style="font-size: 12px; padding: 6px 12px; display: inline-flex; align-items: center; gap: 6px;">
+          <button id="incident-photo-btn-gmail" class="btn btn-secondary" onclick="(window._activeLightboxEngine || window.incidentReportsEngine).openCurrentPhotoInGmail()" style="font-size: 12px; padding: 6px 12px; display: inline-flex; align-items: center; gap: 6px;">
             ✉ Gmail
           </button>
-          <button class="btn btn-secondary" onclick="window.incidentReportsEngine.closeLightbox()" style="border-radius: 50%; width: 32px; height: 32px; padding: 0; display: flex; align-items: center; justify-content: center; font-size: 16px; margin-left: 6px;">✕</button>
+          <button class="btn btn-secondary" onclick="(window._activeLightboxEngine || window.incidentReportsEngine).closeLightbox()" style="border-radius: 50%; width: 32px; height: 32px; padding: 0; display: flex; align-items: center; justify-content: center; font-size: 16px; margin-left: 6px;">✕</button>
         </div>
       </div>
 
       <!-- Main Photo View Area with Prev/Next buttons -->
       <div style="flex: 1; position: relative; display: flex; align-items: center; justify-content: center; background: #020617; overflow: hidden; padding: 16px;">
         
-        <button onclick="window.incidentReportsEngine.prevLightboxPhoto()" style="position: absolute; left: 16px; top: 50%; transform: translateY(-50%); z-index: 10; background: rgba(15, 23, 42, 0.8); border: 1px solid rgba(255,255,255,0.25); color: #fff; width: 44px; height: 44px; border-radius: 50%; font-size: 22px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.15s ease;" title="Previous Photo">
+        <button onclick="(window._activeLightboxEngine || window.incidentReportsEngine).prevLightboxPhoto()" style="position: absolute; left: 16px; top: 50%; transform: translateY(-50%); z-index: 10; background: rgba(15, 23, 42, 0.8); border: 1px solid rgba(255,255,255,0.25); color: #fff; width: 44px; height: 44px; border-radius: 50%; font-size: 22px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.15s ease;" title="Previous Photo">
           ‹
         </button>
 
         <div id="incident-lightbox-content" style="width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;"></div>
 
-        <button onclick="window.incidentReportsEngine.nextLightboxPhoto()" style="position: absolute; right: 16px; top: 50%; transform: translateY(-50%); z-index: 10; background: rgba(15, 23, 42, 0.8); border: 1px solid rgba(255,255,255,0.25); color: #fff; width: 44px; height: 44px; border-radius: 50%; font-size: 22px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.15s ease;" title="Next Photo">
+        <button onclick="(window._activeLightboxEngine || window.incidentReportsEngine).nextLightboxPhoto()" style="position: absolute; right: 16px; top: 50%; transform: translateY(-50%); z-index: 10; background: rgba(15, 23, 42, 0.8); border: 1px solid rgba(255,255,255,0.25); color: #fff; width: 44px; height: 44px; border-radius: 50%; font-size: 22px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.15s ease;" title="Next Photo">
           ›
         </button>
       </div>
@@ -3425,7 +3470,7 @@
   <script src="js/inventory.js?v=20261027_01"></script>
   <script src="js/swaps.js?v=20261109_02"></script>
   <script src="js/crew-import.js?v=20261111_02"></script>
-  <script src="js/crew-planning.js?v=20261116_02"></script>
+  <script src="js/crew-planning.js?v=20261118_05"></script>
   <script src="js/item-stats.js?v=20261027_01"></script>
   <script src="js/sms-dialog.js?v=20261116_01"></script>
   <script src="js/employee-profile.js?v=20261116_01"></script>
@@ -3434,7 +3479,7 @@
   <script src="js/cpr-roster.js?v=20261027_01"></script>
   <script src="js/certs-import.js?v=20261027_01"></script>
   <script src="js/time-breakdown.js?v=20261109_02"></script>
-  <script src="js/sheets.js?v=20261116_01"></script>
+  <script src="js/sheets.js?v=20261118_04"></script>
   <script src="js/history.js?v=20261109_02"></script>
   <script src="js/history-issues.js?v=20261027_01"></script>
   <script src="js/previous-employees.js?v=20261027_01"></script>
@@ -3455,6 +3500,7 @@
   <script src="js/drug-testing.js?v=20260902_1"></script>
   <script src="js/ppe-tracking.js?v=20261116_01"></script>
   <script src="js/incident-reports.js?v=20261116_01"></script>
+  <script src="js/site-audits.js?v=20261119_01"></script>
   <script src="js/weekly-summary.js?v=20261014_03"></script>
   <script src="js/fiscal-year.js?v=20261001_04"></script>
   <script src="js/location-approvals.js?v=20261109_02"></script>
@@ -3666,6 +3712,7 @@
       if (viewId === 'procurement-view') window.procurementEngine.loadData();
       if (viewId === 'aging-view') window.inventoryAging.loadData();
       if (viewId === 'incident-reports-view' && window.incidentReportsEngine) window.incidentReportsEngine.render();
+      if (viewId === 'site-audits-view' && window.siteAuditsEngine) window.siteAuditsEngine.render();
       if (viewId === 'weekly-summary-view' && window.weeklySummaryEngine) window.weeklySummaryEngine.render();
       if (viewId === 'tailgate-generator-view' && window.weeklySummaryEngine) window.weeklySummaryEngine.renderTailgateWorkspace();
       if (viewId === 'settings-view') {
@@ -4179,6 +4226,24 @@
               console.warn('[Startup Scans] Incident email scan error:', incErr);
             }
           }
+
+          // Polite 500ms stagger before starting Site Audits background scan
+          await new Promise(r => setTimeout(r, 500));
+
+          // 3. Start Scan Gmail For Site Audits
+          if (window.siteAuditsEngine && typeof window.siteAuditsEngine.scanEmails === 'function') {
+            try {
+              console.log('[Startup Scans] Starting Site Audits scan in background...');
+              window.siteAuditsEngine.scanEmails(false, {
+                runInBackground: true,
+                silent: true
+              }).catch(saErr => {
+                console.warn('[Startup Scans] Site audits email scan error:', saErr);
+              });
+            } catch (saErr) {
+              console.warn('[Startup Scans] Site audits email scan error:', saErr);
+            }
+          }
         } catch (err) {
           console.warn('[Startup Scans] Error during automated scans:', err);
         }
@@ -4330,6 +4395,9 @@
 
         window.incidentReportsEngine = new IncidentReportsEngine(window.localDB);
         window.incidentReportsEngine.init();
+
+        window.siteAuditsEngine = new SiteAuditsEngine(window.localDB);
+        window.siteAuditsEngine.init();
 
         window.certsConfigEngine = new CertsConfigEngine(window.localDB);
         window.cprRosterEngine = new CprRosterEngine(window.localDB);
