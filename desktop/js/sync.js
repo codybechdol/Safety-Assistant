@@ -983,6 +983,9 @@ class SyncEngine {
           }
           if (!mCopy.tableKey && mCopy.sheetName && this.db) mCopy.tableKey = this.db.getTableKeyForSheet(mCopy.sheetName);
           if (!mCopy.rowData && mCopy.data) mCopy.rowData = mCopy.data;
+          if ((mCopy.action === 'UPDATE_ROW' || mCopy.action === 'UPDATE_JOB_TRACKING') && !mCopy.updatedFields && !mCopy.updates && mCopy.rowData && typeof mCopy.rowData === 'object') {
+            mCopy.updates = mCopy.rowData;
+          }
           if (!mCopy.itemIdentifier) {
             mCopy.itemIdentifier = mCopy.employeeName || mCopy.empName || mCopy.itemNumber || mCopy.itemNum || mCopy.serialNum || mCopy.jobNumber || mCopy.keyValue || '';
           }

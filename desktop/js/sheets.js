@@ -844,7 +844,6 @@ class SheetNavigator {
 
     this.updateEmployeeViewToggleUI();
     this.updateEmployeeWeekNavUI();
-    this.updateEmployeeWeekNavUI();
     this.renderCurrentSheet();
   }
 
@@ -898,7 +897,7 @@ class SheetNavigator {
     const allWeeks = engine.getAllNavigableWeeks();
     const currentWeekStr = engine.getCurrentWeekSundayStr();
 
-    if (!this.selectedEmployeeWeek) {
+    if (!this.selectedEmployeeWeek || !allWeeks.some(w => w.weekStr === this.selectedEmployeeWeek)) {
       if (this.employeeViewMode === 'planning' && engine) {
         this.selectedEmployeeWeek = typeof engine.getDefaultPlanningWeekStr === 'function'
           ? engine.getDefaultPlanningWeekStr()
@@ -943,6 +942,9 @@ class SheetNavigator {
         // selecting the Current Week (e.g. 11/08/2026) stays in Crew Planning so you can edit & publish it!
         this.employeeViewMode = 'cards';
       }
+      if (this.employeeViewMode === 'planning') {
+        engine.selectedWeek = weekStr;
+      }
     }
     this.updateEmployeeViewToggleUI();
     this.updateEmployeeWeekNavUI();
@@ -963,7 +965,6 @@ class SheetNavigator {
 
   setupEmployeeViewToggle() {
     this.updateEmployeeViewToggleUI();
-    this.updateEmployeeWeekNavUI();
     this.updateEmployeeWeekNavUI();
   }
 
@@ -6110,7 +6111,18 @@ class SheetNavigator {
     const movesMap = configs.confirmed_yellow_moves || {};
     const listForWeek = weekStr ? movesMap[weekStr] : null;
     const latestList = configs.latest_published_yellow_moves || [];
-    const targetList = listForWeek || latestList;
+    const latestWeek = configs.latest_published_yellow_week || '';
+    const engine = window.crewPlanningEngine;
+    const isLatestNewerThanSelected = Boolean(
+      weekStr &&
+      latestWeek &&
+      engine &&
+      typeof engine.parseDate === 'function' &&
+      (engine.parseDate(latestWeek)?.getTime() || 0) > (engine.parseDate(weekStr)?.getTime() || 0)
+    );
+    const targetList = (isLatestNewerThanSelected && Array.isArray(latestList))
+      ? latestList
+      : (listForWeek || latestList);
 
     if (!Array.isArray(targetList)) return false;
     return targetList.some(n => String(n).trim().toLowerCase() === norm);
@@ -8170,10 +8182,11 @@ class SheetNavigator {
       // 3. Level 3: Foreman / Crew Lead Header (Subtle & Indented, Subordinate to Location)
       if (isForemanHeader) {
         let cleanForeman = firstCell.replace(/^[👤👷\s]+/u, '').trim();
+        const fmNote = this.getEmployeeNote(cleanForeman);
         html += `<td colspan="${colSpan}" style="font-size: 11.5px; font-weight: 600; color: #f472b6; background-color: rgba(255, 255, 255, 0.02); padding: 5px 12px 5px 32px; text-align: left; border-left: 2px solid rgba(244, 114, 182, 0.4); border-bottom: 1px solid rgba(255, 255, 255, 0.04);">
           <span style="font-size: 12px; margin-right: 5px; opacity: 0.9;">👤</span>
           <span style="color: var(--text-secondary); font-size: 11px; margin-right: 4px;">Foreman:</span>
-          <span style="font-weight: 700; color: #f472b6;">${this.escapeHtml(cleanForeman || firstCell)}</span>
+          <span style="font-weight: 700; color: #f472b6;" ${this.getEmployeeNoteTooltipAttrs(cleanForeman, fmNote, cleanForeman || firstCell)}>${this.escapeHtml(cleanForeman || firstCell)}</span>
         </td></tr>`;
         return;
       }
@@ -8346,7 +8359,8 @@ class SheetNavigator {
             
             const isEmployeeCol = (c === 0 || colLower === 'employee');
             if (isEmployeeCol && displayVal && !displayVal.includes('STAGE') && !displayVal.includes('Class ') && !displayVal.includes('Previous Employee')) {
-              customContent = `<span style="font-weight: 700; color: #60a5fa; cursor: pointer; text-decoration: underline dotted;" title="Click to view full profile, assignments & certs for ${this.escapeHtml(displayVal)}" onclick="if(window.employeeProfileEngine){window.employeeProfileEngine.openProfileModal('${this.escapeJs(displayVal)}');}">👤 ${this.escapeHtml(displayVal)}</span>`;
+              const swapEmpNote = this.getEmployeeNote(displayVal);
+              customContent = `<span style="font-weight: 700; color: #60a5fa; cursor: pointer; text-decoration: underline dotted;" ${this.getEmployeeNoteTooltipAttrs(displayVal, swapEmpNote, `Click to view full profile, assignments & certs for ${displayVal}`)} onclick="if(window.employeeProfileEngine){window.employeeProfileEngine.openProfileModal('${this.escapeJs(displayVal)}');}">👤 ${this.escapeHtml(displayVal)}</span>`;
               isCellEditable = false;
             } else if ((colLower.includes('current') || colLower.includes('date assigned') || colLower.includes('change out') || colLower.includes('days')) && (!displayVal || displayVal === '—' || displayVal === '-')) {
               customContent = `<span style="color: var(--text-muted); opacity: 0.4;">—</span>`;
@@ -8592,9 +8606,13 @@ class SheetNavigator {
    */
   renderEmployeeCardsView(container, countBadge, tableData) {
     if (!container) return;
+    if (typeof window !== 'undefined' && typeof window.initEmployeeNoteTooltip === 'function') {
+      window.initEmployeeNoteTooltip();
+    }
     if (!tableData) {
       tableData = this.db.getTable('employees') || { headers: [], rows: [] };
     }
+    const empNotesMap = this.buildEmployeeNotesMap(tableData);
 
     const prevWrapper = container.querySelector ? container.querySelector('.employee-cards-wrapper') : null;
     const prevScrollTop = prevWrapper ? prevWrapper.scrollTop : 0;
@@ -8652,10 +8670,10 @@ class SheetNavigator {
       const sBase = s.replace(/\.\d+.*$/, '').trim();
       const suffixMatch = j.match(/\.(\d+)/);
       const suffix = suffixMatch ? suffixMatch[1] : '1';
-      if (jBase === '009-27' && (!sBase || sBase === '009-27')) {
+      if (jBase === '009-27' && sBase === '009-27') {
         r['Secondary Job Number'] = `036-26.${suffix}`;
         healedSecondaryAssignments = true;
-      } else if (jBase === '022-27' && (!sBase || sBase === '022-27')) {
+      } else if (jBase === '022-27' && sBase === '022-27') {
         r['Secondary Job Number'] = `031-27.${suffix}`;
         healedSecondaryAssignments = true;
       }
@@ -8678,6 +8696,8 @@ class SheetNavigator {
             jobName: String(j['Job Name'] || '').toLowerCase(),
             location: String(j['Location'] || '').toLowerCase(),
             foreman: String(j['Foreman'] || '').toLowerCase(),
+            status: String(j['Status'] || '').toLowerCase(),
+            crewType: String(j['Crew Type'] || '').toLowerCase(),
             notes: String(j['Notes'] || '').toLowerCase()
           });
         }
@@ -8690,13 +8710,13 @@ class SheetNavigator {
         });
         if (matchesEmployeeVal) return true;
 
-        // Check if employee's job number matches a job_tracking Job Name, location, foreman, or notes
+        // Check if employee's job number matches a job_tracking Job Name, location, foreman, status, crew type, or notes
         const job = String(r['Job Number'] || r['Job #'] || '').replace(/\.\d+.*$/, '').trim().toLowerCase();
         const secJob = String(r['Secondary Job Number'] || r['Secondary Job #'] || '').replace(/\.\d+.*$/, '').trim().toLowerCase();
         const meta1 = job ? jtMetaMap.get(job) : null;
         const meta2 = secJob ? jtMetaMap.get(secJob) : null;
-        if (meta1 && (meta1.jobName.includes(searchTerm) || meta1.location.includes(searchTerm) || meta1.foreman.includes(searchTerm) || meta1.notes.includes(searchTerm))) return true;
-        if (meta2 && (meta2.jobName.includes(searchTerm) || meta2.location.includes(searchTerm) || meta2.foreman.includes(searchTerm) || meta2.notes.includes(searchTerm))) return true;
+        if (meta1 && (meta1.jobName.includes(searchTerm) || meta1.location.includes(searchTerm) || meta1.foreman.includes(searchTerm) || meta1.status.includes(searchTerm) || meta1.crewType.includes(searchTerm) || meta1.notes.includes(searchTerm))) return true;
+        if (meta2 && (meta2.jobName.includes(searchTerm) || meta2.location.includes(searchTerm) || meta2.foreman.includes(searchTerm) || meta2.status.includes(searchTerm) || meta2.crewType.includes(searchTerm) || meta2.notes.includes(searchTerm))) return true;
 
         return false;
       });
@@ -8721,7 +8741,7 @@ class SheetNavigator {
       const altNames = String(r['Alternate Names'] || '').trim();
       const phone = String(r['Phone Number'] || '').trim();
       const email = String(r['Email Address'] || r['Email'] || '').trim();
-      const notes = String(r['Notes'] || '').trim();
+      const notes = String(r['Notes'] || r['Note'] || '').trim();
       const hireDate = String(r['Hire Date'] || r['HireDate'] || '').trim();
       const status = String(r['Status'] || '').trim();
       const statLower = String(status || '').toLowerCase().trim();
@@ -8863,14 +8883,21 @@ class SheetNavigator {
       }
     });
 
-    // Also include any active crews from job_tracking that currently have 0 assigned members (unless filtered out by search)
-    if (!searchTerm && jtRows.length > 0) {
+    // Also include active/pending/on-hold crews from job_tracking that currently have 0 assigned members (unless filtered out by search)
+    if (jtRows.length > 0) {
       jtRows.forEach(jt => {
         const jn = String(jt['Job Number'] || jt['Job #'] || '').trim();
         const base = jn.replace(/\.\d+.*$/, '').trim();
         const stat = String(jt['Status'] || '').toLowerCase();
-        if (base && !crewGroups.has(base) && !base.startsWith('002') && !base.startsWith('005') && stat !== 'completed' && base.toLowerCase() !== 'job number' && base.toLowerCase() !== 'job #') {
-          crewGroups.set(base, []);
+        if (base && !crewGroups.has(base) && !base.startsWith('002') && !base.startsWith('005') && stat !== 'completed' && stat !== 'closed' && base.toLowerCase() !== 'job number' && base.toLowerCase() !== 'job #') {
+          if (!searchTerm) {
+            crewGroups.set(base, []);
+          } else {
+            const hay = `${base} ${jt['Job Name'] || ''} ${jt['Location'] || ''} ${jt['Foreman'] || ''} ${jt['Status'] || ''} ${jt['Crew Type'] || ''} ${jt['Notes'] || ''}`.toLowerCase();
+            if (hay.includes(searchTerm)) {
+              crewGroups.set(base, []);
+            }
+          }
         }
       });
     }
@@ -9255,7 +9282,7 @@ class SheetNavigator {
                style="color: var(--text-primary); font-weight: ${isLead ? '700' : '500'}; font-size: 12.5px; text-decoration: none; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;"
                onmouseover="this.style.color='#60a5fa'; this.style.textDecoration='underline';"
                onmouseout="this.style.color='var(--text-primary)'; this.style.textDecoration='none';"
-               title="Open Employee Profile for ${this.escapeHtml(e.name)}">
+               ${this.getEmployeeNoteTooltipAttrs(e.name, e.notes, `Open Employee Profile for ${e.name}`)}>
               ${isLead ? '<span title="Crew Foreman / Lead" style="margin-right: 2px;">👑</span>' : ''}
               <span>${this.escapeHtml(e.name)}</span>
             </a>
@@ -9279,6 +9306,12 @@ class SheetNavigator {
               ${this.escapeHtml(e.classification || '—')}
             </span>
             <button class="btn btn-xs"
+                    onclick="event.stopPropagation(); window.sheetNavigator.promptEditEmployeeNote('${this.escapeJs(e.name)}')"
+                    style="background: ${e.notes ? 'rgba(245, 158, 11, 0.16)' : 'transparent'}; border: 1px solid ${e.notes ? 'rgba(245, 158, 11, 0.45)' : 'rgba(255,255,255,0.08)'}; color: ${e.notes ? '#fbbf24' : 'var(--text-muted)'}; font-size: 10px; padding: 1px 5px; border-radius: 3px; cursor: pointer;"
+                    title="${e.notes ? `📝 Note: ${this.escapeHtml(e.notes)} — Click to edit` : `Add note for ${this.escapeHtml(e.name)}`}">
+              📝
+            </button>
+            <button class="btn btn-xs"
                     onclick="event.stopPropagation(); window.sheetNavigator.promptDuplicateMember('${this.escapeJs(e.name)}', '${this.escapeJs(baseJob)}')"
                     style="background: transparent; border: 1px solid rgba(168, 85, 247, 0.3); color: #c084fc; font-size: 10px; padding: 1px 5px; border-radius: 3px; cursor: pointer;"
                     title="Duplicate this employee to another crew (e.g. pending start job)">
@@ -9295,21 +9328,27 @@ class SheetNavigator {
     };
 
     // Helper for rendering a status card (Vacation, Leave, Light Duty, Weeds, Medical)
+    const collapsedStatusSet = this.getCollapsedStatusCardsSet();
     const renderStatusCard = (title, icon, color, borderColor, badgeBg, list, emptyMsg) => {
+      const isCardCollapsed = !searchTerm && collapsedStatusSet.has(title);
       return `
         <div class="crew-card status-crew-card"
              data-status-type="${title}"
-             style="background: var(--bg-secondary); border: 1px solid ${borderColor}; border-radius: 8px; padding: 14px; box-shadow: 0 1px 3px rgba(0,0,0,0.2); display: flex; flex-direction: column; transition: all 0.2s ease;">
-          <!-- Card Header (TITLE ONLY, no Job # or Location) -->
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; border-bottom: 1px solid var(--border-color); padding-bottom: 8px;">
-            <div style="font-weight: 800; font-size: 15px; color: ${color}; display: flex; align-items: center; gap: 8px;">
+             style="background: var(--bg-secondary); border: 1px solid ${borderColor}; border-radius: 8px; padding: ${isCardCollapsed ? '10px 14px' : '14px'}; box-shadow: 0 1px 3px rgba(0,0,0,0.2); display: flex; flex-direction: column; transition: all 0.2s ease;">
+          <!-- Card Header (Clickable to Collapse/Expand; still accepts drops while collapsed) -->
+          <div onclick="window.sheetNavigator.toggleStatusCardCollapsed('${this.escapeJs(title)}')"
+               style="display: flex; justify-content: space-between; align-items: center; margin-bottom: ${isCardCollapsed ? '0' : '10px'}; border-bottom: ${isCardCollapsed ? 'none' : '1px solid var(--border-color)'}; padding-bottom: ${isCardCollapsed ? '0' : '8px'}; cursor: pointer; user-select: none; gap: 8px;"
+               title="${isCardCollapsed ? `Click to expand ${title} (you can also drag employees onto this card)` : `Click to collapse ${title}`}">
+            <div style="font-weight: 800; font-size: 14.5px; color: ${color}; display: flex; align-items: center; gap: 7px; min-width: 0;">
+              <span style="font-size: 11px; color: var(--text-muted); width: 12px; text-align: center;">${isCardCollapsed ? '▸' : '▾'}</span>
               <span>${icon}</span>
               <span>${title}</span>
             </div>
-            <span class="badge" style="background: ${badgeBg}; color: ${color}; font-size: 11px; font-weight: 800; padding: 2px 8px; border-radius: 12px; border: 1px solid ${borderColor};">
+            <span class="badge" style="background: ${badgeBg}; color: ${color}; font-size: 11px; font-weight: 800; padding: 2px 8px; border-radius: 12px; border: 1px solid ${borderColor}; white-space: nowrap;">
               ${list.length} ${list.length === 1 ? 'Employee' : 'Employees'}
             </span>
           </div>
+          ${!isCardCollapsed ? `
           <!-- Employee List (Status Drop Zone) -->
           <div class="status-drop-zone" style="flex: 1; min-height: 48px;">
             ${list.length > 0 ? list.map(e => {
@@ -9340,7 +9379,7 @@ class SheetNavigator {
                      style="color: var(--text-primary); font-weight: 600; font-size: 12.5px; text-decoration: none; cursor: pointer;"
                      onmouseover="this.style.color='#60a5fa'; this.style.textDecoration='underline';"
                      onmouseout="this.style.color='var(--text-primary)'; this.style.textDecoration='none';"
-                     title="Open Employee Profile for ${this.escapeHtml(e.name)}">
+                     ${this.getEmployeeNoteTooltipAttrs(e.name, e.notes, `Open Employee Profile for ${e.name}`)}>
                     ${this.escapeHtml(e.name)}
                   </a>
                   ${e.isPending ? (() => {
@@ -9353,7 +9392,7 @@ class SheetNavigator {
                     📍 ${this.escapeHtml(e.location)}
                   </span>
                   ${title === 'Weeds' && e.notes ? `
-                    <span class="badge" style="background: rgba(163, 230, 53, 0.12); color: #bef264; border: 1px solid rgba(163, 230, 53, 0.3); font-size: 9.5px; padding: 1px 5px; border-radius: 4px;" title="${this.escapeHtml(e.notes)}">
+                    <span class="badge" onclick="event.stopPropagation(); window.sheetNavigator.promptEditEmployeeNote('${this.escapeJs(e.name)}')" style="background: rgba(163, 230, 53, 0.12); color: #bef264; border: 1px solid rgba(163, 230, 53, 0.3); font-size: 9.5px; padding: 1px 5px; border-radius: 4px; cursor: pointer;" title="${this.escapeHtml(e.notes)} — Click to edit">
                       ${this.escapeHtml(e.notes.length > 34 ? e.notes.slice(0, 32) + '…' : e.notes)}
                     </span>
                   ` : ''}
@@ -9362,6 +9401,12 @@ class SheetNavigator {
                   <span class="badge" style="background: var(--bg-tertiary); color: var(--text-muted); font-size: 10px; padding: 1px 6px; border-radius: 3px; font-weight: 700;">
                     ${this.escapeHtml(e.classification || '—')}
                   </span>
+                  <button class="btn btn-xs"
+                          onclick="event.stopPropagation(); window.sheetNavigator.promptEditEmployeeNote('${this.escapeJs(e.name)}')"
+                          style="background: ${e.notes ? 'rgba(245, 158, 11, 0.16)' : 'transparent'}; border: 1px solid ${e.notes ? 'rgba(245, 158, 11, 0.45)' : 'rgba(255,255,255,0.08)'}; color: ${e.notes ? '#fbbf24' : 'var(--text-muted)'}; font-size: 10px; padding: 1px 5px; border-radius: 3px; cursor: pointer;"
+                          title="${e.notes ? `📝 Note: ${this.escapeHtml(e.notes)} — Click to edit` : `Add note for ${this.escapeHtml(e.name)}`}">
+                    📝
+                  </button>
                   <button class="btn btn-xs"
                           onclick="event.stopPropagation(); window.sheetNavigator.promptDuplicateMember('${this.escapeJs(e.name)}', '${this.escapeJs(crewBaseFromJob)}')"
                           style="background: transparent; border: 1px solid rgba(168, 85, 247, 0.3); color: #c084fc; font-size: 10px; padding: 1px 5px; border-radius: 3px; cursor: pointer;"
@@ -9382,6 +9427,7 @@ class SheetNavigator {
               </div>
             `}
           </div>
+          ` : ''}
         </div>
       `;
     };
@@ -9401,19 +9447,21 @@ class SheetNavigator {
       ];
 
       const getStatusBadge = (stat) => {
-        if (stat === 'Active') {
-          return `<span class="badge" style="background: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.35); font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 4px;">🟢 Active</span>`;
+        const raw = String(stat || 'Active').trim() || 'Active';
+        const low = raw.toLowerCase();
+        if (low === 'active') {
+          return `<span class="badge" style="background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.35); font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 4px;">🟢 Active</span>`;
         }
-        if (stat === 'Pending Start') {
-          return `<span class="badge" style="background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.35); font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 4px;">🟡 Pending Start</span>`;
+        if (low === 'pending start' || low === 'pending') {
+          return `<span class="badge" style="background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.35); font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 4px;">🟡 ${this.escapeHtml(low === 'pending' ? 'Pending Start' : raw)}</span>`;
         }
-        if (stat === 'On Hold') {
-          return `<span class="badge" style="background: rgba(100, 116, 139, 0.2); color: #94a3b8; border: 1px solid rgba(100, 116, 139, 0.4); font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 4px;">⏸️ On Hold</span>`;
+        if (low === 'on hold' || low === 'hold' || low === 'paused') {
+          return `<span class="badge" style="background: rgba(100, 116, 139, 0.28); color: #cbd5e1; border: 1px solid rgba(148, 163, 184, 0.5); font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 4px;">⏸️ On Hold</span>`;
         }
-        if (stat === 'Completed') {
-          return `<span class="badge" style="background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.35); font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 4px;">🏁 Completed</span>`;
+        if (low === 'completed' || low === 'closed') {
+          return `<span class="badge" style="background: rgba(59, 130, 246, 0.15); color: #93c5fd; border: 1px solid rgba(59, 130, 246, 0.35); font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 4px;">🏁 ${this.escapeHtml(raw)}</span>`;
         }
-        return `<span class="badge" style="background: var(--bg-tertiary); color: var(--text-muted); font-size: 10px; padding: 2px 6px; border-radius: 4px;">${this.escapeHtml(stat)}</span>`;
+        return `<span class="badge" style="background: rgba(168, 85, 247, 0.16); color: #d8b4fe; border: 1px solid rgba(168, 85, 247, 0.35); font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 4px;">🏷️ ${this.escapeHtml(raw)}</span>`;
       };
 
       const getCrewTypeBadge = (type, baseJob) => {
@@ -9714,7 +9762,7 @@ class SheetNavigator {
                 <a href="javascript:void(0)" onclick="window.employeeProfileEngine.openProfileModal('${this.escapeJs(crew.foreman)}')"
                    style="font-weight: 700; color: #f472b6; text-decoration: none; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;"
                    onmouseover="this.style.textDecoration='underline';" onmouseout="this.style.textDecoration='none';"
-                   title="Open Profile for Foreman ${this.escapeHtml(crew.foreman)}">
+                   ${this.getEmployeeNoteTooltipAttrs(crew.foreman, this.getEmployeeNote(crew.foreman, empNotesMap), `Open Profile for Foreman ${crew.foreman}`)}>
                   <span>👑</span>
                   <span>${this.escapeHtml(crew.foreman)}</span>
                 </a>
@@ -9798,18 +9846,50 @@ class SheetNavigator {
         </datalist>
 
         <!-- 1. Dedicated Status Cards (Vacation, Leave, Light Duty, Weeds, Medical) -->
-        <div style="margin-bottom: 20px;">
-          <div style="font-size: 12px; font-weight: 800; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.5px; margin-bottom: 10px; display: flex; align-items: center; gap: 6px;">
-            <span>📋</span> Status Assignments
+        ${(() => {
+          const isStatusSectionCollapsed = !searchTerm && this.getStatusSectionCollapsed();
+          const visibleStatusTitles = ['Vacation', 'Leave', 'Light Duty', 'Weeds', ...(medicalList.length > 0 ? ['Medical'] : [])];
+          const allCardsCollapsed = !searchTerm && visibleStatusTitles.every(t => collapsedStatusSet.has(t));
+          const summaryPills = [
+            { title: 'Vacation', icon: '🏖️', count: vacationList.length, color: '#fbbf24' },
+            { title: 'Leave', icon: '🌴', count: leaveList.length, color: '#60a5fa' },
+            { title: 'Light Duty', icon: '🩺', count: lightDutyList.length, color: '#34d399' },
+            { title: 'Weeds', icon: '🌾', count: weedsList.length, color: '#a3e635' },
+            ...(medicalList.length > 0 ? [{ title: 'Medical', icon: '🏥', count: medicalList.length, color: '#f472b6' }] : [])
+          ].map(p => `<span class="badge" style="background: rgba(255,255,255,0.05); color: ${p.color}; border: 1px solid rgba(255,255,255,0.08); font-size: 10.5px; font-weight: 700; padding: 1px 6px; border-radius: 10px; text-transform: none; letter-spacing: 0;">${p.icon} ${p.title}: ${p.count}</span>`).join('');
+          return `
+        <div class="status-assignments-section" style="margin-bottom: ${isStatusSectionCollapsed ? '14px' : '20px'};">
+          <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: ${isStatusSectionCollapsed ? '0' : '10px'}; padding: 6px 10px; background: rgba(255,255,255,0.02); border: 1px solid var(--border-color); border-radius: 6px;">
+            <div onclick="window.sheetNavigator.toggleStatusAssignmentsSection()"
+                 style="font-size: 12px; font-weight: 800; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.5px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; cursor: pointer; user-select: none; flex: 1;"
+                 title="${isStatusSectionCollapsed ? 'Click to expand Status Assignments' : 'Click to collapse Status Assignments'}">
+              <span style="font-size: 12px; color: #93c5fd;">${isStatusSectionCollapsed ? '▸' : '▾'}</span>
+              <span>📋</span>
+              <span>Status Assignments</span>
+              ${summaryPills}
+            </div>
+            ${!isStatusSectionCollapsed && !searchTerm ? `
+              <button type="button"
+                      class="btn btn-xs btn-secondary"
+                      onclick="event.stopPropagation(); window.sheetNavigator.setAllStatusCardsCollapsed(${!allCardsCollapsed}, ${this.escapeHtml(JSON.stringify(visibleStatusTitles))})"
+                      style="font-size: 10.5px; font-weight: 700; padding: 2px 8px; border-radius: 4px; cursor: pointer; color: var(--text-muted);"
+                      title="${allCardsCollapsed ? 'Expand all status cards' : 'Collapse all individual status cards'}">
+                ${allCardsCollapsed ? '▾ Expand Cards' : '▸ Collapse Cards'}
+              </button>
+            ` : ''}
           </div>
-          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px;">
+          ${!isStatusSectionCollapsed ? `
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; align-items: start;">
             ${renderStatusCard('Vacation', '🏖️', '#fbbf24', 'rgba(245, 158, 11, 0.4)', 'rgba(245, 158, 11, 0.15)', vacationList, 'No employees currently on Vacation')}
             ${renderStatusCard('Leave', '🌴', '#60a5fa', 'rgba(59, 130, 246, 0.4)', 'rgba(59, 130, 246, 0.15)', leaveList, 'No employees currently on Leave')}
             ${renderStatusCard('Light Duty', '🩺', '#34d399', 'rgba(16, 185, 129, 0.4)', 'rgba(16, 185, 129, 0.15)', lightDutyList, 'No employees currently on Light Duty')}
             ${renderStatusCard('Weeds', '🌾', '#a3e635', 'rgba(132, 204, 22, 0.4)', 'rgba(132, 204, 22, 0.15)', weedsList, 'No employees currently on Weeds (Job Attached)')}
             ${medicalList.length > 0 ? renderStatusCard('Medical', '🏥', '#f472b6', 'rgba(244, 114, 182, 0.4)', 'rgba(244, 114, 182, 0.15)', medicalList, 'No employees currently on Medical') : ''}
           </div>
+          ` : ''}
         </div>
+          `;
+        })()}
 
         <!-- 2. Active Field Crews -->
         <div>
@@ -11552,6 +11632,280 @@ class SheetNavigator {
     }
   }
 
+  /**
+   * Builds a lowercase employee name -> live Note text lookup map from the Employees table.
+   */
+  buildEmployeeNotesMap(empTableOverride = null) {
+    const map = new Map();
+    const empTable = empTableOverride || (this.db ? this.db.getTable('employees') : null);
+    const rows = (empTable && Array.isArray(empTable.rows)) ? empTable.rows : [];
+    rows.forEach(r => {
+      const name = String(r['Employee Name'] || r['Name'] || '').trim();
+      if (!name) return;
+      const note = String(r['Notes'] || r['Note'] || '').trim();
+      if (note) map.set(name.toLowerCase(), note);
+    });
+    return map;
+  }
+
+  getEmployeeNote(empName, notesMap = null) {
+    const clean = String(empName || '').trim().toLowerCase();
+    if (!clean) return '';
+    if (notesMap && typeof notesMap.get === 'function') {
+      return notesMap.get(clean) || '';
+    }
+    const empTable = this.db ? this.db.getTable('employees') : null;
+    const emp = (empTable?.rows || []).find(r => String(r['Employee Name'] || r['Name'] || '').trim().toLowerCase() === clean);
+    return emp ? String(emp['Notes'] || emp['Note'] || '').trim() : '';
+  }
+
+  getEmployeeNoteTooltipAttrs(empName, noteText, fallbackTitle = '') {
+    const cleanNote = String(noteText || '').trim();
+    const fallback = String(fallbackTitle || `Open Employee Profile for ${empName || ''}`).trim();
+    const fullTitle = cleanNote ? `📝 Note: ${cleanNote}\n\n${fallback}` : fallback;
+    return `data-emp-name="${this.escapeHtml(empName || '')}"${cleanNote ? ` data-emp-note="${this.escapeHtml(cleanNote)}"` : ''} title="${this.escapeHtml(fullTitle)}"`;
+  }
+
+  promptEditEmployeeNote(empName) {
+    if (typeof window !== 'undefined' && window.currentRoleMode === 'view_only') {
+      if (typeof window.showToast === 'function') {
+        window.showToast('View-Only Mode: Editing employee notes is disabled.', 'warning');
+      }
+      return;
+    }
+    const cleanName = String(empName || '').trim();
+    if (!cleanName || !this.db) return;
+
+    const empTable = this.db.getTable('employees');
+    const emp = (empTable?.rows || []).find(r => String(r['Employee Name'] || r['Name'] || '').trim().toLowerCase() === cleanName.toLowerCase());
+    if (!emp) {
+      if (typeof window.showToast === 'function') {
+        window.showToast(`Could not find "${cleanName}" in Live Employees.`, 'warning');
+      }
+      return;
+    }
+
+    const existingNote = String(emp['Notes'] || emp['Note'] || '').trim();
+    const empLoc = String(emp['Location'] || '').trim();
+    const empJob = String(emp['Job Number'] || emp['Job #'] || '').trim();
+    const empClass = String(emp['Job Classification'] || emp['Classification'] || '').trim();
+
+    const modalId = 'modal-live-employee-note';
+    const prevModal = document.getElementById(modalId);
+    if (prevModal) {
+      if (typeof prevModal._cleanup === 'function') prevModal._cleanup();
+      prevModal.remove();
+    }
+
+    const overlay = document.createElement('div');
+    overlay.id = modalId;
+    overlay.className = 'modal-overlay active';
+    overlay.style.cssText = 'position: fixed; inset: 0; background: rgba(0,0,0,0.75) !important; display: flex; align-items: center; justify-content: center; z-index: 15500 !important; padding: 20px;';
+    overlay.innerHTML = `
+      <div class="modal-box" style="background: var(--bg-secondary, #1e293b); border: 1px solid rgba(245, 158, 11, 0.4); border-radius: 10px; max-width: 480px; width: 100%; box-shadow: 0 18px 40px rgba(0,0,0,0.65); overflow: hidden; color: var(--text-primary, #f8fafc);">
+        <div style="padding: 14px 18px; background: rgba(245, 158, 11, 0.12); border-bottom: 1px solid rgba(255,255,255,0.1); display: flex; justify-content: space-between; align-items: center;">
+          <div>
+            <div style="font-size: 15px; font-weight: 800; color: #fbbf24; display: flex; align-items: center; gap: 6px;">
+              <span>📝</span> Employee Note — ${this.escapeHtml(cleanName)}
+            </div>
+            <div style="font-size: 11px; color: var(--text-muted, #94a3b8); margin-top: 2px;">
+              ${[empJob || 'Unassigned', empLoc, empClass].filter(Boolean).map(x => this.escapeHtml(x)).join(' • ')}
+            </div>
+          </div>
+          <button type="button" id="btn-live-emp-note-close" style="background: transparent; border: none; color: #94a3b8; font-size: 18px; cursor: pointer; padding: 2px 6px;">✕</button>
+        </div>
+        <div style="padding: 18px;">
+          <label for="live-emp-note-textarea" style="font-size: 11.5px; font-weight: 700; color: #cbd5e1; display: block; margin-bottom: 6px;">
+            Note (shows as a hover tooltip on this employee's name):
+          </label>
+          <textarea id="live-emp-note-textarea" rows="4" placeholder="Enter employee note (e.g. certifications, equipment preference, schedule note, restrictions)..."
+                    style="width: 100%; box-sizing: border-box; background: var(--bg-primary, #0f172a); border: 1px solid rgba(245, 158, 11, 0.4); border-radius: 6px; color: var(--text-primary, #f8fafc); padding: 10px 12px; font-size: 12.5px; line-height: 1.45; resize: vertical; font-family: inherit;">${this.escapeHtml(existingNote)}</textarea>
+          <div style="font-size: 10.5px; color: #94a3b8; margin-top: 6px;">
+            Updates the Live <strong>Employees</strong> sheet note immediately. Press <strong>Ctrl+Enter</strong> to save or <strong>Esc</strong> to cancel.
+          </div>
+        </div>
+        <div style="padding: 12px 18px; border-top: 1px solid rgba(255,255,255,0.08); background: rgba(0,0,0,0.2); display: flex; justify-content: space-between; align-items: center; gap: 8px;">
+          <div>
+            ${existingNote ? `<button type="button" id="btn-live-emp-note-clear" class="btn btn-xs" style="background: rgba(239, 68, 68, 0.14); border: 1px solid rgba(239, 68, 68, 0.4); color: #fca5a5; padding: 6px 10px; border-radius: 6px; font-size: 11.5px; cursor: pointer; font-weight: 700;">🗑️ Clear Note</button>` : ''}
+          </div>
+          <div style="display: flex; gap: 8px;">
+            <button type="button" id="btn-live-emp-note-cancel" class="btn btn-secondary" style="font-size: 12px; padding: 6px 14px; cursor: pointer;">Cancel</button>
+            <button type="button" id="btn-live-emp-note-save" class="btn btn-primary" style="background: #d97706; border: none; color: #fff; font-weight: 700; font-size: 12px; padding: 6px 16px; border-radius: 6px; cursor: pointer;">💾 Save Note</button>
+          </div>
+        </div>
+      </div>
+    `;
+
+    const closeModal = () => {
+      if (typeof overlay._cleanup === 'function') overlay._cleanup();
+      overlay.remove();
+    };
+    const onKey = (evt) => {
+      if (evt.key === 'Escape') {
+        evt.preventDefault();
+        closeModal();
+      } else if ((evt.ctrlKey || evt.metaKey) && evt.key === 'Enter') {
+        evt.preventDefault();
+        const val = document.getElementById('live-emp-note-textarea')?.value || '';
+        closeModal();
+        this._saveLiveEmployeeNote(cleanName, val);
+      }
+    };
+    overlay._cleanup = () => {
+      window.removeEventListener('keydown', onKey);
+    };
+    window.addEventListener('keydown', onKey);
+    overlay.onclick = (evt) => {
+      if (evt.target === overlay) closeModal();
+    };
+
+    document.body.appendChild(overlay);
+
+    const ta = document.getElementById('live-emp-note-textarea');
+    document.getElementById('btn-live-emp-note-close').onclick = closeModal;
+    document.getElementById('btn-live-emp-note-cancel').onclick = closeModal;
+    document.getElementById('btn-live-emp-note-save').onclick = () => {
+      const val = ta ? ta.value : '';
+      closeModal();
+      this._saveLiveEmployeeNote(cleanName, val);
+    };
+    const clearBtn = document.getElementById('btn-live-emp-note-clear');
+    if (clearBtn) {
+      clearBtn.onclick = () => {
+        closeModal();
+        this._saveLiveEmployeeNote(cleanName, '');
+      };
+    }
+    if (ta) {
+      ta.focus();
+      const len = ta.value.length;
+      ta.setSelectionRange(len, len);
+    }
+  }
+
+  async _saveLiveEmployeeNote(empName, nextNotes) {
+    if (typeof window !== 'undefined' && window.currentRoleMode === 'view_only') return;
+    await this._updateEmployeeNoteRow(empName, String(nextNotes || '').trim());
+  }
+
+  getStatusSectionCollapsed() {
+    if (this._statusSectionCollapsed !== undefined) {
+      return Boolean(this._statusSectionCollapsed);
+    }
+    try {
+      this._statusSectionCollapsed = typeof localStorage !== 'undefined' && localStorage.getItem('LIVE_STATUS_SECTION_COLLAPSED') === 'true';
+    } catch {
+      this._statusSectionCollapsed = false;
+    }
+    return this._statusSectionCollapsed;
+  }
+
+  toggleStatusAssignmentsSection() {
+    const next = !this.getStatusSectionCollapsed();
+    this._statusSectionCollapsed = next;
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem('LIVE_STATUS_SECTION_COLLAPSED', String(next));
+      }
+    } catch {
+      // Ignore storage errors
+    }
+    this.renderCurrentSheet();
+  }
+
+  getCollapsedStatusCardsSet() {
+    if (this._collapsedStatusCards instanceof Set) {
+      return this._collapsedStatusCards;
+    }
+    let initial = [];
+    try {
+      const raw = typeof localStorage !== 'undefined' ? localStorage.getItem('LIVE_COLLAPSED_STATUS_CARDS') : '';
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) initial = parsed;
+      }
+    } catch {
+      // Ignore storage errors
+    }
+    this._collapsedStatusCards = new Set(initial);
+    return this._collapsedStatusCards;
+  }
+
+  _saveCollapsedStatusCardsSet(set) {
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem('LIVE_COLLAPSED_STATUS_CARDS', JSON.stringify(Array.from(set)));
+      }
+    } catch {
+      // Ignore storage errors
+    }
+  }
+
+  toggleStatusCardCollapsed(statusTitle) {
+    const set = this.getCollapsedStatusCardsSet();
+    if (set.has(statusTitle)) {
+      set.delete(statusTitle);
+    } else {
+      set.add(statusTitle);
+    }
+    this._saveCollapsedStatusCardsSet(set);
+    this.renderCurrentSheet();
+  }
+
+  setAllStatusCardsCollapsed(collapsed, titles = ['Vacation', 'Leave', 'Light Duty', 'Weeds', 'Medical']) {
+    const set = this.getCollapsedStatusCardsSet();
+    if (collapsed) {
+      titles.forEach(t => set.add(t));
+    } else {
+      set.clear();
+    }
+    this._saveCollapsedStatusCardsSet(set);
+    this.renderCurrentSheet();
+  }
+
+  async _updateEmployeeNoteRow(empName, cleanNotes) {
+    const empTable = this.db?.getTable('employees');
+    if (!empTable || !Array.isArray(empTable.rows)) return;
+    const cleanName = String(empName || '').trim();
+    const emp = empTable.rows.find(r => String(r['Employee Name'] || r['Name'] || '').trim().toLowerCase() === cleanName.toLowerCase());
+    if (!emp) return;
+
+    const headers = Array.isArray(empTable.headers) ? empTable.headers : [];
+    const noteCol = headers.includes('Notes') ? 'Notes' : (headers.includes('Note') ? 'Note' : 'Notes');
+    emp[noteCol] = cleanNotes;
+    emp['Notes'] = cleanNotes;
+
+    const rIdx = emp._rowIdx || (empTable.rows.indexOf(emp) + 2);
+    if (typeof this.db.syncRowToRawGrid === 'function') {
+      this.db.syncRowToRawGrid(empTable, emp);
+    } else if (empTable.rawGrid && empTable.rawGrid[rIdx - 1] && headers.length > 0) {
+      empTable.rawGrid[rIdx - 1] = headers.map(h => (emp[h] !== undefined ? emp[h] : ''));
+    }
+
+    await this.db.addMutation({
+      action: 'UPDATE_ROW',
+      sheetName: empTable.name || 'Employees',
+      tableKey: 'employees',
+      itemIdentifier: cleanName,
+      employeeName: cleanName,
+      row: rIdx,
+      updatedFields: { [noteCol]: cleanNotes }
+    });
+
+    if (this.db._dirtyTablesForSync && typeof this.db._dirtyTablesForSync.add === 'function') {
+      this.db._dirtyTablesForSync.add('employees');
+    }
+
+    await this.db.persistSnapshot(this.db.snapshot);
+    this.renderCurrentSheet();
+    if (typeof window !== 'undefined' && typeof window.showToast === 'function') {
+      window.showToast(
+        cleanNotes ? `📝 Saved note for ${cleanName}` : `🗑️ Cleared note for ${cleanName}`,
+        'info'
+      );
+    }
+  }
+
   async toggleCrewDaySkip(baseJob, colKey) {
     const jtTable = this.db.getTable('job_tracking');
     if (!jtTable || !jtTable.rows) return;
@@ -12332,6 +12686,11 @@ class SheetNavigator {
         this.promptEditSecondJob(empName, baseJob, isSecondary);
       }, '#fbbf24', 'rgba(245, 158, 11, 0.12)'));
     }
+
+    const hasEmpNote = Boolean(String(emp?.['Notes'] || emp?.['Note'] || '').trim());
+    menu.appendChild(makeItem('📝', hasEmpNote ? 'Edit Employee Note...' : 'Add Employee Note...', () => {
+      this.promptEditEmployeeNote(empName);
+    }));
 
     menu.appendChild(makeItem('👤', 'Open Employee Profile', () => {
       if (window.employeeProfileEngine) {
@@ -14023,6 +14382,11 @@ class SheetNavigator {
     }
     html += `</tr></thead><tbody>`;
 
+    if (typeof window !== 'undefined' && typeof window.initEmployeeNoteTooltip === 'function') {
+      window.initEmployeeNoteTooltip();
+    }
+    const empNotesMap = this.buildEmployeeNotesMap();
+
     const isCompliance = this.currentSheetKey === 'safety_compliance';
     const isEmployees = this.currentSheetKey === 'employees';
     const isTraining = this.currentSheetKey === 'training_tracking';
@@ -14311,7 +14675,7 @@ class SheetNavigator {
           } else if (hLower.includes('foreman') || hLower.includes('lead')) {
             const foremanStr = String(val).trim();
             if (foremanStr) {
-              customCellHtml = `<span style="font-weight: 600; color: #93c5fd; cursor: pointer; text-decoration: underline dotted;" title="Click to view profile for ${this.escapeHtml(foremanStr)}" onclick="if(window.employeeProfileEngine){window.employeeProfileEngine.openProfileModal('${this.escapeJs(foremanStr)}');}">👤 ${this.escapeHtml(val)}</span>`;
+              customCellHtml = `<span style="font-weight: 600; color: #93c5fd; cursor: pointer; text-decoration: underline dotted;" ${this.getEmployeeNoteTooltipAttrs(foremanStr, this.getEmployeeNote(foremanStr, empNotesMap), `Click to view profile for ${foremanStr}`)} onclick="if(window.employeeProfileEngine){window.employeeProfileEngine.openProfileModal('${this.escapeJs(foremanStr)}');}">👤 ${this.escapeHtml(val)}</span>`;
             }
           }
         }
@@ -14360,7 +14724,7 @@ class SheetNavigator {
           } else if (hLower.includes('employee') || hLower === 'name') {
             const empNameStr = String(val).trim();
             if (empNameStr) {
-              customCellHtml = `<span style="font-weight: 600; color: #60a5fa; cursor: pointer; text-decoration: underline dotted;" title="Click to view full profile, assignments & certs for ${this.escapeHtml(empNameStr)}" onclick="if(window.employeeProfileEngine){window.employeeProfileEngine.openProfileModal('${this.escapeJs(empNameStr)}');}">👤 ${this.escapeHtml(val)}</span>`;
+              customCellHtml = `<span style="font-weight: 600; color: #60a5fa; cursor: pointer; text-decoration: underline dotted;" ${this.getEmployeeNoteTooltipAttrs(empNameStr, this.getEmployeeNote(empNameStr, empNotesMap), `Click to view full profile, assignments & certs for ${empNameStr}`)} onclick="if(window.employeeProfileEngine){window.employeeProfileEngine.openProfileModal('${this.escapeJs(empNameStr)}');}">👤 ${this.escapeHtml(val)}</span>`;
             } else {
               customCellHtml = `<span style="color: var(--text-muted);">—</span>`;
             }
@@ -14460,7 +14824,7 @@ class SheetNavigator {
           } else if (hLower.includes('lead') || hLower.includes('foreman')) {
             const leadName = String(val).trim();
             if (leadName) {
-              customCellHtml = `<span style="font-weight: 600; color: #60a5fa; cursor: pointer; text-decoration: underline dotted;" title="Click to view profile & certs for ${this.escapeHtml(leadName)}" onclick="if(window.employeeProfileEngine){window.employeeProfileEngine.openProfileModal('${this.escapeJs(leadName)}');}">👤 ${this.escapeHtml(val)}</span>`;
+              customCellHtml = `<span style="font-weight: 600; color: #60a5fa; cursor: pointer; text-decoration: underline dotted;" ${this.getEmployeeNoteTooltipAttrs(leadName, this.getEmployeeNote(leadName, empNotesMap), `Click to view profile & certs for ${leadName}`)} onclick="if(window.employeeProfileEngine){window.employeeProfileEngine.openProfileModal('${this.escapeJs(leadName)}');}">👤 ${this.escapeHtml(val)}</span>`;
             }
           } else if (hLower.includes('month')) {
             customCellHtml = `<span style="font-weight: 700; color: #a78bfa;">📅 ${this.escapeHtml(val)}</span>`;
@@ -14500,7 +14864,8 @@ class SheetNavigator {
           const nonEmpHolders = ['on shelf', 'in testing', 'packed for testing', 'packed for delivery', 'failed rubber', 'failed', 'lost', 'destroyed', 'new', 'unassigned', 'n/a', '—', '-'];
           const holderLower = String(val).toLowerCase().trim();
           if (!nonEmpHolders.includes(holderLower)) {
-            customCellHtml = `<span class="profile-link-badge" style="color: #60a5fa; cursor: pointer; margin-right: 4px; display: inline-block;" title="Click to view assignments & certs for ${this.escapeHtml(val)}" onclick="event.stopPropagation(); if(window.employeeProfileEngine){window.employeeProfileEngine.openProfileModal('${this.escapeJs(val)}');}">👤</span><span class="cell-text" style="font-weight: 600; color: #93c5fd;">${this.escapeHtml(val)}</span>`;
+            const holderStr = String(val).trim();
+            customCellHtml = `<span class="profile-link-badge" style="color: #60a5fa; cursor: pointer; margin-right: 4px; display: inline-block;" title="Click to view assignments & certs for ${this.escapeHtml(val)}" onclick="event.stopPropagation(); if(window.employeeProfileEngine){window.employeeProfileEngine.openProfileModal('${this.escapeJs(val)}');}">👤</span><span class="cell-text" style="font-weight: 600; color: #93c5fd;" ${this.getEmployeeNoteTooltipAttrs(holderStr, this.getEmployeeNote(holderStr, empNotesMap), `Assigned to ${holderStr}`)}>${this.escapeHtml(val)}</span>`;
           }
         }
 
@@ -14549,7 +14914,8 @@ class SheetNavigator {
           if (isEmployeeNameCol) {
             const empNameStr = String(val).trim();
             if (empNameStr) {
-              customCellHtml = `<span style="font-weight: 700; color: #60a5fa; cursor: pointer; text-decoration: underline dotted; display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px; border-radius: 4px;" title="Click to view full profile, equipment assignments & certs for ${this.escapeHtml(empNameStr)}" onclick="if(window.employeeProfileEngine){window.employeeProfileEngine.openProfileModal('${this.escapeJs(empNameStr)}');}">👤 ${this.escapeHtml(val)}</span>`;
+              const empRowNote = String(row['Notes'] || row['Note'] || '').trim() || this.getEmployeeNote(empNameStr, empNotesMap);
+              customCellHtml = `<div style="display: inline-flex; align-items: center; gap: 6px; max-width: 100%;"><span style="font-weight: 700; color: #60a5fa; cursor: pointer; text-decoration: underline dotted; display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px; border-radius: 4px;" ${this.getEmployeeNoteTooltipAttrs(empNameStr, empRowNote, `Click to view full profile, equipment assignments & certs for ${empNameStr}`)} onclick="if(window.employeeProfileEngine){window.employeeProfileEngine.openProfileModal('${this.escapeJs(empNameStr)}');}">👤 <span class="cell-text">${this.escapeHtml(val)}</span></span><button type="button" class="btn btn-xs" onclick="event.stopPropagation(); window.sheetNavigator.promptEditEmployeeNote('${this.escapeJs(empNameStr)}')" style="background: ${empRowNote ? 'rgba(245, 158, 11, 0.16)' : 'transparent'}; border: 1px solid ${empRowNote ? 'rgba(245, 158, 11, 0.45)' : 'rgba(255,255,255,0.12)'}; color: ${empRowNote ? '#fbbf24' : 'var(--text-muted)'}; font-size: 10px; padding: 1px 4px; border-radius: 3px; cursor: pointer; flex-shrink: 0;" title="${empRowNote ? `📝 Note: ${this.escapeHtml(empRowNote)} — Click to edit` : `Add note for ${this.escapeHtml(empNameStr)}`}">📝</button></div>`;
             }
           } else if (hLower === 'job number' || hLower === 'job #') {
             customCellHtml = `<span style="font-family: monospace; font-weight: bold; color: #60a5fa;">${this.escapeHtml(val)}</span>`;
@@ -16843,6 +17209,11 @@ class SheetNavigator {
 
     html += `</tr></thead><tbody>`;
 
+    if (typeof window !== 'undefined' && typeof window.initEmployeeNoteTooltip === 'function') {
+      window.initEmployeeNoteTooltip();
+    }
+    const jtEmpNotesMap = this.buildEmployeeNotesMap();
+
     // Presets for Work Schedule
     const schedPresets = [
       'Mon-Thu (4 10s)',
@@ -16932,7 +17303,7 @@ class SheetNavigator {
       html += `<td class="editable" contenteditable="true" data-row="${sheetRowIdx}" data-col="${getColIdx('Location')}" data-header="Location" data-item="${this.escapeHtml(jobNum)}" title="Click to edit Location">${this.escapeHtml(loc)}</td>`;
 
       // Foreman (clickable to profile)
-      html += `<td data-row="${sheetRowIdx}" data-col="${getColIdx('Foreman')}" data-header="Foreman" data-item="${this.escapeHtml(jobNum)}">${foreman ? `<span style="font-weight: 600; color: #93c5fd; cursor: pointer; text-decoration: underline dotted;" title="Click to view employee profile for ${this.escapeHtml(foreman)}" onclick="if(window.employeeProfileEngine){window.employeeProfileEngine.openProfileModal('${this.escapeJs(foreman)}');}">👤 ${this.escapeHtml(foreman)}</span>` : '<span style="color: var(--text-muted); font-style: italic;">Unassigned</span>'}</td>`;
+      html += `<td data-row="${sheetRowIdx}" data-col="${getColIdx('Foreman')}" data-header="Foreman" data-item="${this.escapeHtml(jobNum)}">${foreman ? `<span style="font-weight: 600; color: #93c5fd; cursor: pointer; text-decoration: underline dotted;" ${this.getEmployeeNoteTooltipAttrs(foreman, this.getEmployeeNote(foreman, jtEmpNotesMap), `Click to view employee profile for ${foreman}`)} onclick="if(window.employeeProfileEngine){window.employeeProfileEngine.openProfileModal('${this.escapeJs(foreman)}');}">👤 ${this.escapeHtml(foreman)}</span>` : '<span style="color: var(--text-muted); font-style: italic;">Unassigned</span>'}</td>`;
 
       // Crew Size
       html += `<td class="editable" contenteditable="true" data-row="${sheetRowIdx}" data-col="${getColIdx('Crew Size')}" data-header="Crew Size" data-item="${this.escapeHtml(jobNum)}" style="text-align: center; font-weight: 700; color: #bfdbfe;" title="Click to edit Crew Size">${this.escapeHtml(crewSize)}</td>`;

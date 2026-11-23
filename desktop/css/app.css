@@ -1030,6 +1030,20 @@ body {
   border-right: 5px solid #38bdf8 !important;
   box-shadow: 5px 0 16px rgba(56, 189, 248, 0.5) !important;
 }
+.planned-crew-card.member-drop-move {
+  border-color: #3b82f6 !important;
+  box-shadow: 0 0 10px rgba(59, 130, 246, 0.4) !important;
+}
+.planned-crew-card.member-drop-copy {
+  border-color: #c084fc !important;
+  box-shadow: 0 0 10px rgba(168, 85, 247, 0.4) !important;
+}
+.side-pane-section.side-drop-move {
+  border-color: #f59e0b !important;
+}
+.side-pane-section.side-drop-copy {
+  border-color: #c084fc !important;
+}
 
 #edit-order-modal input,
 #edit-order-modal select,

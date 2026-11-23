@@ -1653,6 +1653,7 @@ class SupabaseSyncEngine {
           if (!tKey || (filterSet && !filterSet.has(tKey))) continue;
 
           if (this._tablePushTimers && this._tablePushTimers.has(tKey)) continue;
+          if (tKey === '__configs__' && this.db && (this.db._persistTimer || (this.db._dirtyTablesForSync && this.db._dirtyTablesForSync.has('__configs__')))) continue;
           if (tKey === '__manual_picks__' && this._tablePushTimers && this._tablePushTimers.has('__configs__')) continue;
           if (this.pendingQueue && this.pendingQueue.some(pm => {
             const pKey = pm.tableKey || (pm.sheetName && this.db.getTableKeyForSheet ? this.db.getTableKeyForSheet(pm.sheetName) : null);

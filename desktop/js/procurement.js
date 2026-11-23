@@ -129,9 +129,18 @@ class ProcurementEngine {
   }
 
   loadData() {
-    this.loadVendors();
-    this.scanPurchaseNeeds();
+    this.buildPurchaseNeeds();
     this.render();
+  }
+
+  /**
+   * Rebuilds procurement items and pricing from the local snapshot without forcing a full view render.
+   */
+  buildPurchaseNeeds() {
+    this.loadVendors();
+    this.loadPreviousEmployees();
+    this.scanPurchaseNeeds();
+    this.updatePricing();
   }
 
   loadVendors() {
@@ -273,6 +282,302 @@ class ProcurementEngine {
     });
   }
 
+  /**
+   * Canonical metadata for all 9 equipment swap tables.
+   */
+  _getAllSwapTableConfigs() {
+    return [
+      { swapKey: 'glove_swaps', invKey: 'gloves', cat: 'glove', type: 'Gloves', sheetName: 'Glove Swaps', isRubber: true },
+      { swapKey: 'sleeve_swaps', invKey: 'sleeves', cat: 'sleeve', type: 'Sleeves', sheetName: 'Sleeve Swaps', isRubber: true },
+      { swapKey: 'blanket_swaps', invKey: 'blankets', cat: 'blanket', type: 'Blankets', sheetName: 'Blanket Swaps', isRubber: false },
+      { swapKey: 'mack_swaps', invKey: 'macks', cat: 'mack', type: 'MACKs', sheetName: 'MACK Swaps', isRubber: false },
+      { swapKey: 'hv_tester_swaps', invKey: 'hv_testers', cat: 'hv tester', type: 'HV Testers', sheetName: 'HV Tester Swaps', isRubber: false },
+      { swapKey: 'phasing_set_swaps', invKey: 'phasing_sets', cat: 'phasing', type: 'Phasing Sets', sheetName: 'Phasing Set Swaps', isRubber: false },
+      { swapKey: 'aed_swaps', invKey: 'aed', cat: 'aed', type: 'AED', sheetName: 'AED Swaps', isRubber: false },
+      { swapKey: 'ground_swaps', invKey: 'grounds', cat: 'ground', type: 'Grounds', sheetName: 'Ground Swaps', isRubber: false },
+      { swapKey: 'hot_stick_swaps', invKey: 'hot_sticks', cat: 'hot stick', type: 'Hot Sticks', sheetName: 'Hot Stick Swaps', isRubber: false }
+    ];
+  }
+
+  _getAllSwapKeys() {
+    return this._getAllSwapTableConfigs().map(c => c.swapKey);
+  }
+
+  _getSwapTableKeyForCategory(catOrType) {
+    const c = String(catOrType || '').toLowerCase().trim();
+    if (!c) return '';
+    if (c === 'glove_swaps' || c.includes('glove')) return 'glove_swaps';
+    if (c === 'sleeve_swaps' || c.includes('sleeve')) return 'sleeve_swaps';
+    if (c === 'blanket_swaps' || c.includes('blanket')) return 'blanket_swaps';
+    if (c === 'mack_swaps' || c.includes('mack')) return 'mack_swaps';
+    if (c === 'hv_tester_swaps' || c.includes('hv_tester') || c.includes('hv tester') || c === 'hvt') return 'hv_tester_swaps';
+    if (c === 'phasing_set_swaps' || c.includes('phasing')) return 'phasing_set_swaps';
+    if (c === 'aed_swaps' || c === 'aed' || c.includes('aed')) return 'aed_swaps';
+    if (c === 'ground_swaps' || c.includes('ground')) return 'ground_swaps';
+    if (c === 'hot_stick_swaps' || c.includes('hot_stick') || c.includes('hot stick') || c.includes('stick')) return 'hot_stick_swaps';
+    return '';
+  }
+
+  _getTableSheetName(table, tableKey, fallbackName = '') {
+    if (table && table.name) return table.name;
+    if (this.db && typeof this.db.getSheetNameForTableKey === 'function' && tableKey) {
+      return this.db.getSheetNameForTableKey(tableKey);
+    }
+    const cfg = this._getAllSwapTableConfigs().find(c => c.swapKey === tableKey || c.invKey === tableKey);
+    if (cfg) return cfg.swapKey === tableKey ? cfg.sheetName : cfg.type;
+    return fallbackName || tableKey || '';
+  }
+
+  /**
+   * Resolves the 1-based and 0-based column index for a logical role on a swap/data table.
+   * Returns null if a column (e.g. 'notes') does not exist in table headers — never guesses hidden cols.
+   */
+  _findTableCol(table, tableKey, fieldRole) {
+    if (!table) return null;
+    let headers = Array.isArray(table.headers) ? table.headers : [];
+    if ((!headers.length || headers.length === 1) && Array.isArray(table.rawGrid)) {
+      for (let r = 0; r < Math.min(table.rawGrid.length, 4); r++) {
+        const cand = table.rawGrid[r];
+        if (Array.isArray(cand) && cand.some(h => /^status$/i.test(String(h || '').trim()))) {
+          headers = cand;
+          break;
+        }
+      }
+    }
+
+    const matchers = {
+      employee: [/^(?:crew\s*lead\s*\/\s*employee|employee(?:\s*name)?|assigned\s*to)$/i],
+      status: [/^status$/i],
+      pickList: [/^pick\s*list/i],
+      picked: [/^picked$/i],
+      notes: [/^notes?$/i],
+      size: [/^(?:size|type|model)$/i],
+      class: [/^(?:class|kv)$/i],
+      urgency: [/^urgency$/i],
+      dateChanged: [/^date\s*changed$/i]
+    };
+
+    const patterns = matchers[fieldRole] || [];
+    for (const re of patterns) {
+      const idx = headers.findIndex(h => re.test(String(h || '').trim()));
+      if (idx !== -1) {
+        return { col0Based: idx, col1Based: idx + 1, headerName: String(headers[idx]).trim() };
+      }
+    }
+
+    // Never fabricate a fallback for optional columns like Notes, Urgency, or Class
+    if (fieldRole === 'notes' || fieldRole === 'urgency' || fieldRole === 'class') {
+      return null;
+    }
+
+    // Known fallbacks ONLY when headers are missing
+    const tk = String(tableKey || '').toLowerCase();
+    const fallbacks = {
+      mack_swaps: { employee: 1, size: 4, pickList: 9, status: 10, picked: 11, dateChanged: 12 },
+      hv_tester_swaps: { employee: 1, size: 3, pickList: 9, status: 10, picked: 11, dateChanged: 12 },
+      phasing_set_swaps: { employee: 1, size: 3, pickList: 9, status: 10, picked: 11, dateChanged: 12 },
+      ground_swaps: { employee: 1, size: 4, pickList: 10, status: 11, picked: 12, dateChanged: 13 },
+      hot_stick_swaps: { employee: 1, size: 3, pickList: 8, status: 9, picked: 10, dateChanged: 11 },
+      aed_swaps: { employee: 1, size: 3, pickList: 6, status: 7, picked: 8, dateChanged: 9 },
+      default: { employee: 1, size: 3, pickList: 7, status: 8, picked: 9, dateChanged: 10 }
+    };
+    const fbMap = fallbacks[tk] || fallbacks.default;
+    const col1 = fbMap[fieldRole];
+    if (!col1) return null;
+    const defaultHeaders = {
+      employee: 'Employee',
+      size: 'Size',
+      pickList: 'Pick List Item #',
+      status: 'Status',
+      picked: 'Picked',
+      dateChanged: 'Date Changed'
+    };
+    return { col0Based: col1 - 1, col1Based: col1, headerName: defaultHeaders[fieldRole] || fieldRole };
+  }
+
+  /**
+   * Queues an UPDATE_CELL mutation with explicit oldValue captured BEFORE mutating rawGrid,
+   * so db.addMutation() never drops the mutation as unchanged, and avoids writing non-existent columns.
+   */
+  async _queueCellMutation(table, tableKey, rowObjOrGridIdx, fieldRole, newValue, extraMutOpts = {}) {
+    if (!table) return false;
+    const colInfo = this._findTableCol(table, tableKey, fieldRole);
+    if (!colInfo) return false;
+
+    const isObj = rowObjOrGridIdx && typeof rowObjOrGridIdx === 'object';
+    const rowObj = isObj ? rowObjOrGridIdx : null;
+    const actualRowIdx = isObj
+      ? (rowObj._rowIdx || (Array.isArray(table.rows) ? table.rows.indexOf(rowObj) + 2 : 2))
+      : (Number(rowObjOrGridIdx) + 1);
+    if (!actualRowIdx || actualRowIdx < 2) return false;
+
+    const gridIdx = actualRowIdx - 1;
+    let oldVal = '';
+    if (Array.isArray(table.rawGrid) && Array.isArray(table.rawGrid[gridIdx]) && table.rawGrid[gridIdx][colInfo.col0Based] !== undefined) {
+      oldVal = table.rawGrid[gridIdx][colInfo.col0Based];
+    } else if (rowObj && rowObj[colInfo.headerName] !== undefined) {
+      oldVal = rowObj[colInfo.headerName];
+    }
+
+    const normOld = (oldVal === undefined || oldVal === null) ? '' : String(oldVal).trim();
+    const normNew = (newValue === undefined || newValue === null) ? '' : String(newValue).trim();
+
+    if (this.db && typeof this.db.addMutation === 'function' && normOld !== normNew) {
+      await this.db.addMutation({
+        action: 'UPDATE_CELL',
+        sheetName: this._getTableSheetName(table, tableKey),
+        tableKey: tableKey,
+        row: actualRowIdx,
+        col: colInfo.col1Based,
+        header: colInfo.headerName,
+        oldValue: oldVal,
+        value: newValue,
+        ...extraMutOpts
+      });
+    }
+
+    // Ensure local rowObj and rawGrid reflect the new value even if addMutation was skipped/mocked
+    if (rowObj) {
+      rowObj[colInfo.headerName] = newValue;
+    }
+    if (Array.isArray(table.rawGrid) && Array.isArray(table.rawGrid[gridIdx])) {
+      table.rawGrid[gridIdx][colInfo.col0Based] = newValue;
+    }
+    return true;
+  }
+
+  /**
+   * Queues an UPDATE_ROW mutation with updatedFields, updates, rowData, and itemIdentifier
+   * so both LocalDatabase and 89-SyncAPI.gs apply it reliably.
+   */
+  async _queueRowUpdate(table, tableKey, defaultSheetName, rowObj, changedFields = null, itemIdentifier = '') {
+    if (!table || !rowObj) return false;
+    const rIdx = rowObj._rowIdx || (Array.isArray(table.rows) ? table.rows.indexOf(rowObj) + 2 : 2);
+    const updatesObj = changedFields ? { ...changedFields } : { ...rowObj };
+    delete updatesObj._rowIdx;
+
+    if (changedFields) {
+      Object.assign(rowObj, changedFields);
+    }
+    if (this.db && typeof this.db.syncRowToRawGrid === 'function') {
+      this.db.syncRowToRawGrid(table, rowObj);
+    }
+
+    const rowDataCopy = { ...rowObj };
+    delete rowDataCopy._rowIdx;
+
+    if (this.db && typeof this.db.addMutation === 'function') {
+      await this.db.addMutation({
+        action: 'UPDATE_ROW',
+        sheetName: this._getTableSheetName(table, tableKey, defaultSheetName),
+        tableKey: tableKey,
+        row: rIdx,
+        itemIdentifier: itemIdentifier || '',
+        updates: updatesObj,
+        updatedFields: updatesObj,
+        rowData: rowDataCopy
+      });
+    }
+    return true;
+  }
+
+  /**
+   * Deletes a Purchase Orders row via DELETE_ROW mutation with rowData + itemIdentifier
+   * without pre-splicing poTable.rows so applyLocalMutation keeps rows, rawGrid, and _rowIdx aligned.
+   */
+  async _queueDeletePoRow(poTable, poRow) {
+    if (!poTable || !poRow) return false;
+    const idx = Array.isArray(poTable.rows) ? poTable.rows.indexOf(poRow) : -1;
+    const targetRowIdx = poRow._rowIdx || (idx !== -1 ? idx + 2 : null);
+    if (!targetRowIdx) return false;
+
+    const rawPoNum = String(poRow['PO Number'] || poRow['PO #'] || '').trim();
+    const safeId = (rawPoNum && rawPoNum !== '—' && rawPoNum.toLowerCase() !== 'pending' && rawPoNum.toLowerCase() !== 'ed') ? rawPoNum : '';
+    const rowSnapshot = { ...poRow };
+    delete rowSnapshot._rowIdx;
+
+    if (this.db && typeof this.db.addMutation === 'function') {
+      await this.db.addMutation({
+        action: 'DELETE_ROW',
+        sheetName: this._getTableSheetName(poTable, 'purchase_orders', 'Purchase Orders'),
+        tableKey: 'purchase_orders',
+        row: targetRowIdx,
+        itemIdentifier: safeId,
+        rowData: rowSnapshot
+      });
+    } else if (idx !== -1) {
+      poTable.rows.splice(idx, 1);
+      if (Array.isArray(poTable.rawGrid) && targetRowIdx <= poTable.rawGrid.length) {
+        poTable.rawGrid.splice(targetRowIdx - 1, 1);
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Extracts normalized PPE procurement metadata from a safety_equipment_needs row,
+   * supporting both Desktop keys and Google Sheets canonical headers without confusing
+   * vehicle/field safety reports for PPE orders.
+   */
+  _getSafetyNeedMeta(nr) {
+    if (!nr || typeof nr !== 'object') return null;
+    const reportType = String(nr['Report Type'] || '').trim().toLowerCase();
+    const isPpeSheetRow = Boolean(nr['Employee'] || nr['Item Type'] || reportType.includes('ppe') || reportType.includes('purchase'));
+    if (!isPpeSheetRow) return null;
+
+    const employee = String(nr['Employee'] || nr['Foreman'] || '').trim();
+    const itemType = String(nr['Item Type'] || nr['Equipment Type'] || '').trim();
+    const issueDesc = String(nr['Issue Description'] || '');
+
+    let size = String(nr['Size'] || '').trim();
+    if (!size && issueDesc) {
+      const mSize = issueDesc.match(/Size:\s*([^|;]+)/i);
+      if (mSize) size = mSize[1].trim();
+    }
+    let classVal = String(nr['Class'] || '').trim();
+    if (!classVal && issueDesc) {
+      const mClass = issueDesc.match(/Class:\s*([^|;]+)/i);
+      if (mClass) classVal = mClass[1].trim();
+    }
+    let urgency = String(nr['Urgency'] || '').trim();
+    if (!urgency && issueDesc) {
+      const mUrg = issueDesc.match(/Urgency:\s*([^|;]+)/i);
+      if (mUrg) urgency = mUrg[1].trim();
+    }
+
+    return {
+      employee,
+      itemType,
+      size: size || '—',
+      classVal: classVal || 'Class 2',
+      urgency: urgency || 'Immediate',
+      status: String(nr['Status'] || '').trim(),
+      notes: String(nr['Notes'] || '').trim(),
+      dateRequested: String(nr['Date Requested'] || nr['Report Date'] || '').trim()
+    };
+  }
+
+  _buildSafetyNeedRow({ employee, itemType, size, classVal, urgency = 'Immediate', status = 'Ordered', dateRequested = '', notes = '' }) {
+    const dt = dateRequested || new Date().toLocaleDateString();
+    const cls = classVal || 'Class 2';
+    const sz = size || 'Standard';
+    return {
+      'Report Date': dt,
+      'Report Type': 'PPE Purchase Order',
+      'Foreman': employee,
+      'Equipment Type': itemType,
+      'Issue Description': `Size: ${sz} | Class: ${cls} | Urgency: ${urgency}`,
+      'Employee': employee,
+      'Item Type': itemType,
+      'Size': sz,
+      'Class': cls,
+      'Urgency': urgency,
+      'Status': status,
+      'Date Requested': dt,
+      'Notes': notes
+    };
+  }
+
   cleanEmployeeName(name) {
     if (!name) return '';
     let str = String(name).trim();
@@ -350,16 +655,18 @@ class ProcurementEngine {
     const empTable = snap.tables['employees'] || (this.db && typeof this.db.getTable === 'function' ? this.db.getTable('employees') : null);
     if (empTable) {
       const rows = empTable.rows || empTable.rawGrid || [];
-      rows.forEach(r => {
+      rows.forEach((r, idx) => {
         let name = '';
         let loc = '';
         let status = '';
         let lastDay = '';
 
         if (Array.isArray(r)) {
+          if (idx === 0) return; // skip header row
           name = String(r[0] || '').trim();
           loc = String(r[1] || '').trim();
-          status = String(r[2] || '').trim();
+          // Column 2 is Job Number on Employees sheet, not Status; check Last Day (col 10) if present
+          lastDay = String(r[10] || '').trim();
         } else if (r && typeof r === 'object') {
           name = String(r['Employee Name'] || r['Name'] || r['Worker'] || '').trim();
           loc = String(r['Location'] || r['City'] || '').trim();
@@ -550,78 +857,68 @@ class ProcurementEngine {
     if (!snap || !snap.tables) return;
 
     let modified = false;
-    const swapKeys = ['glove_swaps', 'sleeve_swaps', 'blanket_swaps', 'mack_swaps'];
-    const fn = (this.db && typeof this.db.addMutation === 'function')
-      ? this.db.addMutation.bind(this.db)
-      : ((this.db && typeof this.db.queueMutation === 'function') ? this.db.queueMutation.bind(this.db) : null);
+    const swapKeys = this._getAllSwapKeys();
 
     for (const sKey of swapKeys) {
       const table = snap.tables[sKey];
       if (!table) continue;
-      const headers = table.headers || (Array.isArray(table.rawGrid?.[1]) ? table.rawGrid[1] : []);
 
       // 1. Clean table.rows
       if (table.rows && Array.isArray(table.rows)) {
         for (let rIdx = 0; rIdx < table.rows.length; rIdx++) {
           const row = table.rows[rIdx];
-          const emp = String(row['Employee'] || row['Employee Name'] || row['Assigned To'] || '').trim();
+          const emp = String(row['Employee'] || row['Employee Name'] || row['Crew Lead / Employee'] || row['Assigned To'] || '').trim();
           if (!emp) continue;
 
           if (this.isDepartedOrPreviousEmployee(emp)) {
             const status = String(row['Status'] || '').trim().toLowerCase();
-            const pickItem = String(row['Pick List Item #'] || '').trim();
+            const pickItem = String(row['Pick List Item #'] || row['Pick List'] || '').trim();
 
             // If this row has a purchase need status, clear it or convert to Reclaim / Departed
             if (status.includes('purchase') || pickItem === '—') {
-              const hasExistingItem = row['Current Item'] && row['Current Item'] !== '—' && row['Current Item'] !== 'N/A';
+              const currentItem = row['Current Item'] || row['Current Glove #'] || row['Current Sleeve #'] || row['Current Blanket #'] || row['Current MACK #'] || row['Current Item #'] || row['Serial #'];
+              const hasExistingItem = currentItem && currentItem !== '—' && currentItem !== 'N/A';
               const newStatus = hasExistingItem ? 'Reclaim (Departed)' : 'Departed — Inactive';
-              row['Status'] = newStatus;
-              row['Pick List Item #'] = '';
-              row['Urgency'] = 'None';
-              modified = true;
-
-              if (fn) {
-                const actualRowIdx = row._rowIdx || (rIdx + 2);
-                const getColNum = (hName) => {
-                  const idx = headers.findIndex(h => h.toLowerCase() === hName.toLowerCase());
-                  return idx !== -1 ? idx + 1 : headers.length;
-                };
-                const sName = table.name || sKey;
-                try {
-                  await fn({ action: 'UPDATE_CELL', sheetName: sName, tableKey: sKey, row: actualRowIdx, col: getColNum('Status'), header: 'Status', value: newStatus });
-                  await fn({ action: 'UPDATE_CELL', sheetName: sName, tableKey: sKey, row: actualRowIdx, col: getColNum('Pick List Item #'), header: 'Pick List Item #', value: '' });
-                  if (headers.includes('Urgency')) {
-                    await fn({ action: 'UPDATE_CELL', sheetName: sName, tableKey: sKey, row: actualRowIdx, col: getColNum('Urgency'), header: 'Urgency', value: 'None' });
-                  }
-                } catch (e) {
-                  console.warn('Could not queue cleanup mutation for', emp, e);
-                }
+              try {
+                await this._queueCellMutation(table, sKey, row, 'status', newStatus);
+                await this._queueCellMutation(table, sKey, row, 'pickList', '');
+                await this._queueCellMutation(table, sKey, row, 'urgency', 'None');
+              } catch (e) {
+                console.warn('Could not queue cleanup mutation for', emp, e);
               }
+              row['Status'] = newStatus;
+              if (row['Pick List Item #'] !== undefined) row['Pick List Item #'] = '';
+              if (row['Urgency'] !== undefined) row['Urgency'] = 'None';
+              modified = true;
             }
           }
         }
       }
 
-      // 2. Clean table.rawGrid if present
+      // 2. Clean table.rawGrid if present (only rows not already cleaned)
       if (table.rawGrid && Array.isArray(table.rawGrid)) {
-        const pickIdx = headers.findIndex(h => /pick\s*list/i.test(h));
-        const statIdx = headers.findIndex(h => /^status$/i.test(h));
-        const effPickIdx = pickIdx !== -1 ? pickIdx : 6;
-        const effStatIdx = statIdx !== -1 ? statIdx : 7;
+        const empCol = this._findTableCol(table, sKey, 'employee');
+        const pickCol = this._findTableCol(table, sKey, 'pickList');
+        const statCol = this._findTableCol(table, sKey, 'status');
+        if (empCol && statCol) {
+          for (let gIdx = 1; gIdx < table.rawGrid.length; gIdx++) {
+            const gRow = table.rawGrid[gIdx];
+            if (!Array.isArray(gRow) || !gRow.length) continue;
+            const emp = String(gRow[empCol.col0Based] || '').trim();
+            if (!emp || emp.includes('📍') || emp.includes('👤') || emp.includes('Foreman:') || emp === 'Employee' || emp === 'Crew Lead / Employee') continue;
 
-        for (let gIdx = 0; gIdx < table.rawGrid.length; gIdx++) {
-          const gRow = table.rawGrid[gIdx];
-          if (!Array.isArray(gRow) || !gRow.length) continue;
-          const emp = String(gRow[0] || '').trim();
-          if (!emp || emp.includes('📍') || emp.includes('👤') || emp.includes('Foreman:') || emp === 'Employee') continue;
-
-          if (this.isDepartedOrPreviousEmployee(emp)) {
-            const st = String(gRow[effStatIdx] || '').toLowerCase();
-            const pi = String(gRow[effPickIdx] || '').trim();
-            if (st.includes('purchase') || pi === '—') {
-              gRow[effStatIdx] = 'Reclaim (Departed)';
-              gRow[effPickIdx] = '';
-              modified = true;
+            if (this.isDepartedOrPreviousEmployee(emp)) {
+              const st = String(gRow[statCol.col0Based] || '').toLowerCase();
+              const pi = pickCol ? String(gRow[pickCol.col0Based] || '').trim() : '';
+              if (st.includes('purchase') || pi === '—') {
+                try {
+                  await this._queueCellMutation(table, sKey, gIdx, 'status', 'Reclaim (Departed)');
+                  if (pickCol) await this._queueCellMutation(table, sKey, gIdx, 'pickList', '');
+                } catch (e) {
+                  console.warn('Could not queue rawGrid cleanup mutation for', emp, e);
+                }
+                modified = true;
+              }
             }
           }
         }
@@ -1007,7 +1304,7 @@ class ProcurementEngine {
     } : null;
   }
 
-  findActiveOpenPo(empName = null, itemType = null) {
+  findActiveOpenPo(empName = null, itemType = null, size = null, classVal = null) {
     const snap = (this.db && typeof this.db.getSnapshot === 'function')
       ? this.db.getSnapshot()
       : (window.localDB ? window.localDB.getSnapshot() : null);
@@ -1025,7 +1322,7 @@ class ProcurementEngine {
         ? parsedNotes.orderNumber
         : (rawPo.toLowerCase() !== 'ed' ? rawPo : '');
       if (orderNum) {
-        const uPrice = this.getItemUnitPriceFromPoRecord(r, empName, itemType);
+        const uPrice = this.getItemUnitPriceFromPoRecord(r, empName, itemType, size, classVal);
         openRows.push({
           row: r,
           orderNumber: orderNum,
@@ -1230,19 +1527,19 @@ class ProcurementEngine {
     const needsTable = (this.db && typeof this.db.getTable === 'function' ? this.db.getTable('safety_equipment_needs') : null) || snap?.tables?.['safety_equipment_needs'];
     if (needsTable && needsTable.rows) {
       const match = needsTable.rows.find(r => {
-        const emp = String(r['Employee'] || '').trim();
-        const stat = String(r['Status'] || '').toLowerCase();
-        const type = String(r['Item Type'] || '').toLowerCase();
-        const isTypeMatch = !itemType || type.includes(itemType.toLowerCase().slice(0, 4));
-        return this.isNameMatch(emp, empName) && stat.includes('ordered') && isTypeMatch;
+        const meta = this._getSafetyNeedMeta(r);
+        if (!meta) return false;
+        const isTypeMatch = !itemType || meta.itemType.toLowerCase().includes(itemType.toLowerCase().slice(0, 4));
+        return this.isNameMatch(meta.employee, empName) && meta.status.toLowerCase().includes('ordered') && isTypeMatch;
       });
       if (match) {
-        const parsed = this.parseOrderInfoFromNotes(match['Notes']);
+        const meta = this._getSafetyNeedMeta(match);
+        const parsed = this.parseOrderInfoFromNotes(meta?.notes || match['Notes']);
         if (parsed) return parsed;
         return {
           orderNumber: '',
           vendor: '',
-          orderDate: String(match['Date Requested'] || ''),
+          orderDate: String(meta?.dateRequested || match['Date Requested'] || ''),
           expectedDelivery: '',
           price: 0
         };
@@ -1308,12 +1605,16 @@ class ProcurementEngine {
         else if (/mack/i.test(rawItem)) size = 'MACK Testing';
         else size = rawItem || 'Testing & Labor';
       } else {
-        // Match explicit "size 9.5" or standalone sizes like "CL2 9.5", "10", "Regular", "Split"
-        const sizeMatch = chunk.match(/size\s*[:\s]*([0-9.]+|regular|small|large|x-large|2x-large|lg|xl|2xl|xxl|split)/i) ||
-                          chunk.match(/\b(8\.5|9\.5|10\.5|11\.5|[89]|10|11|12)\b/) ||
-                          chunk.match(/\b(regular|large|x-large|2x-large|small|split)\b/i);
-        if (sizeMatch) {
-          size = sizeMatch[1].trim();
+        // Match explicit "Size <value>" first (preserving Canister, Eyelet, Cluster, 8ft, 15kV, Adult Pads, 2/0, etc.)
+        const explicitSizeMatch = chunk.match(/\bsize\s*[:\s]+\s*([^,;[\]@()]+)/i);
+        const namedSpecMatch = chunk.match(/\b(canister|cannister|eyelet|cluster|adult\s*pads?|pediatric\s*pads?|split|regular|small|large|x-large|2x-large|extra\s*large|2xl|xxl|\d+\/0|\d+\s*(?:ft|kv))\b/i);
+        const numSizeMatch = chunk.match(/\b(8\.5|9\.5|10\.5|11\.5|[89]|10|11|12)\b(?!\s*(?:in\b|"|''|ft\b|kv\b))/i);
+        if (explicitSizeMatch && explicitSizeMatch[1].trim()) {
+          size = explicitSizeMatch[1].trim();
+        } else if (namedSpecMatch) {
+          size = namedSpecMatch[1].trim();
+        } else if (numSizeMatch) {
+          size = numSizeMatch[1].trim();
         }
       }
 
@@ -1330,7 +1631,7 @@ class ProcurementEngine {
       }
 
       let partNumber = '';
-      const partMatch = chunk.match(/(?:part|item)\s*(?:#|num(?:ber)?)?\s*[:#-]?\s*([A-Za-z0-9\-_.]+)/i);
+      const partMatch = chunk.match(/(?:\bpart\s*(?:#|num(?:ber)?)?\s*[:#-]\s*|\bitem\s*(?:#|num(?:ber)?)\s*[:#-]?\s*)([A-Za-z0-9\-_.]+)/i);
       if (partMatch && !/^(?:size|class|for|on)$/i.test(partMatch[1].trim())) {
         partNumber = partMatch[1].trim();
       }
@@ -1401,12 +1702,19 @@ class ProcurementEngine {
     let padWidth = 0;
     const prefixRegex = prefix ? new RegExp(`^${prefix}[\\s\\-_#]*?(\\d+)$`, 'i') : null;
 
-    rows.forEach(r => {
+    rows.forEach((r, idx) => {
       let numStr = '';
       if (Array.isArray(r)) {
+        if (idx === 0) return; // skip header row
         numStr = String(r[0] || '').trim();
       } else if (r && typeof r === 'object') {
-        numStr = String(r['Item #'] || r['Item Number'] || r['Serial #'] || r['Glove'] || r['Sleeve'] || r['Blanket'] || r['MACK'] || Object.values(r)[0] || '').trim();
+        numStr = String(
+          r['Item #'] || r['Item Number'] || r['Serial #'] ||
+          r['Glove'] || r['Sleeve'] || r['Blanket'] || r['MACK'] ||
+          r['HVT #'] || r['HV Tester'] || r['Phasing Set #'] || r['Phasing Set'] || r['PS #'] ||
+          r['AED #'] || r['AED'] || r['Ground #'] || r['Hot Stick #'] || r['Hot Stick'] ||
+          Object.values(r)[0] || ''
+        ).trim();
       }
       if (!numStr) return;
 
@@ -1674,6 +1982,7 @@ class ProcurementEngine {
         let asg = '';
         let st = '';
         if (Array.isArray(r)) {
+          if (i === 0) continue; // skip header row
           asg = String(r[8] || '').trim();
           st = String(r[7] || '').trim().toLowerCase();
         } else if (r && typeof r === 'object') {
@@ -1701,6 +2010,13 @@ class ProcurementEngine {
       const cleanEmpLoc = String(empRec.location).replace(/\s*\([^)]*\)/g, '').trim().toLowerCase();
       const app = locApprovals[cleanEmpLoc] ? locApprovals[cleanEmpLoc].toUpperCase() : '';
       if (app === 'CL3') return 'Class 3';
+      if (app.includes('CL3') && (app.includes('&') || app.includes('BOTH'))) {
+        if (window.ppeTrackingEngine && typeof window.ppeTrackingEngine.getPreferredPpeClass === 'function' && empRec.name) {
+          const pref = window.ppeTrackingEngine.getPreferredPpeClass(empRec.name, 'gloves');
+          if (pref && String(pref).includes('3')) return 'Class 3';
+        }
+        return 'Class 2';
+      }
       if (app === 'CL2') return 'Class 2';
       return 'Class 2';
     };
@@ -1747,7 +2063,9 @@ class ProcurementEngine {
       const orderNumTag = (orderInfo?.vendorOrderNumber || orderInfo?.orderNumber || orderInfo?.poNumber || '');
       const aggKey = isTesting
         ? `${section}|Testing|${testingSubtype}|Class N/A|${orderNumTag}`
-        : `${section}|${itemType}|${size}|${classVal}`;
+        : (section === 'ordered_pending'
+          ? `${section}|${itemType}|${size}|${classVal}|${orderNumTag || 'PENDING'}`
+          : `${section}|${itemType}|${size}|${classVal}`);
 
       if (!aggregated[aggKey]) {
         aggregated[aggKey] = {
@@ -1887,7 +2205,8 @@ class ProcurementEngine {
 
           // Skip section headers or subheaders
           if (firstCell.includes('📍') || firstCell.includes('👤') || firstCell.includes('👷') ||
-              firstCell.includes('Foreman:') || firstCell.includes('Swaps') || firstCell === 'Employee' || firstCell === 'Item #') {
+              firstCell.includes('Foreman:') || firstCell.includes('Swaps') ||
+              firstCell === 'Employee' || firstCell === 'Crew Lead / Employee' || firstCell === 'Item #' || firstCell === 'Serial #') {
             return;
           }
 
@@ -1897,21 +2216,18 @@ class ProcurementEngine {
             daysRaw = String(row[7] || '').trim();
             pickItem = String(row[8] || '').trim();
             status = String(row[9] || '').trim();
+            rowClass = String(row[2] || '').trim() || currentClass;
           } else {
             size = String(row[2] || '—').trim();
             daysRaw = String(row[5] || '').trim();
             pickItem = String(row[6] || '').trim();
             status = String(row[7] || '').trim();
+            rowClass = currentClass;
           }
           const daysVal = parseInt(daysRaw, 10);
           if (!isNaN(daysVal)) daysLeft = daysVal;
 
-          if (row[10] && String(row[10]).toLowerCase().includes('class')) {
-            rowClass = String(row[10]).trim();
-          } else {
-            rowClass = currentClass;
-          }
-          if (String(row[11] || '').toLowerCase() === 'immediate' || daysVal <= 0) {
+          if (daysVal <= 0) {
             isImmediateRow = true;
           }
         } else if (typeof row === 'object' && row !== null) {
@@ -2025,10 +2341,22 @@ class ProcurementEngine {
           }
         }
 
+        const isNonPurchaseTerminalStat =
+          statLower.includes('return') ||
+          statLower.includes('reclaim') ||
+          statLower.includes('complete') ||
+          statLower.includes('ready for delivery') ||
+          statLower.includes('delivered') ||
+          statLower.includes('in stock') ||
+          statLower.includes('excluded') ||
+          statLower.includes('skipped') ||
+          statLower.includes('cancel') ||
+          statLower.includes('picked');
+
         const isNeedToPurchase = statLower.includes('need to purchase') ||
                                  statLower.includes('purchase') ||
                                  isSizeUp ||
-                                 (pickItem === '—' && !statLower.includes('return') && !statLower.includes('reclaim')) ||
+                                 (pickItem === '—' && !isNonPurchaseTerminalStat) ||
                                  (pickItem === '' && statLower.includes('unassigned'));
 
         if (!isNeedToPurchase || !emp) return;
@@ -2127,9 +2455,11 @@ class ProcurementEngine {
         let urgency = 'Immediate';
         let status = '';
 
-        if (row && typeof row === 'object') {
-          emp = String(row['Employee'] || '').trim();
-          const rawType = String(row['Item Type'] || '').trim();
+        if (row && typeof row === 'object' && !Array.isArray(row)) {
+          const meta = this._getSafetyNeedMeta(row);
+          if (!meta) return;
+          emp = meta.employee;
+          const rawType = meta.itemType;
           if (rawType.toLowerCase().includes('sleeve')) {
             itemType = 'Sleeves';
             typeLabel = '🦺 Sleeves';
@@ -2146,11 +2476,10 @@ class ProcurementEngine {
             itemType = rawType || 'Other';
             typeLabel = `📦 ${itemType}`;
           }
-          size = String(row['Size'] || '—').trim();
-          const rawRowClass = (row['Class'] !== undefined && row['Class'] !== null && String(row['Class']).trim() !== '') ? row['Class'] : 'Class 2';
-          rowClass = String(rawRowClass).trim();
-          urgency = String(row['Urgency'] || 'Immediate').trim();
-          status = String(row['Status'] || '').trim().toLowerCase();
+          size = meta.size || '—';
+          rowClass = meta.classVal || 'Class 2';
+          urgency = meta.urgency || 'Immediate';
+          status = meta.status.toLowerCase();
         }
 
         if (!emp || status.includes('received') || status.includes('fulfilled')) return;
@@ -2306,25 +2635,53 @@ class ProcurementEngine {
             return;
           }
 
-          const realAggKey = `ordered_pending|${normCat}|${normSize}|${normClass}`;
-          const existingItem = aggregated[realAggKey];
           const parsedNotes = this.parseOrderInfoFromNotes(notes);
           const cleanPo = (poNum || '').toLowerCase();
           const cleanVendorOrder = (parsedNotes?.vendorOrderNumber || '').toLowerCase();
+          const candidateOrderTag = parsedNotes?.vendorOrderNumber || poNum || 'PENDING';
+          const candidateKeys = Array.from(new Set([
+            `ordered_pending|${normCat}|${normSize}|${normClass}|${candidateOrderTag}`,
+            `ordered_pending|${normCat}|${normSize}|${normClass}|${poNum || 'PENDING'}`,
+            `ordered_pending|${normCat}|${normSize}|${normClass}|PENDING`
+          ]));
 
           let currentOrderQty = 0;
-          if (existingItem) {
-            currentOrderQty = (existingItem.employees || []).filter(e => {
+          candidateKeys.forEach(k => {
+            const existingItem = aggregated[k];
+            if (!existingItem) return;
+            currentOrderQty += (existingItem.employees || []).filter(e => {
               const oNum = (e.orderInfo?.orderNumber || '').toLowerCase();
               const vNum = (e.orderInfo?.vendorOrderNumber || '').toLowerCase();
               const lbl = (e.label || '').toLowerCase();
               return (cleanPo && (oNum === cleanPo || lbl.includes(cleanPo))) ||
                      (cleanVendorOrder && (vNum === cleanVendorOrder || lbl.includes(cleanVendorOrder)));
             }).length;
-          }
+          });
 
-          if (currentOrderQty < pi.quantity) {
-            const neededQty = pi.quantity - currentOrderQty;
+          // Subtract units already partially received and persisted in the batch delivery draft store
+          let alreadyReceivedDraftQty = 0;
+          try {
+            const batchDrafts = this._getBatchDraftStore ? this._getBatchDraftStore() : {};
+            const bucketCandidates = [cleanVendorOrder, cleanPo].filter(Boolean);
+            for (const bk of Object.keys(batchDrafts || {})) {
+              const bkLower = bk.toLowerCase();
+              if (!bucketCandidates.some(c => bkLower === c || bkLower.includes(c))) continue;
+              const unitMap = batchDrafts[bk]?.units || {};
+              for (const uDraft of Object.values(unitMap)) {
+                if (!uDraft || !uDraft.received) continue;
+                const dCat = cleanItemType(uDraft.category || '').toLowerCase();
+                const dSz = cleanSize(uDraft.size || '').toLowerCase();
+                const dCls = cleanClass(uDraft.classVal || '').toLowerCase();
+                if (dCat === normCat.toLowerCase() && dSz === normSize.toLowerCase() && dCls === normClass.toLowerCase()) {
+                  alreadyReceivedDraftQty++;
+                }
+              }
+            }
+          } catch { /* ignore draft parse issues */ }
+
+          const remainingPoQty = Math.max(0, pi.quantity - alreadyReceivedDraftQty);
+          if (currentOrderQty < remainingPoQty) {
+            const neededQty = remainingPoQty - currentOrderQty;
             const typeLabel = normCat === 'Gloves' ? '🧤 Gloves' : (normCat === 'Sleeves' ? '🦺 Sleeves' : (normCat === 'Blankets' ? '🧱 Blankets' : (normCat === 'MACKs' ? '🧱 MACKs' : `📦 ${normCat}`)));
 
             let calculatedPrice = pi.unitPrice || 0;
@@ -2396,7 +2753,7 @@ class ProcurementEngine {
     // Active personnel in the field currently wearing an oversized glove or sleeve
     if (glovesTable) {
       const gRows = glovesTable.rows || glovesTable.rawGrid || [];
-      gRows.forEach(g => {
+      gRows.forEach((g, idx) => {
         let asg = '';
         let assignedSize = '';
         let classVal = 'Class 2';
@@ -2404,6 +2761,7 @@ class ProcurementEngine {
         let notes = '';
 
         if (Array.isArray(g)) {
+          if (idx === 0) return; // skip header row
           asg = String(g[8] || '').trim();
           assignedSize = String(g[2] || '').trim();
           const rawClass = (g[3] !== undefined && g[3] !== null && String(g[3]).trim() !== '') ? g[3] : 'Class 2';
@@ -2460,7 +2818,7 @@ class ProcurementEngine {
       const sRows = sleevesTable.rows || sleevesTable.rawGrid || [];
       const sleeveRanks = { 'small': 1, 'sm': 1, 'regular': 2, 'reg': 2, 'large': 3, 'lg': 3, 'extra large': 4, 'xl': 4, '2xl': 5, 'xxl': 5 };
 
-      sRows.forEach(s => {
+      sRows.forEach((s, idx) => {
         let asg = '';
         let assignedSize = '';
         let classVal = 'Class 2';
@@ -2468,6 +2826,7 @@ class ProcurementEngine {
         let notes = '';
 
         if (Array.isArray(s)) {
+          if (idx === 0) return; // skip header row
           asg = String(s[8] || '').trim();
           assignedSize = String(s[2] || '').trim();
           const rawClass = (s[3] !== undefined && s[3] !== null && String(s[3]).trim() !== '') ? s[3] : 'Class 2';
@@ -2523,14 +2882,21 @@ class ProcurementEngine {
     // =========================================================================
     // SECTION 4: PPE COMPLIANCE — MISSING EQUIPMENT
     // =========================================================================
-    // Helper to check if available shelf stock satisfies an employee need
+    // Helper to check if available shelf stock satisfies an employee need (reserves 1 unit per covered employee)
+    const allocatedShelfUnits = new WeakMap();
     const hasShelfStockAvailable = (invTable, reqClass, reqSize, empName) => {
       if (!invTable || !invTable.rows) return false;
       const normReqSize = cleanSize(reqSize);
       if (!normReqSize) return false; // Missing size cannot match shelf item
       const normReqClass = parseInt(String(reqClass || '').replace(/\D/g, '') || '2', 10);
+      let usedSet = allocatedShelfUnits.get(invTable);
+      if (!usedSet) {
+        usedSet = new Set();
+        allocatedShelfUnits.set(invTable, usedSet);
+      }
 
-      return invTable.rows.some(item => {
+      const matchIdx = invTable.rows.findIndex((item, idx) => {
+        if (usedSet.has(idx)) return false;
         const stat = String(item['Status'] || '').trim().toLowerCase();
         const isOnShelf = stat === 'on shelf' || stat === 'in stock' || stat === 'available';
         if (!isOnShelf) return false;
@@ -2542,17 +2908,23 @@ class ProcurementEngine {
         const notReservedOther = !pf || pf.toLowerCase().includes((empName || '').toLowerCase());
         return isSizeMatch && notReservedOther;
       });
+      if (matchIdx !== -1) {
+        usedSet.add(matchIdx);
+        return true;
+      }
+      return false;
     };
 
     const isSatisfiedOnSwapSheet = (swapKey, empName) => {
       const swTable = (this.db && typeof this.db.getTable === 'function' ? this.db.getTable(swapKey) : null) || snap?.tables?.[swapKey];
       if (!swTable) return false;
       const rows = swTable.rows || swTable.rawGrid || [];
-      return rows.some(r => {
+      return rows.some((r, idx) => {
         let rowEmp = '';
         let rowPick = '';
         let rowStat = '';
         if (Array.isArray(r)) {
+          if (idx === 0) return false;
           rowEmp = String(r[0] || '').trim();
           rowPick = String(r[6] || '').trim();
           rowStat = String(r[7] || '').trim();
@@ -2564,7 +2936,7 @@ class ProcurementEngine {
         if (!rowEmp || !this.isNameMatch(rowEmp, empName)) return false;
         const statLower = rowStat.toLowerCase();
         const hasPick = rowPick && rowPick !== '—' && rowPick !== '-' && !rowPick.includes('Needs Size');
-        const isSatisfiedStatus = statLower.includes('needs equipment') || statLower.includes('in stock') || statLower.includes('ready for delivery') || statLower.includes('delivered');
+        const isSatisfiedStatus = statLower.includes('in stock') || statLower.includes('ready for delivery') || statLower.includes('delivered');
         return hasPick || isSatisfiedStatus;
       });
     };
@@ -2643,14 +3015,18 @@ class ProcurementEngine {
 
       if (normalizedAggregated[key]) {
         const existing = normalizedAggregated[key];
-        existing.quantity += item.quantity;
         if (item.employees && item.employees.length > 0) {
+          let addedCount = 0;
           item.employees.forEach(emp => {
             const isStock = emp.name.toLowerCase().includes('stock') || emp.name.toLowerCase().includes('shelf');
             if (isStock || !existing.employees.some(e => this.isNameMatch(e.name, emp.name))) {
               existing.employees.push(emp);
+              addedCount++;
             }
           });
+          existing.quantity += addedCount;
+        } else {
+          existing.quantity += item.quantity;
         }
         if (item.price > existing.price) existing.price = item.price;
         if (item.orderInfo) {
@@ -2833,19 +3209,19 @@ class ProcurementEngine {
       }
     }
 
-    // Numeric glove size (e.g. 9 vs 9.5, 10 vs 10.5)
+    // Numeric glove size (e.g. 9 vs 9.5, 10 vs 10.5) — do NOT match cuff lengths like 11" or 14in
     if (/^\d+(\.\d+)?$/.test(tSize)) {
       if (tSize.endsWith('.5')) {
         const baseInt = tSize.split('.')[0];
         const esc = tSize.replace(/\./g, '\\.');
-        const decRegex = new RegExp(`(?:^|[^0-9.])${esc}(?:in|"|\\b|$)(?!\\.\\d)`, 'i');
+        const decRegex = new RegExp(`(?:^|[^0-9.])${esc}(?:\\b|$)(?!\\.\\d|\\s*(?:in\\b|"|''|ft\\b))`, 'i');
         const hNameRegex = new RegExp(`(?:^|[^0-9.])${baseInt}h(?:\\b|$)`, 'i');
         const hPartRegex = new RegExp(`${baseInt}h(?:[a-z]*)$`, 'i');
         return decRegex.test(name) || hNameRegex.test(name) || hPartRegex.test(partNum);
       } else {
         const esc = tSize.replace(/\./g, '\\.');
-        // Whole size: must NOT be followed by .5 or 'H' (Salisbury half-size suffix)
-        const numRegex = new RegExp(`(?:^|[^0-9.])${esc}(?:in|"|\\b|$)(?!\\.\\d|h)`, 'i');
+        // Whole size: must NOT be followed by .5, 'H' (Salisbury half-size suffix), or cuff length units (in / " / ft)
+        const numRegex = new RegExp(`(?:^|[^0-9.])${esc}(?:\\b|$)(?!\\.\\d|h|\\s*(?:in\\b|"|''|ft\\b))`, 'i');
         const conflictHRegex = new RegExp(`(?:^|[^0-9.])${esc}h(?:\\b|$)`, 'i');
         const conflictPartH = new RegExp(`${esc}h(?:[a-z]*)$`, 'i');
         if (conflictHRegex.test(name) || conflictPartH.test(partNum)) return false;
@@ -2861,6 +3237,9 @@ class ProcurementEngine {
     }
     if (tSize === 'extra large' || tSize === 'x-large' || tSize === 'xl') {
       return /\b(?:extra[\s-]*large|x[\s-]*large|xl)\b/i.test(name) && !/\b(?:2x|xx)/i.test(name);
+    }
+    if (tSize === '2x-large' || tSize === '2x large' || tSize === 'xxl' || tSize === '2xl') {
+      return /\b(?:2x[\s-]*large|xx[\s-]*large|2xl|xxl)\b/i.test(name);
     }
 
     return name.includes(tSize);
@@ -2881,11 +3260,17 @@ class ProcurementEngine {
     this.items.forEach(item => {
       const match = this.matchVendorItem(item.itemType, item.size, item.classVal, this.selectedVendor.name);
       if (match) {
-        if (match.price > 0) item.price = match.price;
-        item.partNumber = match.partNumber || '';
+        if (match.price > 0 && (item.section !== 'ordered_pending' || !item.price || item.price <= 0)) {
+          item.price = match.price;
+        }
+        if (item.section !== 'ordered_pending' || !item.partNumber) {
+          item.partNumber = match.partNumber || '';
+        }
       } else {
-        if (item.section !== 'ordered_pending') item.price = 0;
-        item.partNumber = '';
+        if (item.section !== 'ordered_pending') {
+          item.price = 0;
+          item.partNumber = '';
+        }
       }
     });
   }
@@ -3260,9 +3645,11 @@ class ProcurementEngine {
     const grp = this.orderGroupsMap ? this.orderGroupsMap.get(orderKey) : null;
     if (!grp) return;
     grp.items.forEach(item => {
-      item.selected = isSelected;
-      if (item.employees && item.employees.length) {
-        item.employees.forEach(e => e.checked = isSelected);
+      const realItem = (item._globalIdx !== undefined && this.items[item._globalIdx]) ? this.items[item._globalIdx] : item;
+      realItem.selected = isSelected;
+      if (realItem.employees && realItem.employees.length) {
+        realItem.employees.forEach(e => { e.checked = isSelected; });
+        realItem.quantity = isSelected ? Math.max(realItem.quantity || 0, realItem.employees.length) : 0;
       }
     });
     this.render();
@@ -3405,41 +3792,24 @@ class ProcurementEngine {
         }
       });
 
-      const swapKeys = ['glove_swaps', 'sleeve_swaps', 'blanket_swaps', 'mack_swaps'];
+      const swapKeys = this._getAllSwapKeys();
       for (const sk of swapKeys) {
         const sTable = (this.db && typeof this.db.getTable === 'function' ? this.db.getTable(sk) : null) || snap?.tables?.[sk];
         if (sTable && sTable.rows) {
           for (const sr of sTable.rows) {
             const stat = String(sr['Status'] || '');
             const notes = String(sr['Notes'] || '');
-            const empName = String(sr['Employee'] || sr['Employee Name'] || sr['Assigned To'] || Object.values(sr)[0] || '').trim();
+            const empName = String(sr['Employee'] || sr['Employee Name'] || sr['Crew Lead / Employee'] || sr['Assigned To'] || Object.values(sr)[0] || '').trim();
 
             const isNumMatch = targetNums.some(num => num && (stat.includes(num) || notes.includes(num)));
-            const isEmpMatch = targetEmps.some(te => this.isNameMatch(empName, te.name) && sk.includes(te.cat.slice(0, 4)));
+            const isEmpMatch = targetEmps.some(te => this.isNameMatch(empName, te.name) && this._getSwapTableKeyForCategory(te.cat) === sk);
 
             if ((isNumMatch || isEmpMatch) && stat.toLowerCase().includes('order')) {
+              const cleanedNotes = notes ? notes.replace(/Ordered on [^;]+;?/gi, '').trim() : '';
+              await this._queueCellMutation(sTable, sk, sr, 'status', 'Need To Purchase');
+              await this._queueCellMutation(sTable, sk, sr, 'notes', cleanedNotes);
               sr['Status'] = 'Need To Purchase';
-              if (sr['Notes']) {
-                sr['Notes'] = sr['Notes'].replace(/Ordered on [^;]+;?/gi, '').trim();
-              }
-              this.db.syncRowToRawGrid(sTable, sr);
-              const rIdx = sr._rowIdx || (sTable.rows.indexOf(sr) + 2);
-              await this.db.addMutation({
-                action: 'UPDATE_CELL',
-                sheetName: sTable.name,
-                tableKey: sk,
-                row: rIdx,
-                col: 8,
-                value: 'Need To Purchase'
-              });
-              await this.db.addMutation({
-                action: 'UPDATE_CELL',
-                sheetName: sTable.name,
-                tableKey: sk,
-                row: rIdx,
-                col: 12,
-                value: sr['Notes'] || ''
-              });
+              if (sr['Notes'] !== undefined) sr['Notes'] = cleanedNotes;
             }
           }
         }
@@ -3449,23 +3819,15 @@ class ProcurementEngine {
       const needsTable = (this.db && typeof this.db.getTable === 'function' ? this.db.getTable('safety_equipment_needs') : null) || snap?.tables?.['safety_equipment_needs'];
       if (needsTable && needsTable.rows) {
         for (const nr of needsTable.rows) {
-          const empName = String(nr['Employee'] || '').trim();
-          const stat = String(nr['Status'] || '');
-          const isNumMatch = targetNums.some(num => num && (stat.includes(num) || String(nr['Notes'] || '').includes(num)));
-          const isEmpMatch = targetEmps.some(te => this.isNameMatch(empName, te.name));
-          if ((isNumMatch || isEmpMatch) && stat.toLowerCase().includes('order')) {
-            nr['Status'] = 'Pending';
-            if (nr['Notes']) {
-              nr['Notes'] = nr['Notes'].replace(/Ordered on [^;]+;?/gi, '').trim();
-            }
-            this.db.syncRowToRawGrid(needsTable, nr);
-            const nrIdx = nr._rowIdx || (needsTable.rows.indexOf(nr) + 2);
-            await this.db.addMutation({
-              action: 'UPDATE_ROW',
-              sheetName: needsTable.name || 'Safety Equipment Needs',
-              tableKey: 'safety_equipment_needs',
-              row: nrIdx,
-              rowData: nr
+          const meta = this._getSafetyNeedMeta(nr);
+          if (!meta) continue;
+          const isNumMatch = targetNums.some(num => num && (meta.status.includes(num) || meta.notes.includes(num)));
+          const isEmpMatch = targetEmps.some(te => this.isNameMatch(meta.employee, te.name) && (!te.cat || meta.itemType.toLowerCase().includes(te.cat.slice(0, 4))));
+          if ((isNumMatch || isEmpMatch) && meta.status.toLowerCase().includes('order')) {
+            const cleanedNotes = meta.notes ? meta.notes.replace(/Ordered on [^;]+;?/gi, '').trim() : '';
+            await this._queueRowUpdate(needsTable, 'safety_equipment_needs', 'Safety Equipment Needs', nr, {
+              'Status': 'Pending',
+              'Notes': cleanedNotes
             });
           }
         }
@@ -3474,20 +3836,13 @@ class ProcurementEngine {
       // Also delete matching row in purchase_orders if still present
       const poTable = (this.db && typeof this.db.getTable === 'function' ? this.db.getTable('purchase_orders') : null) || snap?.tables?.['purchase_orders'];
       if (poTable && poTable.rows && targetNums.length) {
-        const poIdx = poTable.rows.findIndex(r => {
+        const poRow = poTable.rows.find(r => {
           const pNum = String(r['PO Number'] || r['PO #'] || '').trim().toLowerCase();
           const pNotes = String(r['Notes'] || '').toLowerCase();
           return targetNums.some(tn => pNum === tn.toLowerCase() || pNotes.includes(tn.toLowerCase()));
         });
-        if (poIdx !== -1) {
-          const targetRowIdx = poTable.rows[poIdx]._rowIdx || (poIdx + 2);
-          poTable.rows.splice(poIdx, 1);
-          await this.db.addMutation({
-            action: 'DELETE_ROW',
-            sheetName: poTable.name || 'Purchase Orders',
-            tableKey: 'purchase_orders',
-            row: targetRowIdx
-          });
+        if (poRow) {
+          await this._queueDeletePoRow(poTable, poRow);
         }
       }
 
@@ -3547,13 +3902,13 @@ class ProcurementEngine {
     if (vSelect) {
       const currentVal = this.selectedVendor ? this.selectedVendor.name : '';
       vSelect.innerHTML = '<option value="">Select a vendor...</option>' +
-        this.vendors.map(v => `<option value="${v.name}" ${v.name === currentVal ? 'selected' : ''}>${v.name} (${v.items.length} items)</option>`).join('');
+        this.vendors.map(v => `<option value="${this.escapeHtml(v.name)}" ${v.name === currentVal ? 'selected' : ''}>${this.escapeHtml(v.name)} (${(v.items || []).length} items)</option>`).join('');
     }
 
     const vInfo = document.getElementById('procurement-vendor-info');
     if (vInfo) {
       if (this.selectedVendor) {
-        vInfo.innerHTML = `<strong>${this.selectedVendor.name}</strong> • Contact: ${this.selectedVendor.contact || 'N/A'} • Email: ${this.selectedVendor.email || 'N/A'} • Phone: ${this.selectedVendor.phone || 'N/A'}`;
+        vInfo.innerHTML = `<strong>${this.escapeHtml(this.selectedVendor.name)}</strong> • Contact: ${this.escapeHtml(this.selectedVendor.contact || 'N/A')} • Email: ${this.escapeHtml(this.selectedVendor.email || 'N/A')} • Phone: ${this.escapeHtml(this.selectedVendor.phone || 'N/A')}`;
       } else {
         vInfo.innerHTML = '<span style="color: var(--text-muted);">Select a vendor to auto-match catalog pricing and part numbers.</span>';
       }
@@ -3941,12 +4296,14 @@ class ProcurementEngine {
         sortedOrderGroups.forEach(([orderKey, grp]) => {
           const isOrderCollapsed = !this.expandedOrders || !this.expandedOrders.has(orderKey);
           const allGroupChecked = grp.items.every(it => it.selected);
+          const safeKeyAttr = this.escapeHtml(orderKey);
+          const safeKeyJs = this.escapeHtml(String(orderKey).replace(/\\/g, '\\\\').replace(/'/g, "\\'"));
 
           html += `
             <!-- Collapsible Order Group Header Row -->
-            <tr class="procurement-order-group-header-row" data-order-key="${orderKey}" style="background: rgba(30, 41, 59, 0.95); border-top: 2px solid #3b82f6; border-bottom: 1px solid rgba(59, 130, 246, 0.4); cursor: pointer;" onclick="window.procurementEngine.toggleOrderCollapse('${orderKey}', event)">
+            <tr class="procurement-order-group-header-row" data-order-key="${safeKeyAttr}" style="background: rgba(30, 41, 59, 0.95); border-top: 2px solid #3b82f6; border-bottom: 1px solid rgba(59, 130, 246, 0.4); cursor: pointer;" onclick="window.procurementEngine.toggleOrderCollapse('${safeKeyJs}', event)">
               <td style="padding: 10px 8px; text-align: center;" onclick="event.stopPropagation()">
-                <input type="checkbox" class="procurement-order-group-check" data-order-key="${orderKey}" ${allGroupChecked ? 'checked' : ''} onchange="window.procurementEngine.toggleOrderGroupSelected('${orderKey}', this.checked)" title="Select/Deselect all items in this order">
+                <input type="checkbox" class="procurement-order-group-check" data-order-key="${safeKeyAttr}" ${allGroupChecked ? 'checked' : ''} onchange="window.procurementEngine.toggleOrderGroupSelected('${safeKeyJs}', this.checked)" title="Select/Deselect all items in this order">
               </td>
               <td colspan="7" style="padding: 10px 14px;">
                 <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;">
@@ -3997,23 +4354,23 @@ class ProcurementEngine {
                       </span>
                     ` : ''}
                     ${(/^REQ-/i.test(grp.vendorOrderNumber || grp.poNumber || '') || /pending/i.test(grp.vendorOrderNumber || grp.poNumber || '')) ? `
-                      <button type="button" class="btn btn-xs" onclick="window.procurementEngine.promptUpdateVendorOrderNum('${orderKey}')" style="background: rgba(245, 158, 11, 0.22); border: 1px solid rgba(245, 158, 11, 0.55); color: #fcd34d; padding: 4px 9px; font-size: 11px; border-radius: 4px; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;" title="Update this Request with official Vendor Order # once received">
+                      <button type="button" class="btn btn-xs" onclick="window.procurementEngine.promptUpdateVendorOrderNum('${safeKeyJs}')" style="background: rgba(245, 158, 11, 0.22); border: 1px solid rgba(245, 158, 11, 0.55); color: #fcd34d; padding: 4px 9px; font-size: 11px; border-radius: 4px; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;" title="Update this Request with official Vendor Order # once received">
                         <span>🏷️</span> Enter Vendor Order #
                       </button>
                     ` : ''}
-                    <button type="button" class="btn btn-xs" onclick="window.procurementEngine.emailOrderFromKey('${orderKey}')" style="background: rgba(16, 185, 129, 0.22); border: 1px solid rgba(16, 185, 129, 0.55); color: #6ee7b7; padding: 4px 9px; font-size: 11px; border-radius: 4px; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;" title="Email this purchase order/request to ${this.escapeHtml(grp.vendor || 'vendor')}">
+                    <button type="button" class="btn btn-xs" onclick="window.procurementEngine.emailOrderFromKey('${safeKeyJs}')" style="background: rgba(16, 185, 129, 0.22); border: 1px solid rgba(16, 185, 129, 0.55); color: #6ee7b7; padding: 4px 9px; font-size: 11px; border-radius: 4px; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;" title="Email this purchase order/request to ${this.escapeHtml(grp.vendor || 'vendor')}">
                       <span>✉️</span> ${(/^REQ-/i.test(grp.vendorOrderNumber || grp.poNumber || '') || /pending/i.test(grp.vendorOrderNumber || grp.poNumber || '')) ? 'Email Request' : 'Email Order'}
                     </button>
-                    <button type="button" class="btn btn-xs" onclick="window.procurementEngine.quickMarkOrderReceivedFromKey('${orderKey}')" style="background: rgba(16, 185, 129, 0.2); border: 1px solid rgba(16, 185, 129, 0.5); color: #6ee7b7; padding: 4px 9px; font-size: 11px; border-radius: 4px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;" title="Mark this entire order as Received and clear it from Awaiting Delivery (items already added to inventory)">
+                    <button type="button" class="btn btn-xs" onclick="window.procurementEngine.quickMarkOrderReceivedFromKey('${safeKeyJs}')" style="background: rgba(16, 185, 129, 0.2); border: 1px solid rgba(16, 185, 129, 0.5); color: #6ee7b7; padding: 4px 9px; font-size: 11px; border-radius: 4px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;" title="Mark this entire order as Received and clear it from Awaiting Delivery (items already added to inventory)">
                       <span>✅</span> Mark Received
                     </button>
-                    <button type="button" class="btn btn-xs" onclick="window.procurementEngine.openBatchDeliveryModal(window.procurementEngine.getOrderItems('${orderKey}'))" style="background: rgba(59, 130, 246, 0.2); border: 1px solid rgba(59, 130, 246, 0.5); color: #93c5fd; padding: 4px 9px; font-size: 11px; border-radius: 4px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;" title="Receive all delivered items in this order into inventory and assign new item numbers">
+                    <button type="button" class="btn btn-xs" onclick="window.procurementEngine.openBatchDeliveryModal(window.procurementEngine.getOrderItems('${safeKeyJs}'))" style="background: rgba(59, 130, 246, 0.2); border: 1px solid rgba(59, 130, 246, 0.5); color: #93c5fd; padding: 4px 9px; font-size: 11px; border-radius: 4px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;" title="Receive all delivered items in this order into inventory and assign new item numbers">
                       <span>🚚</span> Receive Order
                     </button>
-                    <button type="button" class="btn btn-xs" onclick="window.procurementEngine.openEditOrderFromKey('${orderKey}')" style="background: rgba(148, 163, 184, 0.18); border: 1px solid rgba(148, 163, 184, 0.4); color: #e2e8f0; padding: 4px 8px; font-size: 11px; border-radius: 4px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;" title="Edit Order #, Vendor, Dates, or Details">
+                    <button type="button" class="btn btn-xs" onclick="window.procurementEngine.openEditOrderFromKey('${safeKeyJs}')" style="background: rgba(148, 163, 184, 0.18); border: 1px solid rgba(148, 163, 184, 0.4); color: #e2e8f0; padding: 4px 8px; font-size: 11px; border-radius: 4px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;" title="Edit Order #, Vendor, Dates, or Details">
                       <span>✏️</span> Edit Order
                     </button>
-                    <button type="button" class="btn btn-xs" onclick="window.procurementEngine.cancelOrderGroup('${orderKey}')" style="background: rgba(239, 68, 68, 0.18); border: 1px solid rgba(239, 68, 68, 0.45); color: #f87171; padding: 4px 8px; font-size: 11px; border-radius: 4px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;" title="Cancel this entire order and revert all items back to Needs to Order">
+                    <button type="button" class="btn btn-xs" onclick="window.procurementEngine.cancelOrderGroup('${safeKeyJs}')" style="background: rgba(239, 68, 68, 0.18); border: 1px solid rgba(239, 68, 68, 0.45); color: #f87171; padding: 4px 8px; font-size: 11px; border-radius: 4px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;" title="Cancel this entire order and revert all items back to Needs to Order">
                       <span>🗑️</span> Cancel Order
                     </button>
                   </div>
@@ -4050,10 +4407,12 @@ class ProcurementEngine {
         displayItems.forEach(i => {
           i.selected = val;
           if (i.employees && i.employees.length > 0) {
+            const prevChecked = i.employees.filter(emp => emp.checked).length;
+            const extraSpare = Math.max(0, (i.quantity || 0) - prevChecked);
             i.employees.forEach(emp => {
               emp.checked = val;
             });
-            i.quantity = val ? i.employees.length : 0;
+            i.quantity = val ? (i.employees.length + extraSpare) : 0;
           }
         });
         this.render();
@@ -4077,10 +4436,12 @@ class ProcurementEngine {
 
         item.selected = e.target.checked;
         if (item.employees && item.employees.length > 0) {
+          const prevChecked = item.employees.filter(emp => emp.checked).length;
+          const extraSpare = Math.max(0, (item.quantity || 0) - prevChecked);
           item.employees.forEach(emp => {
             emp.checked = item.selected;
           });
-          item.quantity = item.selected ? item.employees.length : 0;
+          item.quantity = item.selected ? (item.employees.length + extraSpare) : 0;
         }
         this.render();
       });
@@ -4094,9 +4455,11 @@ class ProcurementEngine {
         const item = this.items[itemIdx];
         if (!item || !item.employees || !item.employees[empIdx]) return;
 
+        const prevChecked = item.employees.filter(emp => emp.checked).length;
+        const extraSpare = Math.max(0, (item.quantity || 0) - prevChecked);
         item.employees[empIdx].checked = e.target.checked;
         const checkedCount = item.employees.filter(emp => emp.checked).length;
-        item.quantity = checkedCount;
+        item.quantity = checkedCount > 0 ? (checkedCount + extraSpare) : 0;
         item.selected = checkedCount > 0;
         this.render();
       });
@@ -4450,8 +4813,10 @@ class ProcurementEngine {
     const grp = this.orderGroupsMap ? this.orderGroupsMap.get(orderKey) : null;
     if (!grp) return;
 
-    const targetOrderNum = String(grp.vendorOrderNumber || grp.orderNumber || grp.poNumber || 'Request').trim();
-    const isReq = /^REQ-/i.test(targetOrderNum);
+    const rawOrderNum = String(grp.vendorOrderNumber || grp.orderNumber || grp.poNumber || '').trim();
+    const targetOrderNum = rawOrderNum || 'Request';
+    const hasRealOrderNum = Boolean(rawOrderNum && rawOrderNum.toLowerCase() !== 'request' && rawOrderNum.toLowerCase() !== 'pending');
+    const isReq = !hasRealOrderNum || /^REQ-/i.test(targetOrderNum);
     const vendorName = grp.vendor || (this.selectedVendor?.name || 'Vendor');
     const vendorObj = this.vendors.find(v => v.name.toLowerCase() === vendorName.toLowerCase())
       || (this.selectedVendor?.name?.toLowerCase() === vendorName.toLowerCase() ? this.selectedVendor : null)
@@ -4462,14 +4827,15 @@ class ProcurementEngine {
     // Check if there is an explicit PO row in purchase_orders to preserve exact line items
     const snap = (this.db && typeof this.db.getSnapshot === 'function') ? this.db.getSnapshot() : null;
     const poTable = snap?.tables?.['purchase_orders'];
-    const pRow = poTable?.rows?.find(r => {
+    const pRow = (hasRealOrderNum && poTable?.rows) ? poTable.rows.find(r => {
       const p = String(r['PO Number'] || r['PO #'] || '').trim();
       const n = String(r['Notes'] || '');
-      return p === targetOrderNum || n.includes(targetOrderNum);
-    });
+      return p.toLowerCase() === rawOrderNum.toLowerCase() || n.toLowerCase().includes(rawOrderNum.toLowerCase());
+    }) : null;
 
     let itemsForEmail = [];
-    if (pRow && pRow['Items']) {
+    const loadedFromPoRecord = Boolean(pRow && pRow['Items']);
+    if (loadedFromPoRecord) {
       itemsForEmail = this.parsePoItemsString(pRow['Items']);
     }
 
@@ -4503,9 +4869,18 @@ class ProcurementEngine {
     // 1. Build clean vendor email text
     const cleanText = this.formatCleanPOEmailText(itemsForEmail, vendorName, false);
 
-    // 2. Build detailed internal breakdown text
+    // 2. Build detailed internal breakdown text (keep in sync with PO line items when loaded from PO record)
     let detailedLines = [cleanText, '\n====================================================', 'INTERNAL ASSIGNMENT BREAKDOWN:'];
-    if (itemsMap.size > 0) {
+    if (loadedFromPoRecord && itemsForEmail.length > 0) {
+      itemsForEmail.forEach(it => {
+        const cleanType = this.cleanItemType(it.itemType || it.category || 'Equipment');
+        const mapEntry = itemsMap.get(`${cleanType}|${it.size}|${it.classVal}`);
+        const emps = it.employeeName || (mapEntry && mapEntry.employees.length ? mapEntry.employees.join(', ') : 'Shelf Stock');
+        const partNum = it.partNumber || this.getVendorPartNumber(vendorName, cleanType, it.size, it.classVal) || '';
+        const partDisplay = partNum ? ` [Part #: ${partNum}]` : '';
+        detailedLines.push(`- ${it.quantity}x ${cleanType} (${it.size}, ${it.classVal})${partDisplay} -> For: ${emps}`);
+      });
+    } else if (itemsMap.size > 0) {
       itemsMap.forEach(it => {
         const emps = it.employees.length ? it.employees.join(', ') : 'Shelf Stock';
         const partDisplay = it.partNumber ? ` [Part #: ${it.partNumber}]` : '';
@@ -4659,8 +5034,8 @@ class ProcurementEngine {
                     snap?.tables?.[swapKey];
       if (!table) continue;
 
-      const sheetName = (this.db && typeof this.db.getSheetName === 'function')
-        ? this.db.getSheetName(swapKey)
+      const sheetName = (this.db && typeof this.db.getSheetNameForTableKey === 'function')
+        ? this.db.getSheetNameForTableKey(swapKey)
         : (SHEET_NAME_MAP[swapKey] || table.name || swapKey);
 
       // Determine column indices
@@ -4720,10 +5095,18 @@ class ProcurementEngine {
               }
             } else {
               if (this.isNameMatch(rowEmp, targetName)) {
-                matchedRowObj = r;
-                matchedGridIdx = rowIdx - 1;
-                oldStatusVal = curStat;
-                break;
+                const rSize = this.cleanSize(r['Size'] || r['Type'] || r['Model']);
+                const itemSize = this.cleanSize(item.size);
+                const sizeOk = !itemSize || !rSize || itemSize === 'standard' || itemSize.includes(rSize) || rSize.includes(itemSize);
+                const rCls = String(r['Class'] || r['KV'] || '').replace(/[^0-9]/g, '');
+                const iCls = String(item.classVal || '').replace(/[^0-9]/g, '');
+                const clsOk = !rCls || !iCls || rCls === iCls;
+                if (sizeOk && clsOk) {
+                  matchedRowObj = r;
+                  matchedGridIdx = rowIdx - 1;
+                  oldStatusVal = curStat;
+                  break;
+                }
               }
             }
           }
@@ -4759,9 +5142,13 @@ class ProcurementEngine {
               }
             } else {
               if (this.isNameMatch(rowEmp, targetName)) {
-                matchedGridIdx = gIdx;
-                oldStatusVal = curStat;
-                break;
+                const rSize = this.cleanSize(gr[sizeCol]);
+                const itemSize = this.cleanSize(item.size);
+                if (!itemSize || !rSize || itemSize === 'standard' || itemSize.includes(rSize) || rSize.includes(itemSize)) {
+                  matchedGridIdx = gIdx;
+                  oldStatusVal = curStat;
+                  break;
+                }
               }
             }
           }
@@ -4805,8 +5192,8 @@ class ProcurementEngine {
 
     if (totalUpdated > 0) {
       // Save local database snapshot
-      if (this.db && typeof this.db.saveLocalSnapshot === 'function') {
-        await this.db.saveLocalSnapshot();
+      if (this.db && typeof this.db.persistSnapshot === 'function') {
+        await this.db.persistSnapshot(snap);
       } else if (window.desktopAPI && typeof window.desktopAPI.saveLocalSnapshot === 'function' && snap) {
         await window.desktopAPI.saveLocalSnapshot(snap);
       }
@@ -4816,8 +5203,8 @@ class ProcurementEngine {
       this.render();
 
       // If active sheet matches a modified swap table, re-render it
-      if (window.sheetsEngine && modifiedTables.has(window.sheetsEngine.currentSheetKey)) {
-        window.sheetsEngine.render();
+      if (window.sheetNavigator && modifiedTables.has(window.sheetNavigator.currentSheetKey) && typeof window.sheetNavigator.renderCurrentSheet === 'function') {
+        window.sheetNavigator.renderCurrentSheet();
       }
     }
 
@@ -4825,15 +5212,13 @@ class ProcurementEngine {
   }
 
   async generatePOText() {
-    const selected = this.items.filter(i => i.selected && i.quantity > 0);
+    const selected = this.items.filter(i => i.selected && i.quantity > 0 && i.section !== 'ordered_pending');
     if (selected.length === 0) {
-      alert('Please select at least one item to generate a purchase order.');
+      alert('Please select at least one item needing purchase to generate a purchase order.');
       return;
     }
 
-    // Mark corresponding swap items as ordered instead of Need To Order on swap sheets
-    const updatedCount = await this.markSwapsAsOrdered(selected);
-
+    // Previewing PO text must NOT mutate swap sheets to Ordered (use "Create Order / Mark Ordered" to commit an order)
     this.generatedPOTexts = {
       clean: this.buildCleanPOText(selected),
       detailed: this.buildDetailedPOText(selected)
@@ -4849,14 +5234,8 @@ class ProcurementEngine {
       if (titleEl) titleEl.textContent = 'Email Purchase Order to Vendor';
 
       const banner = document.getElementById('po-swaps-ordered-banner');
-      const bannerText = document.getElementById('po-swaps-ordered-text');
-      if (banner && bannerText) {
-        if (updatedCount > 0) {
-          bannerText.textContent = `Marked ${updatedCount} swap line item${updatedCount === 1 ? '' : 's'} as Ordered 📦 on Swaps sheets.`;
-          banner.style.display = 'flex';
-        } else {
-          banner.style.display = 'none';
-        }
+      if (banner) {
+        banner.style.display = 'none';
       }
       this.setPOFormat('clean');
       modal.style.display = 'flex';
@@ -4865,6 +5244,7 @@ class ProcurementEngine {
   }
 
   openManageVendorsModal() {
+    this._vendorsBackupBeforeEdit = JSON.parse(JSON.stringify(this.vendors || []));
     this.activeModalVendorIdx = (this.activeModalVendorIdx !== undefined && this.activeModalVendorIdx < this.vendors.length) ? this.activeModalVendorIdx : 0;
     this.activeCatalogCategoryTab = this.activeCatalogCategoryTab || 'all';
     this.catalogSearchQuery = '';
@@ -4876,7 +5256,14 @@ class ProcurementEngine {
     }
   }
 
-  closeManageVendorsModal() {
+  closeManageVendorsModal(saved = false) {
+    if (!saved && this._vendorsBackupBeforeEdit) {
+      this.vendors = this._vendorsBackupBeforeEdit;
+      if (this.selectedVendor) {
+        this.selectedVendor = this.vendors.find(v => v.name === this.selectedVendor.name) || null;
+      }
+    }
+    this._vendorsBackupBeforeEdit = null;
     const modal = document.getElementById('manage-vendors-modal');
     if (modal) {
       modal.style.display = 'none';
@@ -5223,6 +5610,9 @@ class ProcurementEngine {
     if (!v) return;
     if (confirm(`Are you sure you want to delete vendor "${v.name}"?`)) {
       this.vendors.splice(idx, 1);
+      if (this.selectedVendor && this.selectedVendor.name === v.name) {
+        this.selectedVendor = null;
+      }
       if (this.activeModalVendorIdx >= this.vendors.length) {
         this.activeModalVendorIdx = Math.max(0, this.vendors.length - 1);
       }
@@ -5241,6 +5631,13 @@ class ProcurementEngine {
     const currentV = this.vendors[this.activeModalVendorIdx];
     if (!currentV) return;
     if (!currentV.items) currentV.items = [];
+
+    // Clear active search filter so the newly added blank item row is visible in the DOM
+    if (this.catalogSearchQuery) {
+      this.catalogSearchQuery = '';
+      const searchInp = document.getElementById('vendor-catalog-search-input');
+      if (searchInp) searchInp.value = '';
+    }
 
     const catToUse = targetCategory || ((this.activeCatalogCategoryTab && this.activeCatalogCategoryTab !== 'all') ? this.activeCatalogCategoryTab : 'Other');
     const newIdx = currentV.items.length;
@@ -5279,12 +5676,11 @@ class ProcurementEngine {
     if (currentV && currentV.items && currentV.items[iIdx]) {
       const itemObj = currentV.items[iIdx];
       itemObj[field] = val;
-      // If category wasn't manually locked, auto-infer when description or part # is updated
+      // If category wasn't manually locked, update inferred category silently without tearing down DOM focus mid-typing
       if ((field === 'item' || field === 'itemNumber') && !itemObj._manualCategory) {
         const inferred = this.inferCatalogItemCategory(itemObj.item, itemObj.itemNumber);
         if (inferred !== itemObj.category) {
           itemObj.category = inferred;
-          this.renderVendorCatalogSection();
         }
       }
     }
@@ -5300,6 +5696,11 @@ class ProcurementEngine {
   }
 
   async saveVendorsToDB(silent = false) {
+    const blankVendor = (this.vendors || []).find(v => !String(v.name || '').trim());
+    if (blankVendor) {
+      if (!silent) alert('⚠️ Vendor Name cannot be empty. Please enter a name for all vendors before saving.');
+      return;
+    }
     const saveBtn = document.getElementById('btn-save-vendors');
     if (saveBtn && !silent) saveBtn.textContent = '⏳ Saving...';
 
@@ -5360,7 +5761,7 @@ class ProcurementEngine {
       this.updatePricing();
       this.render();
       if (!silent) {
-        this.closeManageVendorsModal();
+        this.closeManageVendorsModal(true);
         alert('✅ Vendor catalog saved successfully! Click "Sync & Save" at the top whenever you wish to sync changes to the cloud.');
       }
     } catch (err) {
@@ -5418,7 +5819,8 @@ class ProcurementEngine {
         }
       }
 
-      const qty = itemEmps.length > 0 ? itemEmps.length : (parseInt(item.quantity, 10) || 0);
+      const manualQty = parseInt(item.quantity, 10) || 0;
+      const qty = itemEmps.length > 0 ? Math.max(itemEmps.length, manualQty) : manualQty;
       if (qty <= 0) return;
 
       const rawPrice = parseFloat(item.price) || 0;
@@ -5456,6 +5858,7 @@ class ProcurementEngine {
   }
 
   openMarkOrderedModal(itemsToOrder = null) {
+    if (!this.vendors || !this.vendors.length) this.loadVendors();
     let items = itemsToOrder;
     if (items === null) {
       items = (this.items || []).filter(i => i.selected && i.quantity > 0 && i.section !== 'ordered_pending');
@@ -5733,6 +6136,52 @@ class ProcurementEngine {
     });
 
     tbody.innerHTML = rowsHtml;
+  }
+
+  /**
+   * Recalculates line-item subtotals, unit/line counts, and the Estimated Order Total
+   * inside the Create Order / Mark Ordered modal.
+   */
+  recalcMarkOrderedModal() {
+    let grandTotal = 0;
+    let totalUnits = 0;
+    let lineCount = 0;
+
+    const rows = document.querySelectorAll('.mark-ordered-item-row');
+    rows.forEach(r => {
+      lineCount += 1;
+      const idx = parseInt(r.getAttribute('data-idx'), 10);
+      const qtyInput = r.querySelector('.mark-ordered-qty-input');
+      const priceInput = r.querySelector('.mark-ordered-price-input');
+      const subtotalEl = r.querySelector('.mark-ordered-subtotal');
+
+      const qty = Math.max(1, parseInt(qtyInput?.value, 10) || 1);
+      const unitPrice = Math.max(0, parseFloat(priceInput?.value) || 0);
+      const subtotal = qty * unitPrice;
+
+      grandTotal += subtotal;
+      totalUnits += qty;
+
+      if (!isNaN(idx) && this.pendingMarkOrderedItems && this.pendingMarkOrderedItems[idx]) {
+        this.pendingMarkOrderedItems[idx].quantity = qty;
+        this.pendingMarkOrderedItems[idx].price = unitPrice;
+      }
+      if (subtotalEl) {
+        subtotalEl.textContent = `$${subtotal.toFixed(2)}`;
+      }
+    });
+
+    const heading = document.getElementById('mark-order-items-count-heading');
+    if (heading) {
+      heading.textContent = lineCount > 0
+        ? `Items in this Order (${lineCount} ${lineCount === 1 ? 'line' : 'lines'}, ${totalUnits} ${totalUnits === 1 ? 'unit' : 'units'})`
+        : 'Items in this Order';
+    }
+
+    const totalEl = document.getElementById('mark-order-grand-total');
+    if (totalEl) {
+      totalEl.textContent = `$${grandTotal.toFixed(2)}`;
+    }
   }
 
   syncPendingMarkOrderedItemsFromDom() {
@@ -6096,7 +6545,10 @@ class ProcurementEngine {
     const expectedDelivery = deliveryDateInput ? deliveryDateInput.value : '';
 
     const confirmBtn = document.getElementById('btn-confirm-mark-ordered');
-    if (confirmBtn) confirmBtn.textContent = '⏳ Saving Order...';
+    if (confirmBtn) {
+      confirmBtn.disabled = true;
+      confirmBtn.textContent = '⏳ Saving Order...';
+    }
 
     try {
       const snap = (this.db && typeof this.db.getSnapshot === 'function')
@@ -6154,11 +6606,7 @@ class ProcurementEngine {
         }
 
         const catKey = (origItem.itemType || '').toLowerCase();
-        let swapKey = '';
-        if (catKey.includes('glove')) swapKey = 'glove_swaps';
-        else if (catKey.includes('sleeve')) swapKey = 'sleeve_swaps';
-        else if (catKey.includes('blanket')) swapKey = 'blanket_swaps';
-        else if (catKey.includes('mack')) swapKey = 'mack_swaps';
+        const swapKey = this._getSwapTableKeyForCategory(catKey);
 
         const swapTable = swapKey ? ((this.db && typeof this.db.getTable === 'function' ? this.db.getTable(swapKey) : null) || snap?.tables?.[swapKey]) : null;
 
@@ -6169,34 +6617,16 @@ class ProcurementEngine {
           let updatedInSwap = false;
           if (swapTable && swapTable.rows) {
             const sRow = swapTable.rows.find(sr => {
-              const name = String(sr['Employee'] || sr['Employee Name'] || sr['Assigned To'] || Object.values(sr)[0] || '').trim();
+              const name = String(sr['Employee'] || sr['Employee Name'] || sr['Crew Lead / Employee'] || sr['Assigned To'] || Object.values(sr)[0] || '').trim();
               return this.isNameMatch(name, empName);
             });
             if (sRow) {
-              sRow['Status'] = `Ordered (Order #: ${orderNum})`;
-              if (sRow['Notes']) {
-                sRow['Notes'] = `${sRow['Notes']}; ${orderNote}`;
-              } else {
-                sRow['Notes'] = orderNote;
-              }
-              this.db.syncRowToRawGrid(swapTable, sRow);
-              const rIdx = sRow._rowIdx || (swapTable.rows.indexOf(sRow) + 2);
-              await this.db.addMutation({
-                action: 'UPDATE_CELL',
-                sheetName: swapTable.name,
-                tableKey: swapKey,
-                row: rIdx,
-                col: 8,
-                value: `Ordered (Order #: ${orderNum})`
-              });
-              await this.db.addMutation({
-                action: 'UPDATE_CELL',
-                sheetName: swapTable.name,
-                tableKey: swapKey,
-                row: rIdx,
-                col: 12,
-                value: sRow['Notes']
-              });
+              const nextStatus = `Ordered (Order #: ${orderNum})`;
+              const nextNotes = sRow['Notes'] ? `${sRow['Notes']}; ${orderNote}` : orderNote;
+              await this._queueCellMutation(swapTable, swapKey, sRow, 'status', nextStatus);
+              await this._queueCellMutation(swapTable, swapKey, sRow, 'notes', nextNotes);
+              sRow['Status'] = nextStatus;
+              sRow['Notes'] = nextNotes;
               updatedInSwap = true;
             }
           }
@@ -6204,34 +6634,27 @@ class ProcurementEngine {
           const needsTable = (this.db && typeof this.db.getTable === 'function' ? this.db.getTable('safety_equipment_needs') : null) || snap?.tables?.['safety_equipment_needs'];
           if (needsTable && needsTable.rows) {
             const nRow = needsTable.rows.find(nr => {
-              const name = String(nr['Employee'] || '').trim();
-              const type = String(nr['Item Type'] || '').trim().toLowerCase();
-              return this.isNameMatch(name, empName) && type.includes(catKey.slice(0, 4));
+              const meta = this._getSafetyNeedMeta(nr);
+              if (!meta) return false;
+              return this.isNameMatch(meta.employee, empName) && meta.itemType.toLowerCase().includes(catKey.slice(0, 4));
             });
             if (nRow) {
-              nRow['Status'] = 'Ordered';
-              nRow['Notes'] = orderNote;
-              this.db.syncRowToRawGrid(needsTable, nRow);
-              const nrIdx = nRow._rowIdx || (needsTable.rows.indexOf(nRow) + 2);
-              await this.db.addMutation({
-                action: 'UPDATE_ROW',
-                sheetName: needsTable.name || 'Safety Equipment Needs',
-                tableKey: 'safety_equipment_needs',
-                row: nrIdx,
-                rowData: nRow
+              await this._queueRowUpdate(needsTable, 'safety_equipment_needs', 'Safety Equipment Needs', nRow, {
+                'Status': 'Ordered',
+                'Notes': orderNote
               });
             } else if (!updatedInSwap) {
               // Only create a new safety_equipment_needs row if this item is NOT already tracked in a swap sheet
-              const newNeed = {
-                'Employee': empName,
-                'Item Type': origItem.typeLabel || origItem.itemType,
-                'Size': resolvedSize,
-                'Class': origItem.classVal || 'Class 2',
-                'Urgency': 'Immediate',
-                'Status': 'Ordered',
-                'Date Requested': orderDate || new Date().toLocaleDateString(),
-                'Notes': orderNote
-              };
+              const newNeed = this._buildSafetyNeedRow({
+                employee: empName,
+                itemType: origItem.typeLabel || origItem.itemType,
+                size: resolvedSize,
+                classVal: origItem.classVal || 'Class 2',
+                urgency: 'Immediate',
+                status: 'Ordered',
+                dateRequested: orderDate || new Date().toLocaleDateString(),
+                notes: orderNote
+              });
               await this.db.addRow('safety_equipment_needs', newNeed, 'Purchase Order');
             }
           }
@@ -6279,7 +6702,10 @@ class ProcurementEngine {
       console.error('Error confirming mark ordered:', err);
       alert('❌ Failed to mark items as ordered: ' + (err.message || err));
     } finally {
-      if (confirmBtn) confirmBtn.innerHTML = '<span>📦</span> Confirm & Create Order';
+      if (confirmBtn) {
+        confirmBtn.disabled = false;
+        confirmBtn.innerHTML = '<span>📦</span> Confirm & Create Order';
+      }
     }
   }
 
@@ -6364,8 +6790,18 @@ class ProcurementEngine {
 
     try {
       const todayStr = this.formatToMdY ? this.formatToMdY(new Date().toISOString().split('T')[0]) : new Date().toLocaleDateString();
+      const targetUnits = (emps.length > 0 ? emps : ['On Shelf']).map(emp => ({
+        category: item.itemType,
+        itemType: item.itemType,
+        size: item.size,
+        classVal: item.classVal,
+        empName: emp,
+        orderInfo: item.orderInfo || null
+      }));
       await this.resolveReceivedOrderItems(poNum, {
         assignedEmployees: emps,
+        units: targetUnits,
+        partialOnly: true,
         isReadyForDelivery: false,
         todayStr: todayStr
       });
@@ -6393,6 +6829,15 @@ class ProcurementEngine {
       const todayStr = this.formatToMdY ? this.formatToMdY(new Date().toISOString().split('T')[0]) : new Date().toLocaleDateString();
       await this.resolveReceivedOrderItems(poNum, {
         assignedEmployees: [empName],
+        units: [{
+          category: itemType,
+          itemType: itemType,
+          size: size,
+          classVal: classVal,
+          empName: empName,
+          orderInfo: item?.orderInfo || null
+        }],
+        partialOnly: true,
         isReadyForDelivery: false,
         todayStr: todayStr
       });
@@ -6495,18 +6940,36 @@ class ProcurementEngine {
       }
     }
 
+    const escapeRx = (str) => String(str || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const isPartialOnly = Boolean(options.partialOnly);
     const matchesPoOrEmp = (empName, statusStr, notesStr) => {
-      const s = String(statusStr || '').toLowerCase();
-      const n = String(notesStr || '').toLowerCase();
-      // Check PO numbers match
+      const s = String(statusStr || '');
+      const n = String(notesStr || '');
+      const sLower = s.toLowerCase();
+      const nLower = n.toLowerCase();
+
+      // When resolving only specific unit(s) / employee(s), NEVER match unrelated employees on the same PO
+      if (isPartialOnly && empNamesSet.size > 0) {
+        if (!empName) return false;
+        const normEmp = this.normalizeName(empName);
+        let empHit = Boolean(normEmp && empNamesSet.has(normEmp));
+        if (!empHit) {
+          for (const ke of empNamesSet) {
+            if (this.isNameMatch(ke, empName)) { empHit = true; break; }
+          }
+        }
+        return empHit && (sLower.includes('order') || nLower.includes('order'));
+      }
+
+      // Check PO numbers match with boundary guard so short IDs don't false-match unrelated numbers
       for (const pid of poNumSet) {
         if (pid.length >= 2) {
-          const lowerPid = pid.toLowerCase();
-          if (s.includes(lowerPid) || n.includes(lowerPid)) return true;
+          const rx = new RegExp(`(^|[^a-z0-9])${escapeRx(pid)}([^a-z0-9]|$)`, 'i');
+          if (rx.test(s) || rx.test(n)) return true;
         }
       }
       // Check employee name match if item is marked ordered
-      if (empName && (s.includes('order') || n.includes('order'))) {
+      if (empName && (sLower.includes('order') || nLower.includes('order'))) {
         const normEmp = this.normalizeName(empName);
         if (normEmp && empNamesSet.has(normEmp)) return true;
         for (const ke of empNamesSet) {
@@ -6520,59 +6983,45 @@ class ProcurementEngine {
     const needsTable = (this.db && typeof this.db.getTable === 'function' ? this.db.getTable('safety_equipment_needs') : null) || snap?.tables?.['safety_equipment_needs'];
     if (needsTable && needsTable.rows) {
       for (const nr of needsTable.rows) {
-        const emp = String(nr['Employee'] || '').trim();
-        const stat = String(nr['Status'] || '');
-        const notes = String(nr['Notes'] || '');
-        if (matchesPoOrEmp(emp, stat, notes)) {
-          nr['Status'] = isReadyForDelivery ? 'Ready For Delivery' : 'Fulfilled';
-          nr['Notes'] = `${notes}; Order received & fulfilled on ${todayStr}`.trim().replace(/^;\s*/, '');
-          this.db.syncRowToRawGrid(needsTable, nr);
-          const nrIdx = nr._rowIdx || (needsTable.rows.indexOf(nr) + 2);
-          await this.db.addMutation({
-            action: 'UPDATE_ROW',
-            sheetName: needsTable.name || 'Safety Equipment Needs',
-            tableKey: 'safety_equipment_needs',
-            row: nrIdx,
-            rowData: nr
+        const meta = this._getSafetyNeedMeta(nr);
+        if (!meta) continue;
+        if (matchesPoOrEmp(meta.employee, meta.status, meta.notes)) {
+          const nextStatus = isReadyForDelivery ? 'Ready For Delivery' : 'Fulfilled';
+          const nextNotes = `${meta.notes}; Order received & fulfilled on ${todayStr}`.trim().replace(/^;\s*/, '');
+          await this._queueRowUpdate(needsTable, 'safety_equipment_needs', 'Safety Equipment Needs', nr, {
+            'Status': nextStatus,
+            'Notes': nextNotes
           });
         }
       }
     }
 
-    // 4. Update swap tables (glove_swaps, sleeve_swaps, blanket_swaps, mack_swaps)
-    const swapMetaMap = {
-      glove_swaps: { cat: 'glove', invKey: 'gloves', isRubber: true },
-      sleeve_swaps: { cat: 'sleeve', invKey: 'sleeves', isRubber: true },
-      blanket_swaps: { cat: 'blanket', invKey: 'blankets', isRubber: false },
-      mack_swaps: { cat: 'mack', invKey: 'macks', isRubber: false }
-    };
+    // 4. Update swap tables across all 9 equipment categories
     const parseSwapCls = (c) => {
       if (c === undefined || c === null || c === '') return null;
       const m = String(c).match(/\d+/);
       return m ? parseInt(m[0], 10) : null;
     };
-    const swapKeys = ['glove_swaps', 'sleeve_swaps', 'blanket_swaps', 'mack_swaps'];
-    for (const sk of swapKeys) {
+    const swapConfigs = this._getAllSwapTableConfigs();
+    for (const meta of swapConfigs) {
+      const sk = meta.swapKey;
       const sTable = (this.db && typeof this.db.getTable === 'function' ? this.db.getTable(sk) : null) || snap?.tables?.[sk];
       if (sTable) {
-        const meta = swapMetaMap[sk];
         const invTableForSk = (this.db && typeof this.db.getTable === 'function' ? this.db.getTable(meta.invKey) : null) || snap?.tables?.[meta.invKey];
-        const isMack = (sk === 'mack_swaps');
-        const statColIdx = isMack ? 9 : 7; // 0-based
-        const notesColIdx = isMack ? 11 : 11; // 0-based
-        const pickColIdx = isMack ? 8 : 6;
-        const pickedColIdx = isMack ? 10 : 8;
+        const empColInfo = this._findTableCol(sTable, sk, 'employee');
+        const statColInfo = this._findTableCol(sTable, sk, 'status');
+        const notesColInfo = this._findTableCol(sTable, sk, 'notes');
 
         if (sTable.rows && sTable.rows.length > 0) {
           for (const sr of sTable.rows) {
-            const emp = String(sr['Employee'] || sr['Employee Name'] || sr['Assigned To'] || Object.values(sr)[0] || '').trim();
+            const emp = String(sr['Employee'] || sr['Employee Name'] || sr['Crew Lead / Employee'] || sr['Assigned To'] || Object.values(sr)[0] || '').trim();
             const stat = String(sr['Status'] || '');
             const statLower = stat.toLowerCase();
             if (statLower === 'complete' || statLower.includes('ready for delivery')) continue;
             const notes = String(sr['Notes'] || '');
             if (matchesPoOrEmp(emp, stat, notes)) {
-              const oldItemNum = String(sr['Current Glove #'] || sr['Current Sleeve #'] || sr['Current Blanket #'] || sr['Current MACK #'] || sr['Current Item #'] || sr['Current Item'] || '').trim();
-              let srClass = parseSwapCls(sr['Class']);
+              const oldItemNum = String(sr['Current Glove #'] || sr['Current Sleeve #'] || sr['Current Blanket #'] || sr['Current MACK #'] || sr['Current Item #'] || sr['Current Item'] || sr['Serial #'] || '').trim();
+              let srClass = parseSwapCls(sr['Class'] || sr['KV']);
               if (meta.isRubber && srClass === null && oldItemNum && invTableForSk && Array.isArray(invTableForSk.rows)) {
                 const oldInv = invTableForSk.rows.find(it => String(it['Item #'] || it['Glove'] || it['Sleeve'] || it['ESL ID'] || '').trim() === oldItemNum);
                 if (oldInv) srClass = parseSwapCls(oldInv['Class']);
@@ -6582,7 +7031,7 @@ class ProcurementEngine {
               if (Array.isArray(options.units) && options.units.length > 0) {
                 const empCatUnits = options.units.filter(u =>
                   this.isNameMatch(u.empName, emp) &&
-                  String(u.category || '').toLowerCase().includes(meta.cat)
+                  this._getSwapTableKeyForCategory(u.category || u.itemType) === sk
                 );
                 const empAnyUnits = options.units.filter(u => this.isNameMatch(u.empName, emp));
                 if (empAnyUnits.length > 0 && empCatUnits.length === 0) continue; // Units for another category only
@@ -6598,81 +7047,39 @@ class ProcurementEngine {
                 }
               }
               const newStatus = isReadyForDelivery ? 'Ready For Delivery 🚚' : 'Complete';
-              sr['Status'] = newStatus;
-              if (assignedItemNum) {
+              const hasValidPickNum = Boolean(assignedItemNum && assignedItemNum !== '—' && assignedItemNum !== '-');
+
+              // Queue Pick List BEFORE Status so GAS manual-pick styling cannot clobber Status
+              if (hasValidPickNum) {
+                await this._queueCellMutation(sTable, sk, sr, 'pickList', assignedItemNum);
                 sr['Pick List Item #'] = assignedItemNum;
                 sr['Picked For'] = assignedItemNum;
               }
-              sr['Picked'] = true;
-              this.db.syncRowToRawGrid(sTable, sr);
-              const rIdx = sr._rowIdx || (sTable.rows.indexOf(sr) + 2);
+              await this._queueCellMutation(sTable, sk, sr, 'status', newStatus);
+              sr['Status'] = newStatus;
 
-              if (sTable.rawGrid && sTable.rawGrid[rIdx - 1] && Array.isArray(sTable.rawGrid[rIdx - 1])) {
-                sTable.rawGrid[rIdx - 1][statColIdx] = newStatus;
-                sTable.rawGrid[rIdx - 1][pickedColIdx] = true;
-                if (assignedItemNum) sTable.rawGrid[rIdx - 1][pickColIdx] = assignedItemNum;
-              }
-
-              // Send cell updates for cloud sync
-              await this.db.addMutation({
-                action: 'UPDATE_CELL',
-                sheetName: sTable.name,
-                tableKey: sk,
-                row: rIdx,
-                col: statColIdx + 1,
-                value: newStatus
-              });
-              await this.db.addMutation({
-                action: 'UPDATE_CELL',
-                sheetName: sTable.name,
-                tableKey: sk,
-                row: rIdx,
-                col: pickedColIdx + 1,
-                value: true
-              });
-              if (assignedItemNum) {
-                await this.db.addMutation({
-                  action: 'UPDATE_CELL',
-                  sheetName: sTable.name,
-                  tableKey: sk,
-                  row: rIdx,
-                  col: pickColIdx + 1,
-                  value: assignedItemNum
-                });
-              }
-              if (isReadyForDelivery && assignedItemNum && typeof this.db.saveManualPick === 'function') {
-                this.db.saveManualPick(sk, emp, oldItemNum, assignedItemNum, 'Ready For Delivery 🚚', true);
+              // Only queue Picked = true when Ready For Delivery with a valid physical Pick List item #
+              // (Sending Picked = true without a Pick List # or on Complete triggers unintended GAS Stage 1 flips)
+              if (isReadyForDelivery && hasValidPickNum) {
+                await this._queueCellMutation(sTable, sk, sr, 'picked', true);
+                sr['Picked'] = true;
+                if (typeof this.db.saveManualPick === 'function') {
+                  this.db.saveManualPick(sk, emp, oldItemNum, assignedItemNum, 'Ready For Delivery 🚚', true);
+                }
               }
             }
           }
-        } else if (sTable.rawGrid && Array.isArray(sTable.rawGrid)) {
+        } else if (sTable.rawGrid && Array.isArray(sTable.rawGrid) && empColInfo && statColInfo) {
           // Fallback: update rawGrid directly when sTable.rows is empty or detached
           for (let r = 1; r < sTable.rawGrid.length; r++) {
             const gridRow = sTable.rawGrid[r];
             if (!Array.isArray(gridRow)) continue;
-            const emp = String(gridRow[0] || '').trim();
-            const stat = String(gridRow[statColIdx] || '').trim();
-            const notes = String(gridRow[notesColIdx] || '').trim();
+            const emp = String(gridRow[empColInfo.col0Based] || '').trim();
+            const stat = String(gridRow[statColInfo.col0Based] || '').trim();
+            const notes = notesColInfo ? String(gridRow[notesColInfo.col0Based] || '').trim() : '';
             if (emp && stat.toLowerCase().includes('order') && matchesPoOrEmp(emp, stat, notes)) {
               const newStatus = isReadyForDelivery ? 'Ready For Delivery 🚚' : 'Complete';
-              gridRow[statColIdx] = newStatus;
-              gridRow[pickedColIdx] = true;
-              await this.db.addMutation({
-                action: 'UPDATE_CELL',
-                sheetName: sTable.name,
-                tableKey: sk,
-                row: r + 1,
-                col: statColIdx + 1,
-                value: newStatus
-              });
-              await this.db.addMutation({
-                action: 'UPDATE_CELL',
-                sheetName: sTable.name,
-                tableKey: sk,
-                row: r + 1,
-                col: pickedColIdx + 1,
-                value: true
-              });
+              await this._queueCellMutation(sTable, sk, r, 'status', newStatus);
             }
           }
         }
@@ -6682,20 +7089,26 @@ class ProcurementEngine {
     // 5. Update purchase_orders table
     if (poTable && poTable.rows) {
       for (const po of targetPoRows) {
-        po['Status'] = 'Received';
-        if (!po['Expected Delivery'] || po['Expected Delivery'] === 'Pending') {
-          po['Expected Delivery'] = todayStr;
+        const poId = String(po['PO Number'] || po['PO #'] || '').trim();
+        if (isPartialOnly && Array.isArray(options.units) && options.units.length > 0 && po['Items']) {
+          const parsedPoItems = this.parsePoItemsString(String(po['Items']));
+          let totalPoUnits = parsedPoItems.reduce((sum, pi) => sum + (parseInt(pi.quantity, 10) || 1), 0);
+          if (totalPoUnits > options.units.length) {
+            const receivedDesc = options.units.map(u => `${u.empName || 'Shelf'} (${u.itemType || u.category} ${u.size || ''})`).join(', ');
+            const updatedFields = {
+              'Status': 'Partially Received',
+              'Notes': `${po['Notes'] || ''}; Partial receipt (${receivedDesc}) on ${todayStr}`.trim().replace(/^;\s*/, '')
+            };
+            await this._queueRowUpdate(poTable, 'purchase_orders', 'Purchase Orders', po, updatedFields, poId);
+            continue;
+          }
         }
-        po['Notes'] = `${po['Notes'] || ''}; Received on ${todayStr}`.trim().replace(/^;\s*/, '');
-        this.db.syncRowToRawGrid(poTable, po);
-        const rIdx = po._rowIdx || (poTable.rows.indexOf(po) + 2);
-        await this.db.addMutation({
-          action: 'UPDATE_ROW',
-          sheetName: poTable.name || 'Purchase Orders',
-          tableKey: 'purchase_orders',
-          row: rIdx,
-          rowData: po
-        });
+        const updatedFields = {
+          'Status': 'Received',
+          'Expected Delivery': (!po['Expected Delivery'] || po['Expected Delivery'] === 'Pending') ? todayStr : po['Expected Delivery'],
+          'Notes': `${po['Notes'] || ''}; Received on ${todayStr}`.trim().replace(/^;\s*/, '')
+        };
+        await this._queueRowUpdate(poTable, 'purchase_orders', 'Purchase Orders', po, updatedFields, poId);
       }
     }
   }
@@ -6777,7 +7190,7 @@ class ProcurementEngine {
       const raw = localStorage.getItem(this._getBatchDraftStorageKey());
       const parsed = raw ? JSON.parse(raw) : {};
       return (parsed && typeof parsed === 'object') ? parsed : {};
-    } catch (e) {
+    } catch {
       return {};
     }
   }
@@ -7373,6 +7786,54 @@ class ProcurementEngine {
       return;
     }
 
+    // Pre-check for duplicate Item # within this batch or already present in local inventory
+    const seenBatchNums = new Map();
+    const resolveCatKey = (catStr) => {
+      const cat = String(catStr || '').toLowerCase();
+      if (cat.includes('glove')) return 'gloves';
+      if (cat.includes('sleeve')) return 'sleeves';
+      if (cat.includes('blanket')) return 'blankets';
+      if (cat.includes('mack')) return 'macks';
+      if (cat.includes('hv') || cat.includes('tester')) return 'hv_testers';
+      if (cat.includes('phasing')) return 'phasing_sets';
+      if (cat.includes('ground')) return 'grounds';
+      if (cat.includes('hot') || cat.includes('stick')) return 'hot_sticks';
+      if (cat.includes('aed')) return 'aed';
+      return 'gloves';
+    };
+    for (const i of pendingCheckedIndices) {
+      const r = rows[i];
+      const u = this._pendingDeliveryUnits[i];
+      if (!u || this.isTestingServiceItem(u)) continue;
+      const itemNumInput = r.querySelector('.batch-item-num');
+      const itemNum = itemNumInput ? itemNumInput.value.trim() : '';
+      const ck = resolveCatKey(u.category);
+      const batchKey = `${ck}::${itemNum.toLowerCase()}`;
+      if (seenBatchNums.has(batchKey)) {
+        alert(`⚠️ Duplicate Item #${itemNum} entered in this delivery batch (units #${seenBatchNums.get(batchKey) + 1} and #${i + 1}). Please assign unique item numbers.`);
+        if (itemNumInput) itemNumInput.focus();
+        return;
+      }
+      seenBatchNums.set(batchKey, i);
+
+      const invTbl = (this.db && typeof this.db.getTable === 'function') ? this.db.getTable(ck) : null;
+      if (invTbl && Array.isArray(invTbl.rows)) {
+        const dupExists = invTbl.rows.some(ex => {
+          const exNum = String(
+            ex['Item #'] || ex['Glove'] || ex['Sleeve'] || ex['Blanket'] || ex['MACK'] ||
+            ex['HVT #'] || ex['HV Tester'] || ex['Phasing Set #'] || ex['Phasing Set'] || ex['PS #'] ||
+            ex['AED #'] || ex['AED'] || ex['Ground #'] || ex['Hot Stick #'] || ex['Hot Stick'] || ex['Serial #'] || ''
+          ).trim().toLowerCase();
+          return exNum && exNum === itemNum.toLowerCase();
+        });
+        if (dupExists) {
+          alert(`⚠️ Item #${itemNum} already exists in ${invTbl.name || ck}. Please enter a unique Item # before receiving.`);
+          if (itemNumInput) itemNumInput.focus();
+          return;
+        }
+      }
+    }
+
     const uncheckedPendingCount = pendingTotalCount - pendingCheckedIndices.length;
     const isPartialDelivery = uncheckedPendingCount > 0;
 
@@ -7424,21 +7885,11 @@ class ProcurementEngine {
         const isReadyForDelivery = (status === 'Ready For Delivery' || status === 'Ready For Delivery 🚚');
         if (isReadyForDelivery) anyReadyForDelivery = true;
         const invStatus = isReadyForDelivery ? 'Ready For Delivery' : status;
-        const invAssignedTo = isReadyForDelivery ? 'Packed For Delivery' : assignedTo;
+        const invAssignedTo = isReadyForDelivery ? 'Packed For Delivery' : (assignedTo || (invStatus === 'On Shelf' ? 'On Shelf' : ''));
         const invPickedFor = (isReadyForDelivery && assignedTo) ? `${assignedTo} Picked On ${todayIso}` : '';
         const invLocation = isReadyForDelivery ? (location === 'Helena' ? "Cody's Truck" : location) : location;
 
-        const cat = u.category.toLowerCase();
-        let catKey = 'gloves';
-        if (cat.includes('glove')) catKey = 'gloves';
-        else if (cat.includes('sleeve')) catKey = 'sleeves';
-        else if (cat.includes('blanket')) catKey = 'blankets';
-        else if (cat.includes('mack')) catKey = 'macks';
-        else if (cat.includes('hv') || cat.includes('tester')) catKey = 'hv_testers';
-        else if (cat.includes('phasing')) catKey = 'phasing_sets';
-        else if (cat.includes('ground')) catKey = 'grounds';
-        else if (cat.includes('hot') || cat.includes('stick')) catKey = 'hot_sticks';
-        else if (cat.includes('aed')) catKey = 'aed';
+        const catKey = resolveCatKey(u.category);
 
         let changeOutDate = '';
         if (window.inventoryManager && typeof window.inventoryManager.calculateChangeOutDate === 'function') {
@@ -7483,15 +7934,85 @@ class ProcurementEngine {
             'Notes': 'New'
           };
         } else if (catKey === 'macks') {
+          const kvMatch = String(editedClassVal || '').match(/(\d+\s*kv)/i) || String(editedSize || '').match(/(\d+\s*kv)/i);
+          const lenMatch = String(editedSize || '').match(/(\d+\s*(?:ft|'))/i);
           newRow = {
             'MACK': itemNum,
             'Item #': itemNum,
             'ESL ID': eslId || itemNum,
-            'KV': '15KV',
+            'KV': kvMatch ? kvMatch[1].toUpperCase().replace(/\s+/g, '') : (editedClassVal && !/^n\/a$/i.test(editedClassVal) ? editedClassVal : '15KV'),
             'Size': editedSize || '1/0',
-            'Length': '8 ft',
+            'Length': lenMatch ? lenMatch[1] : '8 ft',
             'Test Date': testDate,
             'Date Assigned': assignedTo ? todayStr : testDate,
+            'Location': invLocation,
+            'Status': invStatus,
+            'Assigned To': invAssignedTo,
+            'Change Out Date': changeOutDate,
+            'Picked For': invPickedFor,
+            'Notes': 'New'
+          };
+        } else if (catKey === 'hv_testers' || catKey === 'phasing_sets') {
+          const isHvt = catKey === 'hv_testers';
+          newRow = {
+            [isHvt ? 'HV Tester' : 'Phasing Set']: itemNum,
+            [isHvt ? 'HVT #' : 'PS #']: itemNum,
+            'Item #': itemNum,
+            'Model': editedSize || '',
+            'KV': editedClassVal || '',
+            'Serial #': eslId || itemNum,
+            'Calibration Date': testDate,
+            'Date Assigned': assignedTo ? todayStr : '',
+            'Location': invLocation,
+            'Status': invStatus,
+            'Assigned To': invAssignedTo,
+            'Change Out Date': changeOutDate,
+            'Picked For': invPickedFor,
+            'Notes': 'New'
+          };
+        } else if (catKey === 'aed') {
+          newRow = {
+            'AED': itemNum,
+            'AED #': itemNum,
+            'Item #': itemNum,
+            'Model': editedSize || '',
+            'Pad Expiration': testDate,
+            'Date Assigned': assignedTo ? todayStr : '',
+            'Location': invLocation,
+            'Status': invStatus,
+            'Assigned To': invAssignedTo,
+            'Change Out Date': changeOutDate,
+            'Picked For': invPickedFor,
+            'Notes': 'New'
+          };
+        } else if (catKey === 'grounds') {
+          const lenMatch = String(editedSize || '').match(/(\d+\s*(?:ft|'))/i);
+          newRow = {
+            'Serial #': itemNum,
+            'Ground #': itemNum,
+            'Item #': itemNum,
+            'Type': 'OH',
+            'Size': editedSize || '2/0',
+            'KV': editedClassVal || '',
+            'Length': lenMatch ? lenMatch[1] : '',
+            'Test Date': testDate,
+            'Date Assigned': assignedTo ? todayStr : '',
+            'Location': invLocation,
+            'Status': invStatus,
+            'Assigned To': invAssignedTo,
+            'Change Out Date': changeOutDate,
+            'Picked For': invPickedFor,
+            'Notes': 'New'
+          };
+        } else if (catKey === 'hot_sticks') {
+          const lenMatch = String(editedSize || '').match(/(\d+\s*(?:ft|'))/i);
+          newRow = {
+            'Hot Stick': itemNum,
+            'Item #': itemNum,
+            'Type': editedSize || 'Switch Stick',
+            'Length': lenMatch ? lenMatch[1] : '',
+            'Test Date': testDate,
+            'Date Assigned': assignedTo ? todayStr : '',
             'Location': invLocation,
             'Status': invStatus,
             'Assigned To': invAssignedTo,
@@ -7513,15 +8034,11 @@ class ProcurementEngine {
           };
         }
 
-        await this.db.addRow(catKey, newRow, 'New Purchase');
+        const addOriginNote = isReadyForDelivery
+          ? `Packed For Delivery (${assignedTo})`
+          : ((assignedTo && !assignedTo.toLowerCase().includes('shelf')) ? `Assigned To (${assignedTo})` : 'New Purchase');
+        await this.db.addRow(catKey, newRow, addOriginNote);
         addedItemsSummary.push(`${u.category} #${itemNum} (${isReadyForDelivery ? 'Packed for ' + assignedTo : (assignedTo || 'Shelf')})`);
-
-        // If specifically packed for delivery or directly assigned to an employee, record that second stage event.
-        // For items placed on shelf, addRow above ALREADY recorded the initial 'On Shelf (New Purchase)' history event.
-        if (typeof this.db.recordItemHistoryEvent === 'function' && (isReadyForDelivery || (assignedTo && assignedTo.toLowerCase() !== 'on shelf' && !assignedTo.toLowerCase().includes('shelf')))) {
-          const invSheetName = (catKey === 'gloves') ? 'Gloves' : ((catKey === 'sleeves') ? 'Sleeves' : ((catKey === 'blankets') ? 'Blankets' : ((catKey === 'macks') ? 'MACKs' : catKey)));
-          await this.db.recordItemHistoryEvent(invSheetName, newRow, isReadyForDelivery ? `Packed For Delivery (${assignedTo})` : `Assigned To (${assignedTo})`);
-        }
 
         if (assignedTo) {
           await this._syncReceivedItemToSwapSheet({
@@ -7538,21 +8055,14 @@ class ProcurementEngine {
           const needsTable = (this.db && typeof this.db.getTable === 'function' ? this.db.getTable('safety_equipment_needs') : null) || snap?.tables?.['safety_equipment_needs'];
           if (needsTable && needsTable.rows) {
             const nRow = needsTable.rows.find(nr => {
-              const name = String(nr['Employee'] || '').trim();
-              const type = String(nr['Item Type'] || '').trim().toLowerCase();
-              return this.isNameMatch(name, assignedTo) && type.includes(catKey.slice(0, 4));
+              const meta = this._getSafetyNeedMeta(nr);
+              if (!meta) return false;
+              return this.isNameMatch(meta.employee, assignedTo) && meta.itemType.toLowerCase().includes(catKey.slice(0, 4));
             });
             if (nRow) {
-              nRow['Status'] = isReadyForDelivery ? 'Ready For Delivery' : 'Fulfilled';
-              nRow['Notes'] = isReadyForDelivery ? `Packed as #${itemNum} for delivery on ${todayStr}` : `Delivered & added as #${itemNum} on ${todayStr}`;
-              this.db.syncRowToRawGrid(needsTable, nRow);
-              const nrIdx = nRow._rowIdx || (needsTable.rows.indexOf(nRow) + 2);
-              await this.db.addMutation({
-                action: 'UPDATE_ROW',
-                sheetName: needsTable.name || 'Safety Equipment Needs',
-                tableKey: 'safety_equipment_needs',
-                row: nrIdx,
-                rowData: nRow
+              await this._queueRowUpdate(needsTable, 'safety_equipment_needs', 'Safety Equipment Needs', nRow, {
+                'Status': isReadyForDelivery ? 'Ready For Delivery' : 'Fulfilled',
+                'Notes': isReadyForDelivery ? `Packed as #${itemNum} for delivery on ${todayStr}` : `Delivered & added as #${itemNum} on ${todayStr}`
               });
             }
           }
@@ -7607,6 +8117,22 @@ class ProcurementEngine {
 
       if (isPartialDelivery) {
         this._saveBatchDraftStore(draftStore);
+        // Mark matching open PO rows as Partially Received so partial receipts are reflected in Order History & sync
+        const poTable = (this.db && typeof this.db.getTable === 'function' ? this.db.getTable('purchase_orders') : null) || snap?.tables?.['purchase_orders'];
+        if (poTable && Array.isArray(poTable.rows) && poNums.length > 0) {
+          const poNumLowerSet = new Set(poNums.map(p => String(p || '').trim().toLowerCase()).filter(Boolean));
+          for (const po of poTable.rows) {
+            const pNum = String(po['PO Number'] || po['PO #'] || '').trim();
+            const pStat = String(po['Status'] || '').toLowerCase();
+            if (pNum && poNumLowerSet.has(pNum.toLowerCase()) && !pStat.includes('received') && !pStat.includes('cancel')) {
+              const nextNotes = `${po['Notes'] || ''}; Partial delivery (${addedItemsSummary.length} unit(s)) on ${todayStr}`.trim().replace(/^;\s*/, '');
+              await this._queueRowUpdate(poTable, 'purchase_orders', 'Purchase Orders', po, {
+                'Status': 'Partially Received',
+                'Notes': nextNotes
+              }, pNum);
+            }
+          }
+        }
         this.closeBatchDeliveryModal();
         await this.loadData();
         refreshDeliveryViews();
@@ -7656,10 +8182,6 @@ class ProcurementEngine {
     if (noInvBtn) noInvBtn.textContent = '⏳ Marking Delivered...';
 
     try {
-      const snap = (this.db && typeof this.db.getSnapshot === 'function')
-        ? this.db.getSnapshot()
-        : (window.localDB ? window.localDB.getSnapshot() : null);
-
       const todayStr = this.formatToMdY ? this.formatToMdY(new Date().toISOString().split('T')[0]) : new Date().toLocaleDateString();
 
       // Collect all PO numbers and assigned employees from pending units + skipped service items
@@ -7695,28 +8217,46 @@ class ProcurementEngine {
   openDeliverForEmployee(empName, itemType, preferredSize) {
     const norm = this.cleanEmployeeName(empName);
     const cat = (itemType || '').toLowerCase();
-    const isGlove = cat.includes('glove');
-    const targetType = isGlove ? 'Gloves' : 'Sleeves';
+    const cfg = this._getAllSwapTableConfigs().find(c => cat.includes(c.cat) || c.type.toLowerCase() === cat || c.invKey === cat);
+    const targetType = cfg ? cfg.type : (cat.includes('glove') ? 'Gloves' : 'Sleeves');
+    const typeLabelMap = {
+      'Gloves': '🧤 Gloves',
+      'Sleeves': '🦺 Sleeves',
+      'Blankets': '🧱 Blankets',
+      'MACKs': '🔶 MACKs',
+      'HV Testers': '⚡ HV Testers',
+      'Phasing Sets': '⚡ Phasing Sets',
+      'AED': '❤️ AED',
+      'Grounds': '⚡ Grounds',
+      'Hot Sticks': '🦯 Hot Sticks'
+    };
 
     const match = this.items.find(i => {
       if (i.section !== 'ordered_pending') return false;
-      if (!i.itemType.toLowerCase().includes(cat.slice(0, 4))) return false;
+      if (!i.itemType.toLowerCase().includes(targetType.toLowerCase().slice(0, 4))) return false;
       if (i.employees && i.employees.some(e => this.isNameMatch(e.name, norm))) return true;
       return false;
     });
 
     if (match) {
-      this.openBatchDeliveryModal([match]);
+      const matchedEmp = (match.employees || []).find(e => this.isNameMatch(e.name, norm)) || { name: empName, label: empName, checked: true };
+      const isolatedItem = {
+        ...match,
+        quantity: 1,
+        employees: [{ ...matchedEmp, checked: true }]
+      };
+      this.openBatchDeliveryModal([isolatedItem]);
     } else {
-      const classVal = (window.ppeTrackingEngine && typeof window.ppeTrackingEngine.getPreferredPpeClass === 'function')
-        ? window.ppeTrackingEngine.getPreferredPpeClass(empName, isGlove ? 'gloves' : 'sleeves')
-        : 'Class 2';
+      const isRubber = targetType === 'Gloves' || targetType === 'Sleeves';
+      const classVal = (isRubber && window.ppeTrackingEngine && typeof window.ppeTrackingEngine.getPreferredPpeClass === 'function')
+        ? window.ppeTrackingEngine.getPreferredPpeClass(empName, targetType.toLowerCase())
+        : (targetType === 'Blankets' ? 'Class 4' : 'Class 2');
 
       const singleItem = {
         section: 'ordered_pending',
         itemType: targetType,
-        typeLabel: isGlove ? '🧤 Gloves' : '🦺 Sleeves',
-        size: (preferredSize && preferredSize !== '—') ? preferredSize : (isGlove ? '10' : 'Regular'),
+        typeLabel: typeLabelMap[targetType] || `📦 ${targetType}`,
+        size: (preferredSize && preferredSize !== '—') ? preferredSize : (targetType === 'Gloves' ? '10' : 'Regular'),
         classVal: classVal,
         quantity: 1,
         employees: [{ name: empName, label: empName, checked: true }],
@@ -7819,11 +8359,7 @@ class ProcurementEngine {
    */
   async _syncReceivedItemToSwapSheet({ catKey, assignedTo, itemNum, itemClass = '', size = '', invItemData = null, isReadyForDelivery = true, snap = null } = {}) {
     if (!assignedTo || !itemNum) return;
-    let swapKey = '';
-    if (catKey === 'gloves') swapKey = 'glove_swaps';
-    else if (catKey === 'sleeves') swapKey = 'sleeve_swaps';
-    else if (catKey === 'blankets') swapKey = 'blanket_swaps';
-    else if (catKey === 'macks') swapKey = 'mack_swaps';
+    const swapKey = this._getSwapTableKeyForCategory(catKey);
     if (!swapKey) return;
 
     const parseOrderClass = (c) => {
@@ -7839,7 +8375,7 @@ class ProcurementEngine {
     let updatedExisting = false;
     if (swapTable && Array.isArray(swapTable.rows)) {
       const sRow = swapTable.rows.find(sr => {
-        const name = String(sr['Employee'] || sr['Employee Name'] || sr['Assigned To'] || Object.values(sr)[0] || '').trim();
+        const name = String(sr['Employee'] || sr['Employee Name'] || sr['Crew Lead / Employee'] || sr['Assigned To'] || Object.values(sr)[0] || '').trim();
         const empMatch = this.isNameMatch(name, assignedTo) ||
           (typeof window !== 'undefined' && window.employeeResolver && typeof window.employeeResolver.areSameEmployee === 'function' && window.employeeResolver.areSameEmployee(name, assignedTo));
         if (!empMatch) return false;
@@ -7861,23 +8397,25 @@ class ProcurementEngine {
 
       if (sRow) {
         updatedExisting = true;
-        const oldItemNum = String(sRow['Current Glove #'] || sRow['Current Sleeve #'] || sRow['Current Blanket #'] || sRow['Current MACK #'] || sRow['Current Item #'] || sRow['Current Item'] || '').trim();
-        const pickCol = (catKey === 'macks') ? 9 : 7;
-        const statCol = (catKey === 'macks') ? 10 : 8;
-        const pickedCol = (catKey === 'macks') ? 11 : 9;
+        const oldItemNum = String(sRow['Current Glove #'] || sRow['Current Sleeve #'] || sRow['Current Blanket #'] || sRow['Current MACK #'] || sRow['Current Item #'] || sRow['Current Item'] || sRow['Serial #'] || '').trim();
         const targetStatus = isReadyForDelivery ? 'Ready For Delivery 🚚' : 'Complete';
+        const hasValidPickNum = Boolean(itemNum && itemNum !== '—' && itemNum !== '-');
 
+        // Queue Pick List BEFORE Status, and only set Picked = true when Ready For Delivery with a real Pick List item #
+        if (hasValidPickNum) {
+          await this._queueCellMutation(swapTable, swapKey, sRow, 'pickList', itemNum);
+          sRow['Pick List Item #'] = itemNum;
+          sRow['Picked For'] = itemNum;
+        }
+        await this._queueCellMutation(swapTable, swapKey, sRow, 'status', targetStatus);
         sRow['Status'] = targetStatus;
-        sRow['Pick List Item #'] = itemNum;
-        sRow['Picked For'] = itemNum;
-        sRow['Picked'] = true;
-        this.db.syncRowToRawGrid(swapTable, sRow);
-        const rIdx = sRow._rowIdx || (swapTable.rows.indexOf(sRow) + 2);
-        await this.db.addMutation({ action: 'UPDATE_CELL', sheetName: swapTable.name, tableKey: swapKey, row: rIdx, col: pickCol, value: itemNum });
-        await this.db.addMutation({ action: 'UPDATE_CELL', sheetName: swapTable.name, tableKey: swapKey, row: rIdx, col: statCol, value: targetStatus });
-        await this.db.addMutation({ action: 'UPDATE_CELL', sheetName: swapTable.name, tableKey: swapKey, row: rIdx, col: pickedCol, value: true });
-        if (isReadyForDelivery && typeof this.db.saveManualPick === 'function') {
-          this.db.saveManualPick(swapKey, assignedTo, oldItemNum, itemNum, 'Ready For Delivery 🚚', true);
+
+        if (isReadyForDelivery && hasValidPickNum) {
+          await this._queueCellMutation(swapTable, swapKey, sRow, 'picked', true);
+          sRow['Picked'] = true;
+          if (typeof this.db.saveManualPick === 'function') {
+            this.db.saveManualPick(swapKey, assignedTo, oldItemNum, itemNum, 'Ready For Delivery 🚚', true);
+          }
         }
       }
     }
@@ -7963,7 +8501,11 @@ class ProcurementEngine {
     };
 
     const confirmBtn = document.getElementById('btn-confirm-add-past-order');
-    if (confirmBtn) confirmBtn.textContent = '⏳ Saving...';
+    if (confirmBtn) {
+      if (confirmBtn.disabled) return;
+      confirmBtn.disabled = true;
+      confirmBtn.textContent = '⏳ Saving...';
+    }
 
     try {
       const rowObj = {
@@ -7987,7 +8529,9 @@ class ProcurementEngine {
       await this.db.addRow('purchase_orders', rowObj, 'Manual Past Order');
 
       if (status === 'Received') {
-        const assignedEmps = parsedItems.map(it => it.employeeName).filter(Boolean);
+        const assignedEmps = parsedItems
+          .flatMap(it => String(it.employeeName || '').split(',').map(s => s.trim()))
+          .filter(Boolean);
         await this.resolveReceivedOrderItems(poNum, {
           assignedEmployees: assignedEmps,
           isReadyForDelivery: false,
@@ -8004,7 +8548,10 @@ class ProcurementEngine {
       console.error('Error logging past order:', err);
       alert('❌ Failed to save past order: ' + (err.message || err));
     } finally {
-      if (confirmBtn) confirmBtn.innerHTML = '<span>💾</span> Save Order to Tracking Log';
+      if (confirmBtn) {
+        confirmBtn.disabled = false;
+        confirmBtn.innerHTML = '<span>💾</span> Save Order to Tracking Log';
+      }
     }
   }
 
@@ -8058,9 +8605,13 @@ class ProcurementEngine {
 
       if (!poNum && !vendor && !items) return;
 
-      totalSpend += price;
       const statLower = status.toLowerCase();
-      if (statLower.includes('received') || statLower.includes('fulfilled')) {
+      if (!statLower.includes('cancel')) {
+        totalSpend += price;
+      }
+      if (statLower.includes('partial')) {
+        openCount++;
+      } else if (statLower.includes('received') || statLower.includes('fulfilled')) {
         completedCount++;
       } else if (statLower.includes('ordered') || statLower.includes('pending')) {
         openCount++;
@@ -8417,6 +8968,8 @@ class ProcurementEngine {
         ? this.db.getSnapshot()
         : (window.localDB ? window.localDB.getSnapshot() : null);
 
+      const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
       // 1. Update purchase_orders table
       const poTable = (this.db && typeof this.db.getTable === 'function' ? this.db.getTable('purchase_orders') : null) || snap?.tables?.['purchase_orders'];
       if (poTable && poTable.rows) {
@@ -8426,79 +8979,64 @@ class ProcurementEngine {
           return p === oldClean.toLowerCase() || n.includes(oldClean.toLowerCase());
         });
         if (poRow) {
-          poRow['PO Number'] = newClean;
+          const origPoId = String(poRow['PO Number'] || poRow['PO #'] || oldClean).trim();
+          const updatedPoFields = { 'PO Number': newClean };
           if (poRow['Notes']) {
-            poRow['Notes'] = poRow['Notes'].replace(new RegExp(oldClean, 'gi'), newClean);
+            updatedPoFields['Notes'] = poRow['Notes'].replace(new RegExp(escapeRegex(oldClean), 'gi'), newClean);
           }
-          this.db.syncRowToRawGrid(poTable, poRow);
-          const rIdx = poRow._rowIdx || (poTable.rows.indexOf(poRow) + 2);
-          await this.db.addMutation({
-            action: 'UPDATE_ROW',
-            sheetName: poTable.name || 'Purchase Orders',
-            tableKey: 'purchase_orders',
-            row: rIdx,
-            updates: poRow,
-            rowData: poRow
-          });
+          await this._queueRowUpdate(poTable, 'purchase_orders', 'Purchase Orders', poRow, updatedPoFields, origPoId);
         }
       }
 
-      // 2. Cascade to swap sheets and safety_equipment_needs
-      const targetTables = ['glove_swaps', 'sleeve_swaps', 'blanket_swaps', 'mack_swaps', 'safety_equipment_needs'];
-      const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      // 2. Cascade to all swap sheets and safety_equipment_needs
+      const targetSwapKeys = this._getAllSwapKeys();
       const oldRegex = new RegExp(`(?:Order\\s*#:\\s*|PO:\\s*)?${escapeRegex(oldClean)}`, 'gi');
 
-      for (const sk of targetTables) {
+      for (const sk of targetSwapKeys) {
         const sTable = (this.db && typeof this.db.getTable === 'function' ? this.db.getTable(sk) : null) || snap?.tables?.[sk];
         if (sTable && sTable.rows) {
           for (const sr of sTable.rows) {
-            let changed = false;
             const stat = String(sr['Status'] || '');
             const notes = String(sr['Notes'] || '');
 
             if (stat.toLowerCase().includes(oldClean.toLowerCase())) {
-              sr['Status'] = stat.replace(oldRegex, `Order #: ${newClean}`);
-              changed = true;
+              const nextStat = stat.replace(oldRegex, `Order #: ${newClean}`);
+              await this._queueCellMutation(sTable, sk, sr, 'status', nextStat);
+              sr['Status'] = nextStat;
             }
             if (notes.toLowerCase().includes(oldClean.toLowerCase())) {
-              sr['Notes'] = notes.replace(oldRegex, `Order #: ${newClean}`);
-              changed = true;
-            }
-
-            if (changed) {
-              this.db.syncRowToRawGrid(sTable, sr);
-              const rIdx = sr._rowIdx || (sTable.rows.indexOf(sr) + 2);
-              await this.db.addMutation({
-                action: 'UPDATE_ROW',
-                sheetName: sTable.name,
-                tableKey: sk,
-                row: rIdx,
-                updates: sr,
-                rowData: sr
-              });
-              await this.db.addMutation({
-                action: 'UPDATE_CELL',
-                sheetName: sTable.name,
-                tableKey: sk,
-                row: rIdx,
-                col: 8,
-                value: sr['Status']
-              });
-              await this.db.addMutation({
-                action: 'UPDATE_CELL',
-                sheetName: sTable.name,
-                tableKey: sk,
-                row: rIdx,
-                col: 12,
-                value: sr['Notes']
-              });
+              const nextNotes = notes.replace(oldRegex, `Order #: ${newClean}`);
+              await this._queueCellMutation(sTable, sk, sr, 'notes', nextNotes);
+              sr['Notes'] = nextNotes;
             }
           }
         }
       }
 
-      await this.db.saveToDisk();
-      await this.scanPurchaseNeeds();
+      const needsTable = (this.db && typeof this.db.getTable === 'function' ? this.db.getTable('safety_equipment_needs') : null) || snap?.tables?.['safety_equipment_needs'];
+      if (needsTable && needsTable.rows) {
+        for (const nr of needsTable.rows) {
+          const stat = String(nr['Status'] || '');
+          const notes = String(nr['Notes'] || '');
+          const updates = {};
+          if (stat.toLowerCase().includes(oldClean.toLowerCase())) {
+            updates['Status'] = stat.replace(oldRegex, `Order #: ${newClean}`);
+          }
+          if (notes.toLowerCase().includes(oldClean.toLowerCase())) {
+            updates['Notes'] = notes.replace(oldRegex, `Order #: ${newClean}`);
+          }
+          if (Object.keys(updates).length > 0) {
+            await this._queueRowUpdate(needsTable, 'safety_equipment_needs', 'Safety Equipment Needs', nr, updates);
+          }
+        }
+      }
+
+      if (this.db && typeof this.db.persistSnapshot === 'function') {
+        await this.db.persistSnapshot(snap);
+      } else if (window.desktopAPI && typeof window.desktopAPI.saveLocalSnapshot === 'function' && snap) {
+        await window.desktopAPI.saveLocalSnapshot(snap);
+      }
+      this.scanPurchaseNeeds();
       this.render();
       if (window.showToast) {
         window.showToast(`✅ Order updated: ${oldClean} ➔ ${newClean}`, 'success');
@@ -8512,6 +9050,7 @@ class ProcurementEngine {
   }
 
   openCreateOrderModal() {
+    if (!this.vendors || !this.vendors.length) this.loadVendors();
     const selectedItems = (this.items || []).filter(i => i.selected && i.quantity > 0 && i.section !== 'ordered_pending');
     if (selectedItems.length > 0) {
       this.openMarkOrderedModal(selectedItems);
@@ -8520,7 +9059,7 @@ class ProcurementEngine {
 
     const nextReq = this.generateNextRequestPoNumber();
     const defaultVendor = (this.selectedVendor && typeof this.selectedVendor === 'object' ? this.selectedVendor.name : this.selectedVendor)
-      || (this.vendors[0] ? this.vendors[0].name : 'Wagner Smith');
+      || (this.vendors && this.vendors[0] ? this.vendors[0].name : 'Wagner Smith');
     this.openEditOrderModal({
       rowIdx: null,
       poNum: nextReq,
@@ -8904,7 +9443,11 @@ class ProcurementEngine {
     modal.classList.add('active');
     this.renderEditOrderItemsContainer();
     this.onAddOrderItemChange(true);
-    this.syncEditOrderSummaryFromItems();
+    // Only auto-generate summary/total on open for new order requests or when summary is empty,
+    // so existing custom Items text and Total Price are never overwritten just by opening Edit Order.
+    if (this.editingOrder?.isNewRequest || !po.items) {
+      this.syncEditOrderSummaryFromItems();
+    }
 
     if (window.desktopAPI && typeof window.desktopAPI.forceFocusWindow === 'function') {
       window.desktopAPI.forceFocusWindow().catch(() => {});
@@ -9016,9 +9559,9 @@ class ProcurementEngine {
       return;
     }
     const qtyInput = document.getElementById('add-order-item-qty');
-    const qty = parseInt(qtyInput?.value, 10) || 1;
+    const qty = Math.max(1, parseInt(qtyInput?.value, 10) || 1);
     const priceInput = document.getElementById('add-order-item-price');
-    const unitPrice = parseFloat(priceInput?.value) || 0;
+    const unitPrice = Math.max(0, parseFloat(priceInput?.value) || 0);
     const empSelect = document.getElementById('add-order-item-assignee');
     const assignee = empSelect ? empSelect.value : 'On Shelf';
     const vSelect = document.getElementById('edit-order-vendor-select');
@@ -9363,9 +9906,12 @@ class ProcurementEngine {
     const priceInput = document.getElementById('edit-order-total-price');
     const totalPrice = parseFloat(priceInput?.value) || 0;
     const itemsInput = document.getElementById('edit-order-items');
+    if (this.editingOrderItems && this.editingOrderItems.length > 0 && (!itemsInput || !itemsInput.value.trim())) {
+      this.syncEditOrderSummaryFromItems();
+    }
     const itemsStr = itemsInput ? itemsInput.value.trim() : '';
     if (!itemsStr) {
-      alert('⚠️ Please enter an item summary or description.');
+      alert('⚠️ Please add at least one line item (click "Add Item to Order") or enter an Item Summary / Description.');
       if (itemsInput) itemsInput.focus();
       return;
     }
@@ -9391,8 +9937,12 @@ class ProcurementEngine {
       }
     }
 
+    const isNewOrderRequest = !this.editingOrder.rowIdx;
     const saveBtn = document.getElementById('btn-save-edit-order');
-    if (saveBtn) saveBtn.textContent = '⏳ Saving...';
+    if (saveBtn) {
+      saveBtn.disabled = true;
+      saveBtn.textContent = '⏳ Saving...';
+    }
 
     try {
       const snap = (this.db && typeof this.db.getSnapshot === 'function')
@@ -9423,11 +9973,12 @@ class ProcurementEngine {
         });
       }
 
+      const wasEditingEdRow = String(this.editingOrder.vendorOrderNum || this.editingOrder.poNum || '').trim().toLowerCase() === 'ed';
       if (!foundRow && poTable.rows) {
-        // Fallback: match by PO Number or 'ed' or open matching row
+        // Fallback: match exact PO Number, or 'ed' placeholder only when editing an existing 'ed' order
         foundRow = poTable.rows.find(r => {
           const p = String(r['PO Number'] || r['PO #'] || '').trim().toLowerCase();
-          return p === orderNum.toLowerCase() || p === 'ed';
+          return p === orderNum.toLowerCase() || (wasEditingEdRow && p === 'ed');
         });
         if (foundRow) {
           targetRowIdx = foundRow._rowIdx || (poTable.rows.indexOf(foundRow) + 2);
@@ -9435,15 +9986,8 @@ class ProcurementEngine {
       }
 
       if (foundRow && targetRowIdx) {
-        Object.assign(foundRow, updatedRowObj);
-        this.db.syncRowToRawGrid(poTable, foundRow);
-        await this.db.addMutation({
-          action: 'UPDATE_ROW',
-          sheetName: poTable.name || 'Purchase Orders',
-          tableKey: 'purchase_orders',
-          row: targetRowIdx,
-          rowData: updatedRowObj
-        });
+        const origPoId = String(foundRow['PO Number'] || foundRow['PO #'] || orderNum).trim();
+        await this._queueRowUpdate(poTable, 'purchase_orders', 'Purchase Orders', foundRow, updatedRowObj, origPoId);
       } else {
         await this.db.addRow('purchase_orders', updatedRowObj, 'Purchase Order');
       }
@@ -9451,41 +9995,45 @@ class ProcurementEngine {
       // Cascade Order Number change to swap tables and safety needs if order number was modified
       const oldOrderNum = this.editingOrder.orderNumber || this.editingOrder.vendorOrderNum || this.editingOrder.poNum;
       const oldPoNum = this.editingOrder.poNum;
-      const oldKeys = [oldOrderNum, oldPoNum, 'ed'].filter(Boolean);
-      for (const oldNum of oldKeys) {
+      const oldKeys = [oldOrderNum, oldPoNum, ...(wasEditingEdRow ? ['ed'] : [])].filter(Boolean);
+      const uniqueOldKeys = Array.from(new Set(oldKeys.map(k => String(k).trim())));
+      for (const oldNum of uniqueOldKeys) {
         if (oldNum && oldNum.toLowerCase() !== orderNum.toLowerCase()) {
-          const targetTableKeys = ['glove_swaps', 'sleeve_swaps', 'blanket_swaps', 'mack_swaps', 'safety_equipment_needs'];
           const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-          const poRegex = oldNum.toLowerCase() === 'ed'
-            ? /(?:Order\s*#:\s*|PO:\s*)\bed\b/gi
-            : new RegExp(`(?:Order\\s*#:\\s*|PO:\\s*)\\b${escapeRegex(oldNum)}\\b`, 'gi');
+          const makePoRegex = (isGlobal) => oldNum.toLowerCase() === 'ed'
+            ? new RegExp('(?:Order\\s*#:\\s*|Request\\s*#:\\s*|PO:\\s*)\\bed\\b', isGlobal ? 'gi' : 'i')
+            : new RegExp(`(?:Order\\s*#:\\s*|Request\\s*#:\\s*|PO:\\s*)?\\b${escapeRegex(oldNum)}\\b`, isGlobal ? 'gi' : 'i');
 
-          for (const sk of targetTableKeys) {
+          for (const sk of this._getAllSwapKeys()) {
             const sTable = (this.db && typeof this.db.getTable === 'function' ? this.db.getTable(sk) : null) || snap?.tables?.[sk];
             if (sTable && sTable.rows) {
               for (const sr of sTable.rows) {
                 const stat = String(sr['Status'] || '');
                 const sNotes = String(sr['Notes'] || '');
-                let rowUpdated = false;
-                if (poRegex.test(stat)) {
-                  sr['Status'] = stat.replace(poRegex, `Order #: ${orderNum}`);
-                  rowUpdated = true;
+                if (makePoRegex(false).test(stat)) {
+                  const nextStat = stat.replace(makePoRegex(true), `Order #: ${orderNum}`);
+                  await this._queueCellMutation(sTable, sk, sr, 'status', nextStat);
+                  sr['Status'] = nextStat;
                 }
-                if (poRegex.test(sNotes)) {
-                  sr['Notes'] = sNotes.replace(poRegex, `Order #: ${orderNum}`);
-                  rowUpdated = true;
+                if (makePoRegex(false).test(sNotes)) {
+                  const nextNotes = sNotes.replace(makePoRegex(true), `Order #: ${orderNum}`);
+                  await this._queueCellMutation(sTable, sk, sr, 'notes', nextNotes);
+                  sr['Notes'] = nextNotes;
                 }
-                if (rowUpdated) {
-                  this.db.syncRowToRawGrid(sTable, sr);
-                  const rIdx = sr._rowIdx || (sTable.rows.indexOf(sr) + 2);
-                  await this.db.addMutation({
-                    action: 'UPDATE_ROW',
-                    sheetName: sTable.name,
-                    tableKey: sk,
-                    row: rIdx,
-                    rowData: sr
-                  });
-                }
+              }
+            }
+          }
+
+          const snTable = (this.db && typeof this.db.getTable === 'function' ? this.db.getTable('safety_equipment_needs') : null) || snap?.tables?.['safety_equipment_needs'];
+          if (snTable && snTable.rows) {
+            for (const sr of snTable.rows) {
+              const stat = String(sr['Status'] || '');
+              const sNotes = String(sr['Notes'] || '');
+              const updates = {};
+              if (makePoRegex(false).test(stat)) updates['Status'] = stat.replace(makePoRegex(true), `Order #: ${orderNum}`);
+              if (makePoRegex(false).test(sNotes)) updates['Notes'] = sNotes.replace(makePoRegex(true), `Order #: ${orderNum}`);
+              if (Object.keys(updates).length > 0) {
+                await this._queueRowUpdate(snTable, 'safety_equipment_needs', 'Safety Equipment Needs', sr, updates);
               }
             }
           }
@@ -9493,22 +10041,21 @@ class ProcurementEngine {
       }
 
       // If order is marked Received, resolve and clear all matching items from swap sheets and safety equipment needs
-      if (status === 'Received') {
-        const assignedEmps = (this.editingOrderItems || []).map(it => it.employeeName).filter(Boolean);
+      const statusLower = String(status || '').toLowerCase();
+      if (statusLower === 'received') {
+        const assignedEmps = (this.editingOrderItems || [])
+          .flatMap(it => String(it.employeeName || '').split(',').map(n => n.trim()))
+          .filter(Boolean);
         await this.resolveReceivedOrderItems(orderNum, {
           assignedEmployees: assignedEmps,
           isReadyForDelivery: false,
           todayStr: this.formatToMdY(delivDate) || new Date().toLocaleDateString()
         });
-      } else if (this.editingOrderItems && this.editingOrderItems.length) {
-        // If line items are assigned to linemen, sync to their swap sheet and safety equipment rows as Ordered
+      } else if (!statusLower.includes('cancel') && !statusLower.includes('partial') && this.editingOrderItems && this.editingOrderItems.length) {
+        // If line items are assigned to linemen on an active/ordered PO, sync to their swap sheet and safety equipment rows as Ordered
         for (const item of this.editingOrderItems) {
           const catKey = (item.itemType || item.category || '').toLowerCase();
-          let swapKey = '';
-          if (catKey.includes('glove')) swapKey = 'glove_swaps';
-          else if (catKey.includes('sleeve')) swapKey = 'sleeve_swaps';
-          else if (catKey.includes('blanket')) swapKey = 'blanket_swaps';
-          else if (catKey.includes('mack')) swapKey = 'mack_swaps';
+          const swapKey = this._getSwapTableKeyForCategory(catKey);
 
           const empNameStr = item.employeeName || '';
           if (!empNameStr) continue;
@@ -9519,55 +10066,39 @@ class ProcurementEngine {
 
             const orderNote = `Ordered on ${orderDate || new Date().toLocaleDateString()}, Order #: ${orderNum}, Vendor: ${vendorName}${delivDate ? ', Est. Delivery: ' + delivDate : ''}${item.unitPrice > 0 ? ', Price: $' + item.unitPrice.toFixed(2) : ''}`;
 
-            // Sync to swap sheet (e.g. glove_swaps)
+            // Sync to swap sheet (all 9 categories supported)
             if (swapKey) {
               const sTable = (this.db && typeof this.db.getTable === 'function' ? this.db.getTable(swapKey) : null) || snap?.tables?.[swapKey];
               if (sTable && sTable.rows) {
                 const sRow = sTable.rows.find(sr => {
-                  const name = String(sr['Employee'] || sr['Employee Name'] || sr['Assigned To'] || Object.values(sr)[0] || '').trim();
+                  const name = String(sr['Employee'] || sr['Employee Name'] || sr['Crew Lead / Employee'] || sr['Assigned To'] || Object.values(sr)[0] || '').trim();
                   return this.isNameMatch(name, singleEmp);
                 });
                 if (sRow) {
-                  sRow['Status'] = `Ordered (Order #: ${orderNum})`;
-                  sRow['Notes'] = sRow['Notes'] ? `${sRow['Notes']}; ${orderNote}` : orderNote;
-                  this.db.syncRowToRawGrid(sTable, sRow);
-                  const rIdx = sRow._rowIdx || (sTable.rows.indexOf(sRow) + 2);
-                  await this.db.addMutation({
-                    action: 'UPDATE_ROW',
-                    sheetName: sTable.name,
-                    tableKey: swapKey,
-                    row: rIdx,
-                    rowData: sRow
-                  });
+                  const nextStat = `Ordered (Order #: ${orderNum})`;
+                  const nextNotes = sRow['Notes'] ? `${sRow['Notes']}; ${orderNote}` : orderNote;
+                  await this._queueCellMutation(sTable, swapKey, sRow, 'status', nextStat);
+                  await this._queueCellMutation(sTable, swapKey, sRow, 'notes', nextNotes);
+                  sRow['Status'] = nextStat;
+                  sRow['Notes'] = nextNotes;
                 }
               }
             }
 
-            // Sync to safety_equipment_needs
+            // Sync to safety_equipment_needs (matching both employee AND item type)
             const snTable = (this.db && typeof this.db.getTable === 'function' ? this.db.getTable('safety_equipment_needs') : null) || snap?.tables?.['safety_equipment_needs'];
             if (snTable && snTable.rows) {
               const snRow = snTable.rows.find(sr => {
-                const name = String(sr['Employee'] || '').trim();
-                return this.isNameMatch(name, singleEmp);
+                const meta = this._getSafetyNeedMeta(sr);
+                if (!meta) return false;
+                const typeMatch = !catKey || meta.itemType.toLowerCase().includes(catKey.slice(0, 4));
+                return this.isNameMatch(meta.employee, singleEmp) && typeMatch;
               });
               if (snRow) {
-                snRow['Status'] = 'Ordered';
-                snRow['Notes'] = orderNote;
-                if (item.classVal) {
-                  snRow['Class'] = item.classVal;
-                }
-                if (item.size) {
-                  snRow['Size'] = item.size;
-                }
-                this.db.syncRowToRawGrid(snTable, snRow);
-                const rIdx = snRow._rowIdx || (snTable.rows.indexOf(snRow) + 2);
-                await this.db.addMutation({
-                  action: 'UPDATE_ROW',
-                  sheetName: snTable.name,
-                  tableKey: 'safety_equipment_needs',
-                  row: rIdx,
-                  rowData: snRow
-                });
+                const updates = { 'Status': 'Ordered', 'Notes': orderNote };
+                if (item.classVal) updates['Class'] = item.classVal;
+                if (item.size) updates['Size'] = item.size;
+                await this._queueRowUpdate(snTable, 'safety_equipment_needs', 'Safety Equipment Needs', snRow, updates);
               }
             }
           }
@@ -9594,7 +10125,10 @@ class ProcurementEngine {
       console.error('Error saving edited order:', err);
       alert('❌ Failed to save order changes: ' + (err.message || err));
     } finally {
-      if (saveBtn) saveBtn.innerHTML = '<span>💾</span> Save Changes';
+      if (saveBtn) {
+        saveBtn.disabled = false;
+        saveBtn.innerHTML = isNewOrderRequest ? '<span>🚀</span> Submit / Create Order Request' : '<span>💾</span> Save Changes';
+      }
     }
   }
 
@@ -9614,57 +10148,65 @@ class ProcurementEngine {
       const targetRowIdx = rowIdx;
 
       let deletedOrderNotes = '';
+      let targetPoRow = null;
       if (poTable.rows) {
-        const idx = poTable.rows.findIndex((r, i) => (r._rowIdx || (i + 2)) === targetRowIdx);
-        if (idx !== -1) {
-          deletedOrderNotes = String(poTable.rows[idx]['Notes'] || '');
-          poTable.rows.splice(idx, 1);
+        targetPoRow = poTable.rows.find((r, i) => (r._rowIdx || (i + 2)) === targetRowIdx) || null;
+        if (targetPoRow) {
+          deletedOrderNotes = String(targetPoRow['Notes'] || '');
         }
       }
 
-      await this.db.addMutation({
-        action: 'DELETE_ROW',
-        sheetName: poTable.name || 'Purchase Orders',
-        tableKey: 'purchase_orders',
-        row: targetRowIdx
+      if (targetPoRow) {
+        await this._queueDeletePoRow(poTable, targetPoRow);
+      } else {
+        await this.db.addMutation({
+          action: 'DELETE_ROW',
+          sheetName: poTable.name || 'Purchase Orders',
+          tableKey: 'purchase_orders',
+          row: targetRowIdx,
+          itemIdentifier: (poNum && poNum !== '—' && poNum.toLowerCase() !== 'pending') ? poNum : ''
+        });
+      }
+
+      // Also revert any swap rows and safety_equipment_needs rows matching this order number
+      const parsedNotes = this.parseOrderInfoFromNotes(deletedOrderNotes);
+      const targetNums = Array.from(new Set([poNum, parsedNotes?.orderNumber, parsedNotes?.vendorOrderNumber]
+        .map(n => String(n || '').trim())
+        .filter(n => n && n.length >= 2 && n.toLowerCase() !== 'pending' && n !== '—')));
+      const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const matchesTargetOrderNum = (text) => targetNums.some(num => {
+        const re = new RegExp(`(^|[^a-z0-9])${escapeRegex(num)}([^a-z0-9]|$)`, 'i');
+        return re.test(String(text || ''));
       });
 
-      // Also revert any swap rows matching this order number or notes
-      const parsedNotes = this.parseOrderInfoFromNotes(deletedOrderNotes);
-      const targetNums = [poNum, parsedNotes?.orderNumber, parsedNotes?.vendorOrderNumber].filter(Boolean);
-
-      const swapKeys = ['glove_swaps', 'sleeve_swaps', 'blanket_swaps', 'mack_swaps'];
-      for (const sk of swapKeys) {
+      for (const sk of this._getAllSwapKeys()) {
         const sTable = (this.db && typeof this.db.getTable === 'function' ? this.db.getTable(sk) : null) || snap?.tables?.[sk];
         if (sTable && sTable.rows) {
           for (const sr of sTable.rows) {
             const stat = String(sr['Status'] || '');
             const notes = String(sr['Notes'] || '');
-            const isMatch = targetNums.some(num => num && (stat.includes(num) || notes.includes(num)));
-            if (isMatch && stat.toLowerCase().includes('order')) {
+            if ((matchesTargetOrderNum(stat) || matchesTargetOrderNum(notes)) && stat.toLowerCase().includes('order')) {
+              const cleanedNotes = notes ? notes.replace(/Ordered on [^;]+;?/gi, '').trim() : '';
+              await this._queueCellMutation(sTable, sk, sr, 'status', 'Need To Purchase');
+              await this._queueCellMutation(sTable, sk, sr, 'notes', cleanedNotes);
               sr['Status'] = 'Need To Purchase';
-              if (sr['Notes']) {
-                sr['Notes'] = sr['Notes'].replace(/Ordered on [^;]+;?/gi, '').trim();
-              }
-              this.db.syncRowToRawGrid(sTable, sr);
-              const rIdx = sr._rowIdx || (sTable.rows.indexOf(sr) + 2);
-              await this.db.addMutation({
-                action: 'UPDATE_CELL',
-                sheetName: sTable.name,
-                tableKey: sk,
-                row: rIdx,
-                col: 8,
-                value: 'Need To Purchase'
-              });
-              await this.db.addMutation({
-                action: 'UPDATE_CELL',
-                sheetName: sTable.name,
-                tableKey: sk,
-                row: rIdx,
-                col: 12,
-                value: sr['Notes'] || ''
-              });
+              if (sr['Notes'] !== undefined) sr['Notes'] = cleanedNotes;
             }
+          }
+        }
+      }
+
+      const needsTable = (this.db && typeof this.db.getTable === 'function' ? this.db.getTable('safety_equipment_needs') : null) || snap?.tables?.['safety_equipment_needs'];
+      if (needsTable && needsTable.rows) {
+        for (const nr of needsTable.rows) {
+          const meta = this._getSafetyNeedMeta(nr);
+          if (!meta) continue;
+          if ((matchesTargetOrderNum(meta.status) || matchesTargetOrderNum(meta.notes)) && meta.status.toLowerCase().includes('order')) {
+            const cleanedNotes = meta.notes ? meta.notes.replace(/Ordered on [^;]+;?/gi, '').trim() : '';
+            await this._queueRowUpdate(needsTable, 'safety_equipment_needs', 'Safety Equipment Needs', nr, {
+              'Status': 'Pending',
+              'Notes': cleanedNotes
+            });
           }
         }
       }
@@ -9716,11 +10258,7 @@ class ProcurementEngine {
         : (window.localDB ? window.localDB.getSnapshot() : null);
 
       const catKey = (item.itemType || '').toLowerCase();
-      let swapKey = '';
-      if (catKey.includes('glove')) swapKey = 'glove_swaps';
-      else if (catKey.includes('sleeve')) swapKey = 'sleeve_swaps';
-      else if (catKey.includes('blanket')) swapKey = 'blanket_swaps';
-      else if (catKey.includes('mack')) swapKey = 'mack_swaps';
+      const swapKey = this._getSwapTableKeyForCategory(catKey);
 
       const swapTable = swapKey ? ((this.db && typeof this.db.getTable === 'function' ? this.db.getTable(swapKey) : null) || snap?.tables?.[swapKey]) : null;
       const needsTable = (this.db && typeof this.db.getTable === 'function' ? this.db.getTable('safety_equipment_needs') : null) || snap?.tables?.['safety_equipment_needs'];
@@ -9729,9 +10267,9 @@ class ProcurementEngine {
         const empName = emp.name || '';
         if (swapTable && swapTable.rows && empName) {
           const sRow = swapTable.rows.find(sr => {
-            const name = String(sr['Employee'] || sr['Employee Name'] || sr['Assigned To'] || Object.values(sr)[0] || '').trim();
+            const name = String(sr['Employee'] || sr['Employee Name'] || sr['Crew Lead / Employee'] || sr['Assigned To'] || Object.values(sr)[0] || '').trim();
             const stat = String(sr['Status'] || '').toLowerCase();
-            const sSize = String(sr['Size'] || '').trim().toLowerCase();
+            const sSize = String(sr['Size'] || sr['Type'] || sr['Model'] || '').trim().toLowerCase();
             const sClass = String(sr['Class'] || sr['KV'] || '').trim().toLowerCase();
             const itSize = String(item.size || '').trim().toLowerCase();
             const itClass = String(item.classVal || '').trim().toLowerCase();
@@ -9739,54 +10277,32 @@ class ProcurementEngine {
             const isName = this.isNameMatch(name, empName) || (empName.toLowerCase().includes('shelf') && name.toLowerCase().includes('shelf'));
             const isOrder = stat.includes('order');
             const isSize = !itSize || itSize === 'standard' || sSize === itSize;
-            const isClass = !itClass || sClass.includes(itClass.replace(/[^0-9]/g, '')) || itClass.includes(sClass.replace(/[^0-9]/g, ''));
+            const isClass = !itClass || itClass === 'n/a' || itClass === 'class n/a' || !sClass || sClass.includes(itClass.replace(/[^0-9]/g, '')) || itClass.includes(sClass.replace(/[^0-9]/g, ''));
             return isName && isOrder && isSize && isClass;
           });
           if (sRow) {
+            const cleanedNotes = sRow['Notes'] ? sRow['Notes'].replace(/Ordered on [^;]+;?/gi, '').trim() : '';
+            await this._queueCellMutation(swapTable, swapKey, sRow, 'status', 'Need To Purchase');
+            await this._queueCellMutation(swapTable, swapKey, sRow, 'notes', cleanedNotes);
             sRow['Status'] = 'Need To Purchase';
-            if (sRow['Notes']) {
-              sRow['Notes'] = sRow['Notes'].replace(/Ordered on [^;]+;?/gi, '').trim();
-            }
-            this.db.syncRowToRawGrid(swapTable, sRow);
-            const rIdx = sRow._rowIdx || (swapTable.rows.indexOf(sRow) + 2);
-            await this.db.addMutation({
-              action: 'UPDATE_CELL',
-              sheetName: swapTable.name,
-              tableKey: swapKey,
-              row: rIdx,
-              col: 8,
-              value: 'Need To Purchase'
-            });
-            await this.db.addMutation({
-              action: 'UPDATE_CELL',
-              sheetName: swapTable.name,
-              tableKey: swapKey,
-              row: rIdx,
-              col: 12,
-              value: sRow['Notes'] || ''
-            });
+            if (sRow['Notes'] !== undefined) sRow['Notes'] = cleanedNotes;
           }
         }
 
         if (needsTable && needsTable.rows && empName) {
           const nRow = needsTable.rows.find(nr => {
-            const name = String(nr['Employee'] || '').trim();
-            const type = String(nr['Item Type'] || '').trim().toLowerCase();
-            return this.isNameMatch(name, empName) && type.includes(catKey.slice(0, 4));
+            const meta = this._getSafetyNeedMeta(nr);
+            if (!meta) return false;
+            const isOrdered = meta.status.toLowerCase().includes('order');
+            const isType = meta.itemType.toLowerCase().includes(catKey.slice(0, 4));
+            const isPo = !poNum || meta.notes.toLowerCase().includes(poNum.toLowerCase()) || meta.status.toLowerCase().includes(poNum.toLowerCase());
+            return this.isNameMatch(meta.employee, empName) && isType && isOrdered && isPo;
           });
           if (nRow) {
-            nRow['Status'] = 'Pending';
-            if (nRow['Notes']) {
-              nRow['Notes'] = nRow['Notes'].replace(/Ordered on [^;]+;?/gi, '').trim();
-            }
-            this.db.syncRowToRawGrid(needsTable, nRow);
-            const nrIdx = nRow._rowIdx || (needsTable.rows.indexOf(nRow) + 2);
-            await this.db.addMutation({
-              action: 'UPDATE_ROW',
-              sheetName: needsTable.name || 'Safety Equipment Needs',
-              tableKey: 'safety_equipment_needs',
-              row: nrIdx,
-              rowData: nRow
+            const cleanedNotes = nRow['Notes'] ? nRow['Notes'].replace(/Ordered on [^;]+;?/gi, '').trim() : '';
+            await this._queueRowUpdate(needsTable, 'safety_equipment_needs', 'Safety Equipment Needs', nRow, {
+              'Status': 'Pending',
+              'Notes': cleanedNotes
             });
           }
         }
@@ -9796,38 +10312,49 @@ class ProcurementEngine {
       const poTable = (this.db && typeof this.db.getTable === 'function' ? this.db.getTable('purchase_orders') : null) || snap?.tables?.['purchase_orders'];
       if (poTable && poTable.rows && poNum) {
         const voNum = item.orderInfo?.vendorOrderNumber || '';
+        const isOpenPo = (r) => {
+          const stat = String(r['Status'] || (Array.isArray(r) ? r[6] : '') || '').toLowerCase();
+          return !stat.includes('received') && !stat.includes('fulfilled') && !stat.includes('cancel');
+        };
         let poRow = null;
         if (voNum) {
-          poRow = poTable.rows.find(r => {
-            const notes = String(r['Notes'] || '');
-            return notes.includes(voNum);
-          });
+          poRow = poTable.rows.find(r => isOpenPo(r) && String(r['Notes'] || '').includes(voNum));
         }
         if (!poRow) {
           poRow = poTable.rows.find(r => {
             const num = String(r['PO Number'] || r['PO #'] || (Array.isArray(r) ? r[1] : '') || '').trim();
-            const stat = String(r['Status'] || (Array.isArray(r) ? r[6] : '') || '').toLowerCase();
-            return num.toLowerCase() === poNum.toLowerCase() && !stat.includes('received') && !stat.includes('fulfilled');
+            return isOpenPo(r) && num.toLowerCase() === poNum.toLowerCase();
           });
         }
         if (poRow) {
           const itemsStr = String(Array.isArray(poRow) ? poRow[3] : poRow['Items'] || '');
           const parsedItems = this.parsePoItemsString(itemsStr);
+          const normClassCmp = (c) => {
+            const cl = String(c || '').toLowerCase().replace(/^class\s+/i, '').trim();
+            return (!cl || cl === 'n/a' || cl === '—') ? 'n/a' : cl;
+          };
           const cancelSize = String(item.size || '').toLowerCase().trim();
-          const cancelClass = String(item.classVal || '').toLowerCase().trim();
+          const cancelClass = normClassCmp(item.classVal);
           const cancelCat = String(item.itemType || '').toLowerCase().trim();
+          const targetEmpNames = targetEmps.map(e => e.name).filter(Boolean);
           let unitsToRemove = targetEmps.length || 1;
 
           const updatedItems = [];
           for (const pi of parsedItems) {
             const pCat = String(pi.category || pi.itemType || '').toLowerCase().trim();
             const pSize = String(pi.size || '').toLowerCase().trim();
-            const pClass = String(pi.classVal || '').toLowerCase().trim();
+            const pClass = normClassCmp(pi.classVal);
+            const empMatchesChunk = targetEmpNames.length === 0 || !pi.employeeName ||
+              targetEmpNames.some(tn => this.isNameMatch(pi.employeeName, tn));
 
-            const isMatch = (pCat === cancelCat && pSize === cancelSize && pClass === cancelClass);
+            const isMatch = (pCat === cancelCat && pSize === cancelSize && pClass === cancelClass && empMatchesChunk);
             if (isMatch && unitsToRemove > 0) {
               if (pi.quantity > unitsToRemove) {
                 pi.quantity -= unitsToRemove;
+                if (pi.employeeName && targetEmpNames.length > 0) {
+                  const remainingEmps = pi.employeeName.split(',').map(s => s.trim()).filter(n => !targetEmpNames.some(tn => this.isNameMatch(n, tn)));
+                  pi.employeeName = remainingEmps.join(', ');
+                }
                 unitsToRemove = 0;
                 updatedItems.push(pi);
               } else {
@@ -9839,15 +10366,17 @@ class ProcurementEngine {
             }
           }
 
-          const pRowIdx = poRow._rowIdx || (poTable.rows.indexOf(poRow) + 2);
+          const origPoId = String(poRow['PO Number'] || poRow['PO #'] || poNum).trim();
           if (updatedItems.length === 0) {
             // Entire order is empty now -> mark Cancelled
             if (Array.isArray(poRow)) {
               poRow[6] = 'Cancelled';
               poRow[4] = 0;
             } else {
-              poRow['Status'] = 'Cancelled';
-              poRow['Total Price'] = 0;
+              await this._queueRowUpdate(poTable, 'purchase_orders', 'Purchase Orders', poRow, {
+                'Status': 'Cancelled',
+                'Total Price': 0
+              }, origPoId);
             }
           } else {
             // Reconstruct Items string and recalculate Total Price
@@ -9862,19 +10391,12 @@ class ProcurementEngine {
               poRow[3] = newItemsStr;
               poRow[4] = newTotalPrice;
             } else {
-              poRow['Items'] = newItemsStr;
-              poRow['Total Price'] = newTotalPrice;
+              await this._queueRowUpdate(poTable, 'purchase_orders', 'Purchase Orders', poRow, {
+                'Items': newItemsStr,
+                'Total Price': newTotalPrice
+              }, origPoId);
             }
           }
-
-          this.db.syncRowToRawGrid(poTable, poRow);
-          await this.db.addMutation({
-            action: 'UPDATE_ROW',
-            sheetName: poTable.name || 'Purchase Orders',
-            tableKey: 'purchase_orders',
-            row: pRowIdx,
-            rowData: poRow
-          });
         }
       }
 
@@ -9923,17 +10445,31 @@ class ProcurementEngine {
     let cleanOrderNum = orderInfo.orderNumber || orderInfo.vendorOrderNumber || orderInfo.poNumber || '';
     if (cleanOrderNum.toLowerCase() === 'ed') cleanOrderNum = '';
 
-    const currentAssignee = targetEmp ? targetEmp.name : (item.employees?.map(e => e.name).join(', ') || 'On Shelf');
+    const isMultiEmpConsolidated = !targetEmp && Array.isArray(item.employees) && item.employees.length > 1;
+    const currentAssignee = targetEmp ? targetEmp.name : (isMultiEmpConsolidated ? item.employees[0].name : (item.employees?.[0]?.name || 'On Shelf'));
 
     // Fallback if order number was missing or corrupted
     if (!cleanOrderNum) {
-      const activePo = this.findActiveOpenPo(currentAssignee, item.itemType);
+      const activePo = this.findActiveOpenPo(currentAssignee, item.itemType, item.size, item.classVal);
       if (activePo) cleanOrderNum = activePo.orderNumber;
     }
 
+    const toYmd = (dStr) => {
+      if (!dStr) return '';
+      const s = String(dStr).trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+      const mdy = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+      if (mdy) return `${mdy[3]}-${mdy[1].padStart(2, '0')}-${mdy[2].padStart(2, '0')}`;
+      const d = new Date(s);
+      if (!isNaN(d.getTime())) {
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      }
+      return '';
+    };
+
     const vendorName = orderInfo.vendor || '';
-    const orderDate = orderInfo.orderDate || '';
-    const expDelivery = orderInfo.expectedDelivery || '';
+    const orderDateYmd = toYmd(orderInfo.orderDate);
+    const expDeliveryYmd = toYmd(orderInfo.expectedDelivery);
     const currentVendor = vendorName || (this.selectedVendor?.name || (this.vendors[0]?.name || ''));
     const catalogPrice = this.getVendorPrice(currentVendor, item.itemType, item.size, item.classVal);
     const rawPriceVal = item.price > 0 ? item.price : (orderInfo.price > 0 ? orderInfo.price : catalogPrice);
@@ -10010,11 +10546,11 @@ class ProcurementEngine {
         </div>
         <div>
           <label style="display: block; font-size: 12px; font-weight: 600; color: #94a3b8; margin-bottom: 5px;">Order Date</label>
-          <input type="date" id="edit-pending-order-date" class="batch-delivery-input" value="${orderDate || new Date().toISOString().split('T')[0]}">
+          <input type="date" id="edit-pending-order-date" class="batch-delivery-input" value="${orderDateYmd || new Date().toISOString().split('T')[0]}">
         </div>
         <div>
           <label style="display: block; font-size: 12px; font-weight: 600; color: #94a3b8; margin-bottom: 5px;">Expected Delivery Date</label>
-          <input type="date" id="edit-pending-deliv-date" class="batch-delivery-input" value="${expDelivery}">
+          <input type="date" id="edit-pending-deliv-date" class="batch-delivery-input" value="${expDeliveryYmd}">
         </div>
       </div>
 
@@ -10118,7 +10654,11 @@ class ProcurementEngine {
     const delivDate = delivDateInput ? delivDateInput.value : '';
 
     const saveBtn = document.getElementById('btn-save-edit-pending-item');
-    if (saveBtn) saveBtn.textContent = '⏳ Saving...';
+    if (saveBtn) {
+      if (saveBtn.disabled) return;
+      saveBtn.disabled = true;
+      saveBtn.textContent = '⏳ Saving...';
+    }
 
     try {
       const snap = (this.db && typeof this.db.getSnapshot === 'function')
@@ -10126,70 +10666,61 @@ class ProcurementEngine {
         : (window.localDB ? window.localDB.getSnapshot() : null);
 
       const catKey = (item.itemType || '').toLowerCase();
-      let swapKey = '';
-      if (catKey.includes('glove')) swapKey = 'glove_swaps';
-      else if (catKey.includes('sleeve')) swapKey = 'sleeve_swaps';
-      else if (catKey.includes('blanket')) swapKey = 'blanket_swaps';
-      else if (catKey.includes('mack')) swapKey = 'mack_swaps';
+      const swapKey = this._getSwapTableKeyForCategory(catKey);
 
       const oldAssignee = targetEmp ? targetEmp.name : (item.employees?.[0]?.name || '');
       const orderNote = `Ordered on ${orderDate || new Date().toLocaleDateString()}, Order #: ${orderNum}${vendorName ? ', Vendor: ' + vendorName : ''}${delivDate ? ', Est. Delivery: ' + delivDate : ''}${unitPrice > 0 ? ', Price: $' + unitPrice.toFixed(2) : ''}`;
 
       const swapTable = swapKey ? ((this.db && typeof this.db.getTable === 'function' ? this.db.getTable(swapKey) : null) || snap?.tables?.[swapKey]) : null;
       if (swapTable && swapTable.rows) {
+        const itSizeLower = String(item.size || '').trim().toLowerCase();
         const sRow = swapTable.rows.find(sr => {
-          const name = String(sr['Employee'] || sr['Employee Name'] || sr['Assigned To'] || Object.values(sr)[0] || '').trim();
-          return this.isNameMatch(name, oldAssignee) || (oldAssignee.toLowerCase().includes('shelf') && name.toLowerCase().includes('shelf'));
+          const name = String(sr['Employee'] || sr['Employee Name'] || sr['Crew Lead / Employee'] || sr['Assigned To'] || Object.values(sr)[0] || '').trim();
+          const stat = String(sr['Status'] || '').toLowerCase();
+          const sSize = String(sr['Size'] || sr['Type'] || sr['Model'] || '').trim().toLowerCase();
+          const nameOk = this.isNameMatch(name, oldAssignee) || (oldAssignee.toLowerCase().includes('shelf') && name.toLowerCase().includes('shelf'));
+          const sizeOk = !itSizeLower || itSizeLower === 'standard' || !sSize || sSize === itSizeLower;
+          return nameOk && stat.includes('order') && sizeOk;
         });
         if (sRow) {
           if (newAssignee && newAssignee !== oldAssignee) {
+            await this._queueCellMutation(swapTable, swapKey, sRow, 'employee', newAssignee);
             sRow['Employee'] = newAssignee;
           }
           if (newSize) {
+            await this._queueCellMutation(swapTable, swapKey, sRow, 'size', newSize);
             sRow['Size'] = newSize;
           }
-          sRow['Status'] = `Ordered (Order #: ${orderNum})`;
+          if (newClass) {
+            await this._queueCellMutation(swapTable, swapKey, sRow, 'class', newClass);
+            if (sRow['Class'] !== undefined) sRow['Class'] = newClass;
+            if (sRow['KV'] !== undefined) sRow['KV'] = newClass;
+          }
+          const nextStat = `Ordered (Order #: ${orderNum})`;
+          await this._queueCellMutation(swapTable, swapKey, sRow, 'status', nextStat);
+          await this._queueCellMutation(swapTable, swapKey, sRow, 'notes', orderNote);
+          sRow['Status'] = nextStat;
           sRow['Notes'] = orderNote;
+        }
+      }
 
-          this.db.syncRowToRawGrid(swapTable, sRow);
-          const rIdx = sRow._rowIdx || (swapTable.rows.indexOf(sRow) + 2);
-
+      // Also sync safety_equipment_needs row if present
+      const needsTable = (this.db && typeof this.db.getTable === 'function' ? this.db.getTable('safety_equipment_needs') : null) || snap?.tables?.['safety_equipment_needs'];
+      if (needsTable && needsTable.rows && oldAssignee) {
+        const nRow = needsTable.rows.find(nr => {
+          const meta = this._getSafetyNeedMeta(nr);
+          if (!meta) return false;
+          return this.isNameMatch(meta.employee, oldAssignee) && meta.itemType.toLowerCase().includes(catKey.slice(0, 4)) && meta.status.toLowerCase().includes('order');
+        });
+        if (nRow) {
+          const needUpdates = { 'Notes': orderNote };
           if (newAssignee && newAssignee !== oldAssignee) {
-            await this.db.addMutation({
-              action: 'UPDATE_CELL',
-              sheetName: swapTable.name,
-              tableKey: swapKey,
-              row: rIdx,
-              col: 1,
-              value: newAssignee
-            });
+            needUpdates['Employee'] = newAssignee;
+            needUpdates['Foreman'] = newAssignee;
           }
-          if (newSize) {
-            await this.db.addMutation({
-              action: 'UPDATE_CELL',
-              sheetName: swapTable.name,
-              tableKey: swapKey,
-              row: rIdx,
-              col: 3,
-              value: newSize
-            });
-          }
-          await this.db.addMutation({
-            action: 'UPDATE_CELL',
-            sheetName: swapTable.name,
-            tableKey: swapKey,
-            row: rIdx,
-            col: 8,
-            value: `Ordered (Order #: ${orderNum})`
-          });
-          await this.db.addMutation({
-            action: 'UPDATE_CELL',
-            sheetName: swapTable.name,
-            tableKey: swapKey,
-            row: rIdx,
-            col: 12,
-            value: orderNote
-          });
+          if (newSize) needUpdates['Size'] = newSize;
+          if (newClass) needUpdates['Class'] = newClass;
+          await this._queueRowUpdate(needsTable, 'safety_equipment_needs', 'Safety Equipment Needs', nRow, needUpdates);
         }
       }
 
@@ -10216,25 +10747,49 @@ class ProcurementEngine {
           });
         }
         if (matchedPo) {
-          matchedPo['PO Number'] = orderNum;
-          if (vendorName) matchedPo['Vendor'] = vendorName;
-          if (orderDate) matchedPo['Date'] = this.formatToMdY(orderDate) || matchedPo['Date'];
-          if (delivDate) matchedPo['Expected Delivery'] = this.formatToMdY(delivDate) || matchedPo['Expected Delivery'];
+          const origPoId = String(matchedPo['PO Number'] || matchedPo['PO #'] || orderNum).trim();
+          const poUpdates = { 'PO Number': orderNum };
+          if (vendorName) poUpdates['Vendor'] = vendorName;
+          if (orderDate) poUpdates['Date'] = this.formatToMdY(orderDate) || matchedPo['Date'];
+          if (delivDate) poUpdates['Expected Delivery'] = this.formatToMdY(delivDate) || matchedPo['Expected Delivery'];
           if (matchedPo['Notes']) {
-            matchedPo['Notes'] = matchedPo['Notes'].replace(/\bed\b/gi, orderNum);
+            let nextNotes = matchedPo['Notes'].replace(/\bed\b/gi, orderNum);
             if (oldOrderNum && oldOrderNum !== orderNum) {
-              matchedPo['Notes'] = matchedPo['Notes'].replace(oldOrderNum, orderNum);
+              nextNotes = nextNotes.replace(oldOrderNum, orderNum);
+            }
+            poUpdates['Notes'] = nextNotes;
+          }
+          // Update matching line item inside PO Items and recalculate Total Price
+          if (matchedPo['Items']) {
+            const parsedPoItems = this.parsePoItemsString(String(matchedPo['Items']));
+            if (parsedPoItems.length > 0) {
+              const oldCat = String(item.itemType || '').toLowerCase().trim();
+              const oldSz = String(item.size || '').toLowerCase().trim();
+              const targetPi = parsedPoItems.find(pi =>
+                String(pi.category || pi.itemType || '').toLowerCase().trim() === oldCat &&
+                String(pi.size || '').toLowerCase().trim() === oldSz &&
+                (!pi.employeeName || !oldAssignee || this.isNameMatch(pi.employeeName, oldAssignee))
+              );
+              if (targetPi) {
+                if (newSize) targetPi.size = newSize;
+                if (newClass) targetPi.classVal = newClass;
+                if (unitPrice > 0) targetPi.unitPrice = unitPrice;
+                if (newAssignee && newAssignee !== oldAssignee && targetPi.employeeName) {
+                  const emps = targetPi.employeeName.split(',').map(s => s.trim());
+                  const replaced = emps.map(e => this.isNameMatch(e, oldAssignee) ? newAssignee : e);
+                  targetPi.employeeName = replaced.join(', ');
+                }
+                poUpdates['Items'] = parsedPoItems.map(pi => {
+                  const empTag = pi.employeeName ? ` [For: ${pi.employeeName}]` : '';
+                  const priceTag = pi.unitPrice > 0 ? ` @ $${pi.unitPrice.toFixed(2)}` : '';
+                  return `(${pi.quantity}) ${pi.classVal} ${pi.category}, Size ${pi.size}${empTag}${priceTag}`;
+                }).join('; ');
+                const recalcTotal = parsedPoItems.reduce((sum, pi) => sum + ((pi.quantity || 1) * (pi.unitPrice || 0)), 0);
+                if (recalcTotal > 0) poUpdates['Total Price'] = recalcTotal;
+              }
             }
           }
-          this.db.syncRowToRawGrid(poTable, matchedPo);
-          const prIdx = matchedPo._rowIdx || (poTable.rows.indexOf(matchedPo) + 2);
-          await this.db.addMutation({
-            action: 'UPDATE_ROW',
-            sheetName: poTable.name || 'Purchase Orders',
-            tableKey: 'purchase_orders',
-            row: prIdx,
-            rowData: matchedPo
-          });
+          await this._queueRowUpdate(poTable, 'purchase_orders', 'Purchase Orders', matchedPo, poUpdates, origPoId);
         }
       }
 
@@ -10256,7 +10811,10 @@ class ProcurementEngine {
       console.error('Error saving pending order item:', err);
       alert('❌ Failed to update item: ' + (err.message || err));
     } finally {
-      if (saveBtn) saveBtn.innerHTML = '<span>💾</span> Save Changes';
+      if (saveBtn) {
+        saveBtn.disabled = false;
+        saveBtn.innerHTML = '<span>💾</span> Save Changes';
+      }
     }
   }
 
@@ -10277,26 +10835,31 @@ class ProcurementEngine {
       return;
     }
 
-    // Check if the selected items belong to an existing order group in Ordered (Awaiting Delivery)
-    let detectedOrderKey = null;
-    for (const item of activeItems) {
-      if (item.orderKey) {
-        detectedOrderKey = item.orderKey;
-        break;
+    // If all selected items are existing ordered_pending items from one order group, route directly to emailOrderFromKey
+    const orderedSelected = activeItems.filter(i => i.section === 'ordered_pending');
+    const needsSelected = activeItems.filter(i => i.section !== 'ordered_pending');
+    if (orderedSelected.length > 0 && needsSelected.length === 0 && this.orderGroupsMap) {
+      let detectedOrderKey = null;
+      for (const item of orderedSelected) {
+        const meta = this.getOrderKeyForPendingItem(item);
+        const candidates = [
+          item.orderKey,
+          meta?.orderKey,
+          meta?.orderNumber ? `ORDER_${meta.orderNumber.trim().toUpperCase()}` : null
+        ].filter(Boolean);
+        const hit = candidates.find(k => this.orderGroupsMap.has(k));
+        if (hit) {
+          detectedOrderKey = hit;
+          break;
+        }
       }
-      const ord = item.orderInfo?.vendorOrderNumber || item.orderInfo?.orderNumber || item.orderInfo?.poNumber;
-      if (ord && this.orderGroupsMap && this.orderGroupsMap.has(ord)) {
-        detectedOrderKey = ord;
-        break;
+      if (detectedOrderKey) {
+        this.emailOrderFromKey(detectedOrderKey);
+        return;
       }
     }
 
-    if (detectedOrderKey && this.orderGroupsMap && this.orderGroupsMap.has(detectedOrderKey)) {
-      this.emailOrderFromKey(detectedOrderKey);
-      return;
-    }
-
-    // If not part of an existing order group, generate PO text for selected items and open modal
+    // Otherwise generate PO text for selected needs items and open modal
     this.generatePOText();
   }
 
@@ -10304,21 +10867,22 @@ class ProcurementEngine {
    * Downloads formatted CSV for purchasing system import.
    */
   downloadPoCsv() {
-    const activeItems = (this.items || []).filter(i => i.selected && i.quantity > 0);
+    const activeItems = (this.items || []).filter(i => i.selected && i.quantity > 0 && i.section !== 'ordered_pending');
     if (activeItems.length === 0) {
-      alert('⚠️ No purchase items selected.');
+      alert('⚠️ No purchase items needing order are selected.');
       return;
     }
 
     const consolidatedItems = this.consolidateItemsBySizeAndClass(activeItems);
+    const csvCell = (val) => `"${String(val ?? '').replace(/"/g, '""')}"`;
 
     const lines = ['Item Category,Size,Class / KV,Part Number,Quantity,Unit Price,Subtotal,Assigned Personnel'];
     consolidatedItems.forEach(i => {
       const sub = (i.price * i.quantity).toFixed(2);
       const checkedEmps = (i.employees || []).filter(e => e.checked).map(e => e.name || e.label);
-      const emps = checkedEmps.length > 0 ? `"${checkedEmps.join('; ')}"` : '""';
+      const emps = csvCell(checkedEmps.join('; '));
       const sizeDisplay = i.hasNoSize ? '⚠️ Needs Size' : i.size;
-      lines.push(`"${i.itemType}","${sizeDisplay}","${i.classVal}","${i.partNumber || ''}",${i.quantity},$${i.price.toFixed(2)},$${sub},${emps}`);
+      lines.push(`${csvCell(i.itemType)},${csvCell(sizeDisplay)},${csvCell(i.classVal)},${csvCell(i.partNumber || '')},${i.quantity},$${i.price.toFixed(2)},$${sub},${emps}`);
     });
 
     const csvContent = lines.join('\r\n');

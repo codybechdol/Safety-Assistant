@@ -2665,7 +2665,7 @@ function applyBatchSyncMutations(mutations, returnSnapshot, options) {
         case 'UPDATE_ROW':
         case 'UPDATE_JOB_TRACKING':
           // mut: { sheetName, itemIdentifier, updatedFields, tableKey }
-          if (sheet && (mut.updatedFields || mut.updates)) {
+          if (sheet && (mut.updatedFields || mut.updates || mut.rowData)) {
             var data = activeSheetData[sheetName];
             if (!data) {
               data = sheet.getDataRange().getValues();
@@ -2673,7 +2673,7 @@ function applyBatchSyncMutations(mutations, returnSnapshot, options) {
             }
             if (data && data.length > 0) {
               var headers = data[0].map(function(h) { return String(h || '').trim(); });
-              var fields = mut.updatedFields || mut.updates;
+              var fields = mut.updatedFields || mut.updates || mut.rowData;
               var idStr = String(mut.itemIdentifier || mut.employeeName || mut.empName || mut.jobNumber || mut.keyValue || '').trim().toLowerCase();
               var sheetLower = sheetName.toLowerCase().trim();
               var isInvSheet = ['gloves', 'sleeves', 'blankets', 'macks', 'hv testers', 'phasing sets', 'aed', 'grounds', 'hot sticks', 'hv_testers', 'phasing_sets', 'hot_sticks'].indexOf(sheetLower) !== -1;
@@ -3254,6 +3254,26 @@ function applyBatchSyncMutations(mutations, returnSnapshot, options) {
               }
               if (['change out date', 'changeout date', 'due date'].indexOf(hLower) !== -1) {
                 return mut.rowData['Change Out Date'] || mut.rowData['Pad Expiration'] || '';
+              }
+              if (hLower === 'report date') {
+                return mut.rowData['Report Date'] || mut.rowData['Date Requested'] || mut.rowData['Date'] || '';
+              }
+              if (hLower === 'report type') {
+                return mut.rowData['Report Type'] || ((mut.rowData['Employee'] || mut.rowData['Item Type']) ? 'PPE Purchase Order' : '');
+              }
+              if (hLower === 'foreman') {
+                return mut.rowData['Foreman'] || mut.rowData['Employee'] || '';
+              }
+              if (hLower === 'equipment type') {
+                return mut.rowData['Equipment Type'] || mut.rowData['Item Type'] || '';
+              }
+              if (hLower === 'issue description') {
+                if (mut.rowData['Issue Description']) return mut.rowData['Issue Description'];
+                var descParts = [];
+                if (mut.rowData['Size']) descParts.push('Size: ' + mut.rowData['Size']);
+                if (mut.rowData['Class']) descParts.push('Class: ' + mut.rowData['Class']);
+                if (mut.rowData['Urgency']) descParts.push('Urgency: ' + mut.rowData['Urgency']);
+                return descParts.join(' | ');
               }
               
               return '';

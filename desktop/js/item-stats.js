@@ -452,13 +452,12 @@ class ItemStatsEngine {
       firstRawAssigned === 'on shelf (new purchase)' ||
       firstRawAssigned.includes('shelf') ||
       firstRawAssigned.includes('brand new') ||
-      firstRawAssigned.includes('new purchase') ||
-      sorted.length <= 2
-    );
+      firstRawAssigned.includes('new purchase')
+    ) && !firstRawAssigned.includes('newman') && !firstRawAssigned.includes('new assignment');
 
     const isPurchaseOrigin = isFirstStateNew ||
                              isFirstAssignedNew ||
-                             isFirstNotesNew ||
+                             (isFirstNotesNew && isInitialShelfHolder) ||
                              (isActiveNotesNew && isInitialShelfHolder);
 
     let fieldDays = 0;
@@ -553,8 +552,8 @@ class ItemStatsEngine {
       const status = current['Status'] || '';
 
       let state = this.classifyState(assignedTo, location, notes, status);
-      // Upgrade earliest origin event to NEW_PURCHASE if it is recognized as a known purchase origin
-      if (i === 0 && isPurchaseOrigin && (state.key === 'SHELF' || state.key === 'FIELD')) {
+      // Upgrade earliest origin event to NEW_PURCHASE only if it is on shelf / purchased new — never clobber a lineman Field assignment!
+      if (i === 0 && isPurchaseOrigin && state.key === 'SHELF') {
         state = {
           key: 'NEW_PURCHASE',
           label: 'Brand New (On Shelf)',
@@ -1981,10 +1980,34 @@ class ItemStatsEngine {
         'n/a', '—', '-', 'brand new', 'brand new (on shelf)', 'on shelf (new purchase)',
         'new purchase', 'storage'
       ];
-      const hasActiveHolderInHistory = groupRows.some(r => {
-        const hAssigned = String(r['Assigned To'] || r['Employee Name'] || '').trim();
-        return this.areSameEmployee(hAssigned, activeAssigned);
-      });
+      const stateRank = { NEW_PURCHASE: 1, SHELF: 2, PACKED_DELIVERY: 3, FIELD: 4, PACKED_TESTING: 5, TESTING: 6, LOST: 7, RETIRED: 8 };
+      const nowMs = Date.now() + 86400000;
+      let latestHistRow = null;
+      let latestHistTime = -Infinity;
+      let latestHistRank = -1;
+      let latestAnyRow = null;
+      let latestAnyTime = -Infinity;
+      let latestAnyRank = -1;
+      for (const r of groupRows) {
+        const dt = this.parseDate(r['Date Assigned'] || r['Date'] || Object.values(r)[0]);
+        const t = dt ? dt.getTime() : 0;
+        const st = this.classifyState(r['Assigned To'] || r['Employee Name'], r['Location'], r['Notes'], r['Status']);
+        const rk = stateRank[st.key] || 4;
+        if (!latestAnyRow || t > latestAnyTime || (t === latestAnyTime && rk > latestAnyRank)) {
+          latestAnyRow = r;
+          latestAnyTime = t;
+          latestAnyRank = rk;
+        }
+        if (t > nowMs) continue;
+        if (!latestHistRow || t > latestHistTime || (t === latestHistTime && rk > latestHistRank)) {
+          latestHistRow = r;
+          latestHistTime = t;
+          latestHistRank = rk;
+        }
+      }
+      const resolvedLatestRow = latestHistRow || latestAnyRow;
+      const latestAssigned = resolvedLatestRow ? String(resolvedLatestRow['Assigned To'] || resolvedLatestRow['Employee Name'] || '').trim() : '';
+      const hasActiveHolderInHistory = Boolean(latestAssigned && this.areSameEmployee(latestAssigned, activeAssigned));
       if (activeAssigned && !nonEmpHolders.includes(activeAssigned.toLowerCase()) && !hasActiveHolderInHistory) {
         const activeDateAssigned = String(foundActive['Date Assigned'] || foundActive['Date'] || '').trim() || new Date().toISOString().split('T')[0];
         groupRows.push({

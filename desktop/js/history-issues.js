@@ -9,10 +9,11 @@ class HistoryIssuesEngine {
   constructor(db) {
     this.db = db || window.localDB;
     this.cachedCounts = null;
+    this.cachedTypeBreakdown = {};
     this.cachedDetails = new Map();
     this.currentModalCategory = 'gloves';
     this.searchTerm = '';
-    this.typeFilter = 'all'; // 'all', 'duplicate', 'future', 'consecutive'
+    this.typeFilter = 'all'; // 'all', 'duplicate', 'future', 'consecutive', 'mismatch'
     this.modalPageLimit = 25;
     this._searchDebounceTimer = null;
 
@@ -130,6 +131,210 @@ class HistoryIssuesEngine {
     return s;
   }
 
+  /**
+   * Extracts clean raw item identifier from an active or history row across all 9 equipment types.
+   */
+  extractItemKey(row, headers = [], eqKey = '') {
+    if (!row) return '';
+    const isDateLike = (v) => /^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(v) || /^\d{4}-\d{2}-\d{2}/.test(v);
+    const keyLower = String(eqKey || '').toLowerCase();
+    const priorityKeys = [];
+    if (keyLower.includes('ground')) {
+      priorityKeys.push('Serial #', 'Serial#', 'Serial', 'Ground #', 'Ground', 'Item #', 'Item#');
+    } else if (keyLower.includes('hv') || keyLower.includes('tester')) {
+      priorityKeys.push('HVT #', 'HVT#', 'HVT', 'HV Tester #', 'HV Tester', 'Item #', 'Item#');
+    } else if (keyLower.includes('phasing')) {
+      priorityKeys.push('Phasing Set', 'Phasing Set #', 'PS #', 'PS#', 'PS', 'Item #', 'Item#');
+    } else if (keyLower.includes('aed')) {
+      priorityKeys.push('AED #', 'AED#', 'AED', 'Serial #', 'Item #', 'Item#');
+    } else if (keyLower.includes('hot_stick') || keyLower.includes('stick')) {
+      priorityKeys.push('Hot Stick #', 'Hot Stick', 'Hot Sticks', 'Item #', 'Item#');
+    } else {
+      priorityKeys.push('Item #', 'Item#', 'Glove', 'Glove #', 'Sleeve', 'Sleeve #', 'Blanket', 'Blanket #', 'MACK', 'MACK #', 'Serial #');
+    }
+
+    for (const k of priorityKeys) {
+      if (row[k] !== undefined && row[k] !== null) {
+        const v = String(row[k]).trim();
+        if (v && v !== 'N/A' && !isDateLike(v)) return v;
+      }
+    }
+
+    if (headers && headers.length > 0) {
+      for (const h of headers) {
+        if (/^(item|serial|glove|sleeve|blanket|mack|hvt|hv\s*tester|phasing|ps|aed|hot\s*stick)/i.test(h)) {
+          const v = String(row[h] || '').trim();
+          if (v && v !== 'N/A' && !isDateLike(v)) return v;
+        }
+      }
+    }
+
+    for (const [k, raw] of Object.entries(row)) {
+      if (k.startsWith('_')) continue;
+      if (/date|status|location|assign|note|size|class|kv|model|length|picked/i.test(k)) continue;
+      const v = String(raw || '').trim();
+      if (v && v !== 'N/A' && !isDateLike(v)) return v;
+    }
+    return '';
+  }
+
+  areSameEmployeeName(a, b) {
+    const cleanA = String(a || '').replace(/\s*\([^)]*\)/g, '').trim();
+    const cleanB = String(b || '').replace(/\s*\([^)]*\)/g, '').trim();
+    if (!cleanA || !cleanB) return false;
+    if (cleanA.toLowerCase() === cleanB.toLowerCase()) return true;
+    if (this.db && typeof this.db.areSameEmployee === 'function' && this.db.areSameEmployee(cleanA, cleanB)) {
+      return true;
+    }
+    const flip = (name) => {
+      if (!name.includes(',')) return name.toLowerCase();
+      const parts = name.split(',').map(p => p.trim()).filter(Boolean);
+      return parts.length >= 2 ? `${parts[1]} ${parts[0]}`.toLowerCase() : name.toLowerCase();
+    };
+    return flip(cleanA) === flip(cleanB);
+  }
+
+  /**
+   * Normalizes an active or history row into a canonical lifecycle state + holder for mismatch detection.
+   */
+  classifyStateForCompare(row, isActive = false) {
+    if (!row) return { key: 'SHELF', compatKey: 'SHELF', rank: 2, holder: 'On Shelf', displayLabel: 'On Shelf' };
+
+    const rawAssigned = String(row['Assigned To'] || row['Employee Name'] || row['Employee'] || '').trim();
+    const rawStatus = String(row['Status'] || '').trim();
+    const rawLoc = String(row['Location'] || '').trim();
+    const rawNotes = String(row['Notes'] || row['Note'] || '').trim();
+
+    const sAssigned = rawAssigned.toLowerCase();
+    const sStatus = rawStatus.toLowerCase();
+    const sLoc = rawLoc.toLowerCase();
+    const sNotes = isActive ? '' : rawNotes.toLowerCase();
+
+    // 1. Retired / Failed / Condemned / Destroyed
+    if (
+      sStatus.includes('failed') || sStatus.includes('condemned') || sStatus.includes('destroyed') || sStatus.includes('retired') || sStatus.includes('expired') ||
+      sAssigned === 'failed' || sAssigned === 'failed rubber' || sAssigned === 'condemned' || sAssigned === 'destroyed' || sAssigned === 'retired' || sAssigned.includes('failed rubber') || sAssigned.includes('condemned') ||
+      sLoc === 'destroyed' || sLoc === 'retired' ||
+      (!isActive && !rawAssigned && (sNotes.includes('failed rubber') || sNotes.includes('condemned') || sNotes.includes('destroyed')))
+    ) {
+      return { key: 'RETIRED', compatKey: 'RETIRED', rank: 8, holder: rawStatus || rawAssigned || 'Failed Rubber', displayLabel: rawStatus || 'Retired / Failed' };
+    }
+
+    // 2. Lost / Missing
+    if (sAssigned === 'lost' || sLoc === 'lost' || sStatus === 'lost' || sAssigned.includes('lost') || sStatus.includes('lost') || sLoc.includes('lost')) {
+      return { key: 'LOST', compatKey: 'LOST', rank: 7, holder: 'Lost', displayLabel: 'Lost (Missing)' };
+    }
+
+    // 3. Packed For Testing
+    if (sAssigned === 'packed for testing' || sStatus === 'packed for testing' || (sStatus === 'ready for test' && sLoc === "cody's truck")) {
+      return { key: 'PACKED_TESTING', compatKey: 'PACKED_TESTING', rank: 5, holder: 'Packed For Testing', displayLabel: 'Packed For Testing' };
+    }
+
+    // 4. Packed For Delivery / Ready For Delivery
+    if (sAssigned === 'packed for delivery' || sStatus === 'packed for delivery' || sStatus === 'ready for delivery' || (sLoc === "cody's truck" && !sAssigned.includes('testing') && !sStatus.includes('testing'))) {
+      return { key: 'PACKED_DELIVERY', compatKey: 'PACKED_DELIVERY', rank: 3, holder: 'Packed For Delivery', displayLabel: 'Packed For Delivery' };
+    }
+
+    // 5. In Testing / Lab
+    if (
+      sAssigned === 'in testing' || sAssigned === 'testing' || sAssigned === 'arnett' || sAssigned === 'jm test' || sAssigned === 'arnett / jm test' || sAssigned === 'lab' ||
+      sStatus === 'in testing' || sStatus === 'ready for test' ||
+      sLoc === 'arnett / jm test' || sLoc === 'arnett' || sLoc === 'jm test'
+    ) {
+      return { key: 'TESTING', compatKey: 'TESTING', rank: 6, holder: 'In Testing', displayLabel: 'In Testing' };
+    }
+
+    // 6. On Shelf / Brand New Purchase / Stock
+    const isBrandNewAssigned = (
+      sAssigned === 'on shelf (new purchase)' || sAssigned === 'brand new (on shelf)' ||
+      sAssigned === 'brand new' || sAssigned === 'new purchase' || sAssigned === 'new' ||
+      sAssigned === 'newly purchased' || sAssigned === 'new item' ||
+      sAssigned.startsWith('new (') || sAssigned.startsWith('brand new') || sAssigned.startsWith('new purchase') ||
+      sAssigned.includes('brand new') || sAssigned.includes('new purchase')
+    ) && !sAssigned.includes('newman') && !sAssigned.includes('new assignment');
+
+    const isShelfHolder = (
+      !sAssigned || sAssigned === 'on shelf' || sAssigned === 'in stock' || sAssigned === 'shelf' ||
+      sAssigned === 'storage' || sAssigned === 'available' || sAssigned === 'unassigned' ||
+      sAssigned === 'previous employee' || sAssigned === 'n/a' || sAssigned === 'none' || sAssigned === 'unknown' ||
+      sAssigned.includes('shelf') || sAssigned.includes('storage') ||
+      sStatus === 'on shelf' || sStatus === 'in stock' ||
+      (sLoc === 'helena' && (!sAssigned || sAssigned === 'n/a' || sAssigned === 'helena'))
+    );
+
+    if (isBrandNewAssigned || isShelfHolder) {
+      return {
+        key: isBrandNewAssigned ? 'NEW_PURCHASE' : 'SHELF',
+        compatKey: 'SHELF',
+        rank: isBrandNewAssigned ? 1 : 2,
+        holder: rawAssigned || 'On Shelf',
+        displayLabel: isBrandNewAssigned ? 'On Shelf (New Purchase)' : 'On Shelf'
+      };
+    }
+
+    // 7. Default: Field Service (Assigned to Employee / Entity)
+    const fieldHolder = rawAssigned || rawStatus;
+    return { key: 'FIELD', compatKey: 'FIELD', rank: 4, holder: fieldHolder, displayLabel: `Assigned → ${fieldHolder}` };
+  }
+
+  /**
+   * Selects the chronologically latest valid history row (preferring non-future/pending-new-hire rows;
+   * ties broken by canonical lifecycle precedence).
+   */
+  getLatestHistoryRowForCompare(rows, pendingEmpMap, dateH = 'Date Assigned', assignedH = 'Assigned To') {
+    if (!rows || rows.length === 0) return null;
+    const today = new Date();
+    const todayNum = today.getFullYear() * 10000 + (today.getMonth() + 1) * 100 + today.getDate() + 1;
+
+    let best = null;
+    let bestDNum = -Infinity;
+    let bestRank = -1;
+
+    for (const r of rows) {
+      const dNum = this.toDateNum(r[dateH] || r['Date Assigned'] || r['Date']);
+      const rawHolder = String(r[assignedH] || r['Assigned To'] || '').trim();
+      const cleanHolder = this.cleanHolderName(rawHolder);
+      if (dNum > todayNum && !pendingEmpMap.has(cleanHolder)) {
+        continue;
+      }
+      const st = this.classifyStateForCompare(r, false);
+      if (!best || dNum > bestDNum || (dNum === bestDNum && st.rank > bestRank)) {
+        best = r;
+        bestDNum = dNum;
+        bestRank = st.rank;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Returns mismatch descriptor object if activeRecord disagrees with latestHistRow, or null when in sync.
+   */
+  detectActiveHistoryMismatch(activeRecord, latestHistRow, activeDateH = 'Date Assigned', histDateH = 'Date Assigned') {
+    if (!activeRecord || !latestHistRow) return null;
+    const activeState = this.classifyStateForCompare(activeRecord, true);
+    const histState = this.classifyStateForCompare(latestHistRow, false);
+
+    let mismatched = false;
+    if (activeState.compatKey !== histState.compatKey) {
+      mismatched = true;
+    } else if (activeState.compatKey === 'FIELD') {
+      if (!this.areSameEmployeeName(activeState.holder, histState.holder)) {
+        mismatched = true;
+      }
+    }
+
+    if (!mismatched) return null;
+
+    return {
+      activeState,
+      histState,
+      activeDate: String(activeRecord[activeDateH] || activeRecord['Date Assigned'] || activeRecord['Date'] || '').trim(),
+      histDate: String(latestHistRow[histDateH] || latestHistRow['Date Assigned'] || latestHistRow['Date'] || '').trim(),
+      histRow: latestHistRow
+    };
+  }
+
   getPendingEmployeesMap() {
     const empTable = this.db ? this.db.getTable('employees') : null;
     const pendingMap = new Map();
@@ -162,7 +367,7 @@ class HistoryIssuesEngine {
   }
 
   /**
-   * Ultra-fast single-pass calculation of discrepancy counts across all equipment tables (~3-4ms total)
+   * Ultra-fast single-pass calculation of discrepancy counts across all equipment tables (~3-5ms total)
    */
   refreshCountsFast() {
     const today = new Date();
@@ -170,50 +375,92 @@ class HistoryIssuesEngine {
     const pendingEmpMap = this.getPendingEmployeesMap();
 
     const counts = {};
+    const breakdown = {};
     for (const eq of this.equipmentList) {
       const table = this.db ? this.db.getTable(eq.histKey) : null;
       if (!table || !table.rows || table.rows.length === 0) {
         counts[eq.key] = 0;
+        breakdown[eq.key] = { dupeItems: 0, futureItems: 0, mismatchItems: 0 };
         continue;
       }
 
+      const activeTable = this.db ? this.db.getTable(eq.key) : null;
+      const activeMap = new Map();
+      if (activeTable && activeTable.rows && activeTable.rows.length > 0) {
+        const actHeaders = activeTable.headers || [];
+        for (let i = 0; i < activeTable.rows.length; i++) {
+          const ar = activeTable.rows[i];
+          const rawId = this.extractItemKey(ar, actHeaders, eq.key);
+          if (rawId) activeMap.set(this.normalizeItemStr(rawId), ar);
+        }
+      }
+
       const headers = table.headers || [];
-      let itemH = headers.find(h => /^(item|serial|glove|sleeve|blanket|mack|model)/i.test(h)) || 'Item #';
       let dateH = headers.find(h => /^(date|action)/i.test(h)) || 'Date Assigned';
       let assignedH = headers.find(h => /^(assigned|employee|holder)/i.test(h)) || 'Assigned To';
 
       const itemIssues = new Set();
+      const dupeItems = new Set();
+      const futureItems = new Set();
+      const mismatchItems = new Set();
       const seenExact = new Set();
+      const latestByItem = new Map();
 
       for (let i = 0; i < table.rows.length; i++) {
         const r = table.rows[i];
-        const item = String(r[itemH] || r['Item #'] || r['Serial #'] || Object.values(r)[0] || '').trim().toLowerCase();
-        if (!item) continue;
+        const rawItem = this.extractItemKey(r, headers, eq.key);
+        if (!rawItem) continue;
+        const normItem = this.normalizeItemStr(rawItem);
 
-        const dRaw = String(r[dateH] || r['Date Assigned'] || '').trim();
+        const dRaw = String(r[dateH] || r['Date Assigned'] || r['Date'] || '').trim();
         const dNum = this.toDateNum(dRaw);
         const aRaw = String(r[assignedH] || r['Assigned To'] || '').trim().toLowerCase();
+        const cleanHolder = this.cleanHolderName(aRaw);
 
-        if (dNum > todayNum) {
-          const cleanHolder = this.cleanHolderName(aRaw);
-          // If holder is a recognized future new hire, exclude from being flagged as a discrepancy
-          if (!pendingEmpMap.has(cleanHolder)) {
-            itemIssues.add(item);
+        if (dNum > todayNum && !pendingEmpMap.has(cleanHolder)) {
+          itemIssues.add(normItem);
+          futureItems.add(normItem);
+        } else if (activeMap.has(normItem)) {
+          const st = this.classifyStateForCompare(r, false);
+          const prevLatest = latestByItem.get(normItem);
+          if (!prevLatest || dNum > prevLatest.dNum || (dNum === prevLatest.dNum && st.rank > prevLatest.rank)) {
+            latestByItem.set(normItem, { dNum, rank: st.rank, row: r });
           }
         }
 
-        const k = `${item}::${dNum}::${aRaw}`;
+        const dNorm = this.normalizeDateStr(dRaw);
+        const k = `${normItem}::${dNorm}::${aRaw}`;
         if (seenExact.has(k)) {
-          itemIssues.add(item);
+          itemIssues.add(normItem);
+          dupeItems.add(normItem);
         } else {
           seenExact.add(k);
         }
       }
 
+      if (activeMap.size > 0 && latestByItem.size > 0) {
+        const actHeaders = (activeTable && activeTable.headers) || [];
+        const actDateH = actHeaders.find(h => /date\s*assigned|^date$/i.test(h)) || 'Date Assigned';
+        latestByItem.forEach((latestEntry, normItem) => {
+          const activeRecord = activeMap.get(normItem);
+          if (!activeRecord) return;
+          if (this.detectActiveHistoryMismatch(activeRecord, latestEntry.row, actDateH, dateH)) {
+            itemIssues.add(normItem);
+            mismatchItems.add(normItem);
+          }
+        });
+      }
+
       counts[eq.key] = itemIssues.size;
+      breakdown[eq.key] = {
+        dupeItems: dupeItems.size,
+        futureItems: futureItems.size,
+        mismatchItems: mismatchItems.size
+      };
     }
 
     this.cachedCounts = counts;
+    this.cachedTypeBreakdown = breakdown;
     return counts;
   }
 
@@ -250,7 +497,6 @@ class HistoryIssuesEngine {
     }
 
     const headers = histTable.headers || [];
-    let itemH = headers.find(h => /^(item|serial|glove|sleeve|blanket|mack|model)/i.test(h)) || 'Item #';
     let dateH = headers.find(h => /^(date|action)/i.test(h)) || 'Date Assigned';
     let assignedH = headers.find(h => /^(assigned|employee|holder)/i.test(h)) || 'Assigned To';
     let locH = headers.find(h => /^location$/i.test(h)) || 'Location';
@@ -258,11 +504,12 @@ class HistoryIssuesEngine {
 
     // Fast active table index
     const activeMap = new Map();
+    let actDateH = 'Date Assigned';
     if (activeTable && activeTable.rows) {
       const actHeaders = activeTable.headers || [];
-      const actItemH = actHeaders.find(h => /^(item|serial|glove|sleeve|blanket|mack)/i.test(h)) || 'Item #';
+      actDateH = actHeaders.find(h => /date\s*assigned|^date$/i.test(h)) || 'Date Assigned';
       activeTable.rows.forEach(r => {
-        const val = String(r[actItemH] || r['Item #'] || r['Serial #'] || '').trim();
+        const val = this.extractItemKey(r, actHeaders, meta.key);
         if (val) activeMap.set(this.normalizeItemStr(val), r);
       });
     }
@@ -271,7 +518,7 @@ class HistoryIssuesEngine {
     const itemGroups = new Map();
     for (let i = 0; i < histTable.rows.length; i++) {
       const r = histTable.rows[i];
-      const rawItem = String(r[itemH] || r['Item #'] || r['Serial #'] || Object.values(r)[0] || '').trim();
+      const rawItem = this.extractItemKey(r, headers, meta.key);
       if (!rawItem) continue;
       const normItem = this.normalizeItemStr(rawItem);
       if (!itemGroups.has(normItem)) {
@@ -293,6 +540,7 @@ class HistoryIssuesEngine {
       let dupeCount = 0;
       let futureCount = 0;
       let consecCount = 0;
+      let mismatchCount = 0;
 
       // 1. Future dates (excluding intentional pre-assignments for pending new hires)
       const futureRows = [];
@@ -386,8 +634,38 @@ class HistoryIssuesEngine {
         }
       }
 
+      // 4. Active Inventory vs. Latest History mismatch
+      if (activeRecord) {
+        const latestHist = this.getLatestHistoryRowForCompare(rows, pendingEmpMap, dateH, assignedH);
+        const mismatch = this.detectActiveHistoryMismatch(activeRecord, latestHist, actDateH, dateH);
+        if (mismatch) {
+          mismatchCount = 1;
+          discrepancies.push({
+            type: 'ACTIVE_MISMATCH',
+            severity: 'danger',
+            label: 'Active vs. History Mismatch',
+            count: 1,
+            summary: `History shows "${mismatch.histState.displayLabel}"${mismatch.histDate ? ` (${mismatch.histDate})` : ''}, but Active ${meta.label} sheet shows "${mismatch.activeState.displayLabel}"${mismatch.activeDate ? ` (${mismatch.activeDate})` : ''}`,
+            details: [
+              {
+                date: mismatch.activeDate || 'Current',
+                holder: `Active Sheet: ${mismatch.activeState.displayLabel}`,
+                location: activeRecord['Location'] || '',
+                notes: activeRecord['Notes'] || ''
+              },
+              {
+                date: mismatch.histDate || 'Unknown Date',
+                holder: `Latest History: ${mismatch.histState.displayLabel}`,
+                location: latestHist[locH] || latestHist['Location'] || '',
+                notes: latestHist[notesH] || latestHist['Notes'] || ''
+              }
+            ]
+          });
+        }
+      }
+
       if (discrepancies.length > 0) {
-        const totalItemDiscrepancies = dupeCount + futureCount + consecCount;
+        const totalItemDiscrepancies = dupeCount + futureCount + consecCount + mismatchCount;
         totalIssuesAcrossTable += totalItemDiscrepancies;
 
         const firstHist = rows[0] || {};
@@ -424,6 +702,7 @@ class HistoryIssuesEngine {
           dupeCount,
           futureCount,
           consecCount,
+          mismatchCount,
           metaValues,
           activeInfo: activeRecord ? {
             status: activeRecord['Status'] || 'On Shelf',
@@ -528,23 +807,39 @@ class HistoryIssuesEngine {
 
     if (bannerContainer) {
       if (count > 0) {
+        const bd = (this.cachedTypeBreakdown && this.cachedTypeBreakdown[meta.key]) || { dupeItems: 0, futureItems: 0, mismatchItems: 0 };
+        const parts = [];
+        if (bd.dupeItems > 0) parts.push(`${bd.dupeItems} duplicate`);
+        if (bd.mismatchItems > 0) parts.push(`${bd.mismatchItems} active vs. history ${bd.mismatchItems === 1 ? 'mismatch' : 'mismatches'}`);
+        if (bd.futureItems > 0) parts.push(`${bd.futureItems} future date`);
+        const summaryText = parts.length > 0
+          ? `Found ${parts.join(', ')} in ${meta.label} History.`
+          : `Found duplicate history records or discrepancies in ${meta.label} History.`;
+
         bannerContainer.style.display = 'block';
         bannerContainer.innerHTML = `
           <div class="history-issues-sheet-banner">
             <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
               <span style="font-size: 18px;">⚠️</span>
               <div>
-                <strong>${meta.icon} ${meta.label} History Issues Detected (${count} items):</strong>
-                <span style="opacity: 0.9; margin-left: 4px;">Found duplicate history records or discrepancies in ${meta.label} History.</span>
+                <strong>${meta.icon} ${meta.label} History Issues Detected (${count} ${count === 1 ? 'item' : 'items'}):</strong>
+                <span style="opacity: 0.9; margin-left: 4px;">${this.escapeHtml(summaryText)}</span>
               </div>
             </div>
             <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-left: auto;">
               <button class="btn btn-sm" style="font-size: 11px; font-weight: 700; background: rgba(245, 158, 11, 0.25); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.5); padding: 5px 12px; border-radius: 6px; cursor: pointer;" onclick="window.historyIssuesEngine.openHistoryIssuesModal('${meta.key}')">
-                🔍 View ${count} Affected Items & Discrepancies
+                🔍 View ${count} Affected ${count === 1 ? 'Item' : 'Items'} & Discrepancies
               </button>
-              <button class="btn btn-sm" style="font-size: 11px; font-weight: 700; background: #f59e0b; color: #1e293b; border: none; padding: 5px 12px; border-radius: 6px; cursor: pointer;" onclick="window.historyIssuesEngine.cleanEquipmentDuplicates('${meta.key}')">
-                🧹 Clean All Duplicates in ${meta.label}
-              </button>
+              ${bd.mismatchItems > 0 ? `
+                <button class="btn btn-sm" style="font-size: 11px; font-weight: 700; background: #3b82f6; color: #ffffff; border: none; padding: 5px 12px; border-radius: 6px; cursor: pointer;" onclick="window.historyIssuesEngine.resolveEquipmentMismatches('${meta.key}')">
+                  🔄 Sync ${bd.mismatchItems} ${bd.mismatchItems === 1 ? 'Mismatch' : 'Mismatches'} in ${meta.label}
+                </button>
+              ` : ''}
+              ${(bd.dupeItems > 0 || bd.mismatchItems === 0) ? `
+                <button class="btn btn-sm" style="font-size: 11px; font-weight: 700; background: #f59e0b; color: #1e293b; border: none; padding: 5px 12px; border-radius: 6px; cursor: pointer;" onclick="window.historyIssuesEngine.cleanEquipmentDuplicates('${meta.key}')">
+                  🧹 Clean All Duplicates in ${meta.label}
+                </button>
+              ` : ''}
             </div>
           </div>
         `;
@@ -623,7 +918,7 @@ class HistoryIssuesEngine {
       }
     });
 
-    // Update single-table clean button
+    // Update single-table clean & sync buttons
     const isAll = this.currentModalCategory === 'all';
     const activeMeta = isAll ? null : this.getEquipmentMeta(this.currentModalCategory);
     const singleCleanBtn = document.getElementById('btn-clean-single-category');
@@ -634,6 +929,17 @@ class HistoryIssuesEngine {
         singleCleanBtn.onclick = () => this.cleanEquipmentDuplicates(activeMeta.key);
       } else {
         singleCleanBtn.style.display = 'none';
+      }
+    }
+    const singleSyncBtn = document.getElementById('btn-sync-mismatches-single-category');
+    if (singleSyncBtn) {
+      const bd = (!isAll && activeMeta && this.cachedTypeBreakdown) ? this.cachedTypeBreakdown[activeMeta.key] : null;
+      if (!isAll && activeMeta && bd && bd.mismatchItems > 0) {
+        singleSyncBtn.style.display = 'inline-flex';
+        singleSyncBtn.innerHTML = `🔄 Sync ${bd.mismatchItems} ${bd.mismatchItems === 1 ? 'Mismatch' : 'Mismatches'} in ${activeMeta.label}`;
+        singleSyncBtn.onclick = () => this.resolveEquipmentMismatches(activeMeta.key);
+      } else {
+        singleSyncBtn.style.display = 'none';
       }
     }
 
@@ -708,6 +1014,7 @@ class HistoryIssuesEngine {
           <!-- Type filter buttons -->
           <div class="filter-pills" style="margin-bottom: 0;">
             <button class="filter-pill ${this.typeFilter === 'all' ? 'active' : ''}" onclick="window.historyIssuesEngine.setModalTypeFilter('all')">All</button>
+            <button class="filter-pill ${this.typeFilter === 'mismatch' ? 'active' : ''}" onclick="window.historyIssuesEngine.setModalTypeFilter('mismatch')">⚡ Active Mismatches</button>
             <button class="filter-pill ${this.typeFilter === 'duplicate' ? 'active' : ''}" onclick="window.historyIssuesEngine.setModalTypeFilter('duplicate')">🧹 Duplicates</button>
             <button class="filter-pill ${this.typeFilter === 'future' ? 'active' : ''}" onclick="window.historyIssuesEngine.setModalTypeFilter('future')">📅 Future Dates</button>
             <button class="filter-pill ${this.typeFilter === 'consecutive' ? 'active' : ''}" onclick="window.historyIssuesEngine.setModalTypeFilter('consecutive')">🔄 Consecutive</button>
@@ -715,6 +1022,12 @@ class HistoryIssuesEngine {
         </div>
 
         <div style="display: flex; align-items: center; gap: 8px; margin-left: auto; flex-wrap: wrap;">
+          ${(() => {
+            const bd = (!isAll && activeMeta && this.cachedTypeBreakdown) ? this.cachedTypeBreakdown[activeMeta.key] : null;
+            const hasMismatches = Boolean(!isAll && activeMeta && bd && bd.mismatchItems > 0);
+            const mCount = hasMismatches ? bd.mismatchItems : 0;
+            return `<button id="btn-sync-mismatches-single-category" class="btn btn-secondary" style="font-size: 11.5px; font-weight: 700; color: #93c5fd; border-color: rgba(59, 130, 246, 0.55); background: rgba(59, 130, 246, 0.16); ${hasMismatches ? 'display: inline-flex;' : 'display: none;'}" onclick="${activeMeta ? `window.historyIssuesEngine.resolveEquipmentMismatches('${activeMeta.key}')` : ''}">🔄 Sync ${mCount} ${mCount === 1 ? 'Mismatch' : 'Mismatches'} in ${activeMeta ? activeMeta.label : ''}</button>`;
+          })()}
           <button id="btn-clean-single-category" class="btn btn-secondary" style="font-size: 11.5px; font-weight: 700; color: #fbbf24; border-color: rgba(245, 158, 11, 0.5); background: rgba(245, 158, 11, 0.12); ${(!isAll && activeMeta) ? 'display: inline-flex;' : 'display: none;'}" onclick="${activeMeta ? `window.historyIssuesEngine.cleanEquipmentDuplicates('${activeMeta.key}')` : ''}">
             🧹 Clean All in ${activeMeta ? activeMeta.label : ''}
           </button>
@@ -755,7 +1068,9 @@ class HistoryIssuesEngine {
     }
 
     // Apply type filter
-    if (this.typeFilter === 'duplicate') {
+    if (this.typeFilter === 'mismatch') {
+      itemsToDisplay = itemsToDisplay.filter(i => i.mismatchCount > 0);
+    } else if (this.typeFilter === 'duplicate') {
       itemsToDisplay = itemsToDisplay.filter(i => i.dupeCount > 0);
     } else if (this.typeFilter === 'future') {
       itemsToDisplay = itemsToDisplay.filter(i => i.futureCount > 0);
@@ -833,6 +1148,11 @@ class HistoryIssuesEngine {
           bg = 'rgba(239, 68, 68, 0.14)';
           border = 'rgba(239, 68, 68, 0.45)';
           textColor = '#fca5a5';
+        } else if (d.type === 'ACTIVE_MISMATCH') {
+          icon = '⚡';
+          bg = 'rgba(239, 68, 68, 0.14)';
+          border = 'rgba(239, 68, 68, 0.45)';
+          textColor = '#fca5a5';
         } else if (d.type === 'CONSECUTIVE_DUPLICATES') {
           icon = '🔄';
           bg = 'rgba(56, 189, 248, 0.1)';
@@ -879,9 +1199,16 @@ class HistoryIssuesEngine {
             </div>
 
             <div style="display: flex; align-items: center; gap: 8px; margin-left: auto;">
-              <button class="btn btn-sm" style="font-size: 11px; font-weight: 700; background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.5); padding: 4px 10px; border-radius: 6px; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;" onclick="window.historyIssuesEngine.cleanItemDuplicates('${this.escapeJs(item.equipmentKey)}', '${this.escapeJs(item.cleanItemKey)}')">
-                <span>🧹</span> Clean Duplicates
-              </button>
+              ${item.mismatchCount > 0 ? `
+                <button class="btn btn-sm" style="font-size: 11px; font-weight: 700; background: rgba(59, 130, 246, 0.22); color: #93c5fd; border: 1px solid rgba(59, 130, 246, 0.55); padding: 4px 10px; border-radius: 6px; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;" onclick="window.historyIssuesEngine.resolveItemMismatch('${this.escapeJs(item.equipmentKey)}', '${this.escapeJs(item.cleanItemKey)}')">
+                  <span>🔄</span> Sync History to Active
+                </button>
+              ` : ''}
+              ${(item.dupeCount > 0 || item.mismatchCount === 0) ? `
+                <button class="btn btn-sm" style="font-size: 11px; font-weight: 700; background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.5); padding: 4px 10px; border-radius: 6px; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;" onclick="window.historyIssuesEngine.cleanItemDuplicates('${this.escapeJs(item.equipmentKey)}', '${this.escapeJs(item.cleanItemKey)}')">
+                  <span>🧹</span> Clean Duplicates
+                </button>
+              ` : ''}
               <button class="btn btn-sm btn-secondary" style="font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 6px; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;" onclick="if(window.itemStatsEngine){window.itemStatsEngine.openDossierModal('${this.escapeJs(item.cleanItemKey)}', '${this.escapeJs(item.histKey)}');}">
                 <span>📖</span> Open Dossier
               </button>
@@ -910,6 +1237,204 @@ class HistoryIssuesEngine {
   loadMoreModalItems() {
     this.modalPageLimit += 25;
     this.renderItemsListOnly();
+  }
+
+  /**
+   * Syncs a single item's history record to match its current Active Inventory state/holder.
+   */
+  async _syncSingleItemHistoryToActive(meta, activeRecord, itemKey) {
+    if (!meta || !activeRecord || !this.db || typeof this.db.recordItemHistoryEvent !== 'function') return false;
+    const histTable = this.db.getTable(meta.histKey);
+    const activeTable = this.db.getTable(meta.key);
+    const sheetName = (activeTable && activeTable.name) || meta.label;
+    const headers = (histTable && histTable.headers) || [];
+    const dateH = headers.find(h => /^(date|action)/i.test(h)) || 'Date Assigned';
+    const assignedH = headers.find(h => /^(assigned|employee|holder)/i.test(h)) || 'Assigned To';
+    const locH = headers.find(h => /^location$/i.test(h)) || 'Location';
+    const notesH = headers.find(h => /^(notes|comment)/i.test(h)) || 'Notes';
+
+    const pendingEmpMap = this.getPendingEmployeesMap();
+    const normTarget = this.normalizeItemStr(itemKey);
+    const itemRows = (histTable && histTable.rows)
+      ? histTable.rows.filter(r => this.normalizeItemStr(this.extractItemKey(r, headers, meta.key)) === normTarget)
+      : [];
+    const latestHist = this.getLatestHistoryRowForCompare(itemRows, pendingEmpMap, dateH, assignedH);
+    const mismatch = this.detectActiveHistoryMismatch(activeRecord, latestHist, 'Date Assigned', dateH);
+    if (!mismatch) return false;
+
+    const aState = mismatch.activeState;
+    let targetHolder = 'On Shelf';
+    let syncNote = 'Returned to Shelf';
+    if (aState.key === 'FIELD') {
+      targetHolder = aState.holder;
+      syncNote = `Assigned to ${targetHolder}`;
+    } else if (aState.key === 'PACKED_DELIVERY') {
+      targetHolder = 'Packed For Delivery';
+      syncNote = 'Packed For Delivery';
+    } else if (aState.key === 'PACKED_TESTING') {
+      targetHolder = 'Packed For Testing';
+      syncNote = 'Packed For Testing';
+    } else if (aState.key === 'TESTING') {
+      targetHolder = 'In Testing';
+      syncNote = 'In Testing';
+    } else if (aState.key === 'LOST') {
+      targetHolder = 'Lost';
+      syncNote = 'Marked Lost / Missing';
+    } else if (aState.key === 'RETIRED') {
+      targetHolder = activeRecord['Status'] || 'Failed Rubber';
+      syncNote = activeRecord['Status'] || 'Failed Rubber';
+    }
+
+    const activeDate = String(activeRecord['Date Assigned'] || activeRecord['Date'] || '').trim();
+    const activeDNum = this.toDateNum(activeDate);
+    const latestDNum = latestHist ? this.toDateNum(latestHist[dateH] || latestHist['Date Assigned']) : 0;
+    const todayStr = new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
+    const todayDNum = this.toDateNum(todayStr);
+
+    let syncDate = todayStr;
+    if (activeDate && activeDNum > 0 && activeDNum <= todayDNum && activeDNum >= latestDNum) {
+      syncDate = activeDate;
+    } else if (latestDNum > todayDNum && pendingEmpMap.has(this.cleanHolderName(targetHolder)) && activeDate) {
+      syncDate = activeDate;
+    }
+    const syncDNum = this.toDateNum(syncDate);
+    const loc = String(activeRecord['Location'] || 'Helena').trim();
+
+    // If the latest history entry shares the exact same date AND has an equal/higher lifecycle rank
+    // (or was an initial shelf placeholder corrupted while recording an active assignment), update it in place
+    // so the corrected state becomes unambiguous without same-day rank inversion.
+    const canFixInPlace = Boolean(
+      latestHist &&
+      syncDNum === latestDNum &&
+      (mismatch.histState.rank >= aState.rank || (itemRows.length === 1 && mismatch.histState.key === 'NEW_PURCHASE'))
+    );
+
+    if (canFixInPlace) {
+      latestHist[assignedH] = targetHolder;
+      if (assignedH !== 'Assigned To') latestHist['Assigned To'] = targetHolder;
+      latestHist[locH] = loc;
+      if (locH !== 'Location') latestHist['Location'] = loc;
+      latestHist[notesH] = syncNote;
+      if (notesH !== 'Notes') latestHist['Notes'] = syncNote;
+
+      if (histTable.rawGrid && headers.length > 0) {
+        let rIdx = latestHist._rowIdx;
+        if (!rIdx || rIdx < 2 || rIdx > histTable.rawGrid.length) {
+          const histIdx = histTable.rows.indexOf(latestHist);
+          rIdx = histIdx !== -1 ? histIdx + 2 : null;
+        }
+        if (rIdx && histTable.rawGrid[rIdx - 1]) {
+          const updates = [
+            { colH: assignedH, val: targetHolder },
+            { colH: locH, val: loc },
+            { colH: notesH, val: syncNote }
+          ];
+          for (const u of updates) {
+            const cIdx = headers.indexOf(u.colH);
+            if (cIdx !== -1) {
+              const prevVal = String(histTable.rawGrid[rIdx - 1][cIdx] || '');
+              histTable.rawGrid[rIdx - 1][cIdx] = u.val;
+              await this.db.addMutation({
+                action: 'UPDATE_CELL',
+                sheetName: histTable.name,
+                row: rIdx,
+                col: cIdx + 1,
+                header: headers[cIdx],
+                itemIdentifier: itemKey,
+                oldValue: prevVal,
+                value: u.val
+              });
+            }
+          }
+        }
+      }
+      if (typeof this.db.schedulePersistSnapshot === 'function') this.db.schedulePersistSnapshot(this.db.snapshot, 400);
+      if (typeof this.db.notify === 'function') this.db.notify();
+      return true;
+    }
+
+    const rowPayload = {
+      ...activeRecord,
+      'Date Assigned': syncDate,
+      'Location': loc,
+      'Assigned To': targetHolder
+    };
+    await this.db.recordItemHistoryEvent(sheetName, rowPayload, syncNote);
+    return true;
+  }
+
+  /**
+   * Resolves Active vs. History mismatch for a single item.
+   */
+  async resolveItemMismatch(equipmentKey, itemKey) {
+    const meta = this.getEquipmentMeta(equipmentKey);
+    if (!meta || !itemKey || !this.db) return;
+
+    const activeTable = this.db.getTable(meta.key);
+    const actHeaders = (activeTable && activeTable.headers) || [];
+    const normTarget = this.normalizeItemStr(itemKey);
+    const activeRecord = activeTable && activeTable.rows
+      ? activeTable.rows.find(r => this.normalizeItemStr(this.extractItemKey(r, actHeaders, meta.key)) === normTarget)
+      : null;
+
+    if (!activeRecord) {
+      if (window.showToast) window.showToast(`⚠️ Could not find active record for ${meta.singular} #${itemKey}.`);
+      return;
+    }
+
+    const fixed = await this._syncSingleItemHistoryToActive(meta, activeRecord, itemKey);
+    if (fixed) {
+      if (window.showToast) {
+        window.showToast(`✅ Synced ${meta.singular} #${itemKey} history to match Active Inventory!`);
+      }
+      this.invalidateCache(meta.key);
+      this.renderModalContent();
+      if (window.sheetNavigator) window.sheetNavigator.renderCurrentSheet();
+      if (window.historyNavigator) window.historyNavigator.renderCurrentHistory();
+    } else if (window.showToast) {
+      window.showToast(`ℹ️ ${meta.singular} #${itemKey} history is already in sync with Active Inventory.`);
+    }
+  }
+
+  /**
+   * Batch resolves all Active vs. History mismatches in a given equipment category.
+   */
+  async resolveEquipmentMismatches(equipmentKey) {
+    const meta = this.getEquipmentMeta(equipmentKey);
+    if (!meta || !this.db) return;
+
+    this.invalidateCache(meta.key);
+    const details = this.getEquipmentDetails(meta.key);
+    const mismatchItems = (details.items || []).filter(it => it.mismatchCount > 0);
+    if (mismatchItems.length === 0) {
+      if (window.showToast) window.showToast(`ℹ️ No Active vs. History mismatches found in ${meta.label}.`);
+      return;
+    }
+
+    if (typeof confirm === 'function' && !confirm(`🔄 Sync ${mismatchItems.length} ${mismatchItems.length === 1 ? 'Item' : 'Items'} in ${meta.label} History?\n\nThis will update ${meta.label} History to match current Active ${meta.label} assignments and statuses.\n\nProceed?`)) {
+      return;
+    }
+
+    const activeTable = this.db.getTable(meta.key);
+    const actHeaders = (activeTable && activeTable.headers) || [];
+    let syncedCount = 0;
+    for (const item of mismatchItems) {
+      const normTarget = this.normalizeItemStr(item.cleanItemKey);
+      const activeRecord = activeTable && activeTable.rows
+        ? activeTable.rows.find(r => this.normalizeItemStr(this.extractItemKey(r, actHeaders, meta.key)) === normTarget)
+        : null;
+      if (activeRecord && await this._syncSingleItemHistoryToActive(meta, activeRecord, item.cleanItemKey)) {
+        syncedCount++;
+      }
+    }
+
+    if (window.showToast) {
+      window.showToast(`✅ Synced ${syncedCount} ${meta.label} history ${syncedCount === 1 ? 'record' : 'records'} to match Active Inventory!`);
+    }
+    this.invalidateCache(meta.key);
+    this.renderModalContent();
+    if (window.sheetNavigator) window.sheetNavigator.renderCurrentSheet();
+    if (window.historyNavigator) window.historyNavigator.renderCurrentHistory();
   }
 
   /**
@@ -1015,7 +1540,7 @@ class HistoryIssuesEngine {
           <div class="modal-body" id="history-issues-modal-content" style="padding: 14px; overflow-y: auto; max-height: calc(88vh - 110px);"></div>
           <div class="modal-footer" style="background: var(--bg-secondary); border-top: 1px solid var(--border-color); padding: 10px 18px; display: flex; justify-content: space-between; align-items: center;">
             <span style="font-size: 11.5px; color: var(--text-muted);">
-              💡 Click <strong>"Clean Duplicates"</strong> on any item to resolve redundant entries while preserving all notes.
+              💡 Click <strong>"Sync History to Active"</strong> to fix mismatches or <strong>"Clean Duplicates"</strong> to remove redundant entries.
             </span>
             <button class="btn btn-secondary" onclick="window.historyIssuesEngine.closeHistoryIssuesModal()" style="font-size: 12px; font-weight: 600;">Close</button>
           </div>

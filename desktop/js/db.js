@@ -2665,21 +2665,7 @@ class LocalDatabase {
 
     let table = this.snapshot.tables[tableKey];
     if (!table) {
-      const sheetNameMap = {
-        gloves: 'Gloves',
-        sleeves: 'Sleeves',
-        blankets: 'Blankets',
-        macks: 'MACKs',
-        hv_testers: 'HV Testers',
-        phasing_sets: 'Phasing Sets',
-        aed: 'AED',
-        grounds: 'Grounds',
-        hot_sticks: 'Hot Sticks',
-        employees: 'Employees',
-        job_tracking: 'Job Tracking',
-        locations: 'Locations'
-      };
-      const name = sheetNameMap[tableKey] || tableKey;
+      const name = this.getSheetNameForTableKey(tableKey) || tableKey;
       table = { name: name, headers: Object.keys(rowObj), rows: [], rawGrid: [Object.keys(rowObj)], rowCount: 0, _normalized: true };
       this.snapshot.tables[tableKey] = table;
     }
@@ -3196,18 +3182,37 @@ class LocalDatabase {
     const hasPriorHistory = itemHistRows.length > 0;
 
     // Recognize New Purchase origin for history:
-    // When a new item is added with New Purchase, history should read "On Shelf (New Purchase)" in Assigned To, and "New" in Notes.
-    // If the item already has prior history records (e.g. was in field/lab), it can NEVER be a New Purchase!
+    // ONLY format Assigned To as "On Shelf (New Purchase)" when the item is genuinely on shelf / unassigned.
+    // Never overwrite a concrete holder (e.g., an assigned employee, Packed For Delivery, In Testing, etc.).
     const rowNotesLower = String(itemRow['Notes'] || '').trim().toLowerCase();
-    const isNewPurchase = !hasPriorHistory && (
-                          originReason === 'New Purchase' ||
+    const assignedLower = assignedTo.toLowerCase();
+    const reasonLower = String(reasonNote || '').trim().toLowerCase();
+    const isShelfOrNewHolder = (
+      !assignedLower ||
+      assignedLower === 'on shelf' ||
+      assignedLower === 'shelf' ||
+      assignedLower === 'in stock' ||
+      assignedLower === 'storage' ||
+      assignedLower === 'unassigned' ||
+      assignedLower === 'available' ||
+      assignedLower === 'new' ||
+      assignedLower === 'brand new' ||
+      assignedLower === 'new purchase' ||
+      assignedLower === 'on shelf (new purchase)' ||
+      assignedLower === 'brand new (on shelf)' ||
+      assignedLower.includes('brand new') ||
+      assignedLower.includes('new purchase')
+    );
+    const isNewPurchaseSignal = originReason === 'New Purchase' ||
                           reasonNote === 'New Purchase' ||
-                          assignedTo.toLowerCase() === 'on shelf (new purchase)' ||
-                          assignedTo.toLowerCase() === 'brand new (on shelf)' ||
-                          assignedTo.toLowerCase() === 'brand new' ||
-                          assignedTo.toLowerCase().includes('brand new') ||
-                          assignedTo.toLowerCase().includes('new purchase') ||
-                          (assignedTo.toLowerCase() === 'on shelf' && (rowNotesLower === 'new' || rowNotesLower.startsWith('new,') || rowNotesLower.startsWith('new -'))));
+                          assignedLower === 'on shelf (new purchase)' ||
+                          assignedLower === 'brand new (on shelf)' ||
+                          assignedLower === 'brand new' ||
+                          assignedLower.includes('brand new') ||
+                          assignedLower.includes('new purchase') ||
+                          ((assignedLower === 'on shelf' || assignedLower === 'shelf' || assignedLower === 'in stock' || assignedLower === 'storage' || !assignedLower) &&
+                            (rowNotesLower === 'new' || rowNotesLower.startsWith('new,') || rowNotesLower.startsWith('new -') || reasonLower === 'new' || reasonLower.startsWith('new')));
+    const isNewPurchase = !hasPriorHistory && isShelfOrNewHolder && isNewPurchaseSignal;
 
     if (isNewPurchase) {
       assignedTo = 'On Shelf (New Purchase)';
@@ -3229,15 +3234,6 @@ class LocalDatabase {
 
     // Check if the chronologically latest history entry for this item already has the identical assignedTo and location
     if (histTable.rows && histTable.rows.length > 0) {
-      const isNum = /^\d+$/.test(itemNum);
-      const parsedNum = isNum ? parseInt(itemNum, 10) : null;
-      const itemHistRows = histTable.rows.filter(r => {
-        const rNum = String(r['Item #'] || (r['HVT #'] || r['Phasing Set'] || r['PS #'] || r['Glove'] || r['Sleeve'] || r['Blanket'] || r['MACK'] || (histTableKey.includes('grounds') ? r['Serial #'] : '') || Object.values(r)[1] || Object.values(r)[0]) || '').trim();
-        if (rNum.toLowerCase() === itemNum.toLowerCase()) return true;
-        if (isNum && /^\d+$/.test(rNum) && parseInt(rNum, 10) === parsedNum) return true;
-        return false;
-      });
-
       if (itemHistRows.length > 0) {
         // Find the chronologically latest record for this item (ignoring anomalous future dates)
         const nowMs = Date.now() + 86400000;
@@ -3262,29 +3258,34 @@ class LocalDatabase {
           lAssigned = String(latest['Assigned To'] || latest['Status'] || '').trim().toLowerCase();
           lLoc = String(latest['Location'] || '').trim().toLowerCase();
           const isSameHolder = this.areSameEmployee(lAssigned, assignedTo);
-          const isBothShelf = (lAssigned === 'on shelf' || lAssigned === 'storage' || lAssigned === 'in stock') && 
-                              (assignedTo.toLowerCase() === 'on shelf' || assignedTo.toLowerCase() === 'storage' || assignedTo.toLowerCase() === 'in stock');
+          const shelfSet = new Set(['on shelf', 'storage', 'in stock', 'shelf', 'on shelf (new purchase)', 'brand new (on shelf)']);
+          const isBothShelf = shelfSet.has(lAssigned) && shelfSet.has(assignedTo.toLowerCase());
           if (isSameHolder || isBothShelf) {
             const newDate = String(itemRow['Date Assigned'] || itemRow['Date'] || '').trim();
             const curDate = String(latest['Date Assigned'] || latest['Date'] || '').trim();
-            let hasChange = false;
-            if (assignedTo && String(latest['Assigned To'] || '').trim() !== assignedTo) {
-              latest['Assigned To'] = assignedTo;
-              hasChange = true;
+            const changedFields = [];
+
+            // Preserve 'On Shelf (New Purchase)' origin label when syncing generic 'On Shelf'
+            const effectiveAssigned = (lAssigned === 'on shelf (new purchase)' && assignedTo.toLowerCase() === 'on shelf')
+              ? latest['Assigned To']
+              : assignedTo;
+            if (effectiveAssigned && String(latest['Assigned To'] || '').trim() !== effectiveAssigned) {
+              latest['Assigned To'] = effectiveAssigned;
+              changedFields.push({ colRegex: /^(assigned|employee|holder)/i, fallbackName: 'Assigned To', val: effectiveAssigned });
             }
             if (newDate && newDate !== curDate) {
               latest['Date Assigned'] = newDate;
-              hasChange = true;
+              changedFields.push({ colRegex: /date\s*assigned|^date$/i, fallbackName: 'Date Assigned', val: newDate });
             }
             if (location && lLoc !== location.toLowerCase()) {
               latest['Location'] = location;
-              hasChange = true;
+              changedFields.push({ colRegex: /^location$/i, fallbackName: 'Location', val: location });
             }
             if (notes && latest['Notes'] !== notes) {
               latest['Notes'] = notes;
-              hasChange = true;
+              changedFields.push({ colRegex: /^(notes|note|comment)/i, fallbackName: 'Notes', val: notes });
             }
-            if (hasChange && histTable.rawGrid && histTable.headers) {
+            if (changedFields.length > 0 && histTable.rawGrid && histTable.headers) {
               const dateColIdx = histTable.headers.findIndex(h => /date\s*assigned|^date$/i.test(h));
               const itemColIdx = histTable.headers.findIndex(h => /^(item(\s*#)?|serial(\s*#)?|glove|sleeve|blanket|mack|hv\s*tester|phasing|model)/i.test(h));
               let rIdx = null;
@@ -3309,24 +3310,29 @@ class LocalDatabase {
                   rIdx = histTable.rows.indexOf(latest) !== -1 ? histTable.rows.indexOf(latest) + 2 : null;
                 }
               }
-              if (rIdx && histTable.rawGrid[rIdx - 1] && dateColIdx !== -1 && newDate) {
-                histTable.rawGrid[rIdx - 1][dateColIdx] = newDate;
-              }
-              if (rIdx && dateColIdx !== -1 && newDate) {
-                await this.addMutation({
-                  action: 'UPDATE_CELL',
-                  sheetName: histTable.name,
-                  row: rIdx,
-                  col: dateColIdx + 1,
-                  header: histTable.headers[dateColIdx],
-                  itemIdentifier: itemNum,
-                  value: newDate
-                });
+              if (rIdx && histTable.rawGrid[rIdx - 1]) {
+                for (const cf of changedFields) {
+                  const colIdx = histTable.headers.findIndex(h => cf.colRegex.test(h) || h === cf.fallbackName);
+                  if (colIdx !== -1) {
+                    const prevVal = String(histTable.rawGrid[rIdx - 1][colIdx] || '');
+                    histTable.rawGrid[rIdx - 1][colIdx] = cf.val;
+                    await this.addMutation({
+                      action: 'UPDATE_CELL',
+                      sheetName: histTable.name,
+                      row: rIdx,
+                      col: colIdx + 1,
+                      header: histTable.headers[colIdx],
+                      itemIdentifier: itemNum,
+                      oldValue: prevVal,
+                      value: cf.val
+                    });
+                  }
+                }
               }
             }
             this.schedulePersistSnapshot(this.snapshot, 600);
             this.notify();
-            return; // Already recorded & date synced
+            return; // Already recorded & synced
           }
         }
       }
