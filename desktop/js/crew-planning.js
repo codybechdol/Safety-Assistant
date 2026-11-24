@@ -2478,7 +2478,9 @@ class CrewPlanningEngine {
     const isCrewNotesMatch = Boolean(term && crew.notes && crew.notes.toLowerCase().includes(term));
     const hasMemberMatch = Boolean(term && Array.isArray(crew.members) && crew.members.some(m => this.isMemberMatchingTerm(m, term, plan, resolvedNotesMap)));
 
-    let cardBorder = 'border: 1px solid rgba(59, 130, 246, 0.35);';
+    const isOnHold = ['on hold', 'hold', 'paused'].includes(effectiveStatus.toLowerCase());
+    let cardBg = isOnHold ? '' : 'background: rgba(30, 41, 59, 0.7);';
+    let cardBorder = isOnHold ? '' : 'border: 1px solid rgba(59, 130, 246, 0.35);';
     let cardShadow = 'box-shadow: 0 1px 4px rgba(0,0,0,0.25);';
     if (hasMemberMatch) {
       cardBorder = 'border: 1.5px solid #f59e0b;';
@@ -2489,9 +2491,9 @@ class CrewPlanningEngine {
     }
 
     return `
-      <div class="field-crew-card planned-crew-card"
+      <div class="field-crew-card planned-crew-card${isOnHold ? ' crew-card-on-hold' : ''}"
            data-crew-job="${this.escapeHtml(crew.jobNumber)}"
-           style="background: rgba(30, 41, 59, 0.7); ${cardBorder} border-radius: 8px; padding: 12px; display: flex; flex-direction: column; ${cardShadow} position: relative; transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;">
+           style="${cardBg} ${cardBorder} border-radius: 8px; padding: 12px; display: flex; flex-direction: column; ${cardShadow} position: relative; transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease, opacity 0.15s ease, filter 0.15s ease;">
         
         <!-- Crew Header (Draggable to Reorder) -->
         <div class="planned-crew-header"

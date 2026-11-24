@@ -1038,6 +1038,25 @@ body {
   border-color: #c084fc !important;
   box-shadow: 0 0 10px rgba(168, 85, 247, 0.4) !important;
 }
+.crew-card-on-hold {
+  background: rgba(15, 23, 42, 0.55);
+  border: 1px dashed rgba(148, 163, 184, 0.35);
+  opacity: 0.62;
+  filter: saturate(0.32);
+  transition: opacity 0.15s ease, filter 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.crew-card-on-hold:hover {
+  opacity: 0.85;
+  filter: saturate(0.55);
+  border-color: rgba(148, 163, 184, 0.55);
+}
+.planned-crew-card.crew-card-on-hold.member-drop-move,
+.planned-crew-card.crew-card-on-hold.member-drop-copy,
+.planned-crew-card.crew-card-on-hold.crew-drop-before,
+.planned-crew-card.crew-card-on-hold.crew-drop-after {
+  opacity: 0.95;
+  filter: none;
+}
 .side-pane-section.side-drop-move {
   border-color: #f59e0b !important;
 }

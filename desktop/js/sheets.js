@@ -9668,10 +9668,11 @@ class SheetNavigator {
       }
 
       // STANDARD VIEW MODE
+      const isOnHold = ['on hold', 'hold', 'paused'].includes(String(crew.status || '').trim().toLowerCase());
       return `
-        <div class="crew-card field-crew-card"
+        <div class="crew-card field-crew-card${isOnHold ? ' crew-card-on-hold' : ''}"
              data-crew-job="${this.escapeHtml(crew.baseJob)}"
-             style="background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px; padding: 14px; box-shadow: 0 1px 3px rgba(0,0,0,0.2); display: flex; flex-direction: column; transition: all 0.2s ease;">
+             style="${isOnHold ? '' : 'background: var(--bg-secondary); border: 1px solid var(--border-color); '}border-radius: 8px; padding: 14px; box-shadow: 0 1px 3px rgba(0,0,0,0.2); display: flex; flex-direction: column; transition: all 0.2s ease;">
           <!-- Card Header -->
           <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; border-bottom: 1px solid var(--border-color); padding-bottom: 8px; gap: 6px;">
             <div style="flex: 1; min-width: 0;">
