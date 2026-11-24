@@ -1926,8 +1926,6 @@ class SheetNavigator {
       });
     }
 
-    const weekRows = (tableData.rows || []).filter(r => String(r['Week Start'] || r['Week'] || '').trim() === this.selectedComplianceWeek);
-
     const jtTable = this.db ? this.db.getTable('job_tracking') : null;
     const jobLocMap = new Map();
     if (jtTable && jtTable.rows) {
@@ -1935,9 +1933,34 @@ class SheetNavigator {
         const jn = String(jr['Job Number'] || jr['Job #'] || '').trim();
         const loc = String(jr['Location'] || '').trim();
         const discipline = String(jr['Discipline'] || jr['Crew Type'] || 'Electric').trim();
-        if (jn) jobLocMap.set(jn, { loc, discipline });
+        const status = String(jr['Status'] || '').trim().toLowerCase();
+        const actualEndDate = this._parseLocalNoonDate(jr['Actual End Date']);
+        if (jn) {
+          const meta = { loc, discipline, status, actualEndDate };
+          jobLocMap.set(jn, meta);
+          const baseJn = jn.replace(/\.\d+.*$/, '').trim();
+          if (baseJn && !jobLocMap.has(baseJn)) jobLocMap.set(baseJn, meta);
+        }
       });
     }
+
+    const selectedWeekStartDate = this._parseLocalNoonDate(this.selectedComplianceWeek);
+    const weekRows = (tableData.rows || []).filter(r => {
+      if (String(r['Week Start'] || r['Week'] || '').trim() !== this.selectedComplianceWeek) return false;
+      if (selectedWeekStartDate) {
+        const jn = String(r['Job Number'] || r['Crew'] || '').trim();
+        const baseJn = jn.replace(/\.\d+.*$/, '').trim();
+        const meta = jobLocMap.get(jn) || jobLocMap.get(baseJn);
+        const isCompletedJob = meta && (meta.status === 'completed' || meta.status === 'closed');
+        if (isCompletedJob && meta.actualEndDate && meta.actualEndDate < selectedWeekStartDate) {
+          const rStat = String(r['Status'] || '').trim();
+          const hasSubmission = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Weekly Meeting', 'Monthly Checklist']
+            .some(col => String(r[col] || '').trim().startsWith('✅'));
+          if (rStat !== 'Resolved' && !hasSubmission) return false;
+        }
+      }
+      return true;
+    });
 
     const totalCrews = weekRows.length;
     const compCount = weekRows.filter(r => String(r['Status'] || '').toLowerCase() === 'complete').length;
@@ -9058,6 +9081,8 @@ class SheetNavigator {
         schedule,
         jobName,
         notes: crewNotes,
+        actualEndDate: (jt && jt['Actual End Date']) ? String(jt['Actual End Date']).trim() : '',
+        putOnHoldDate: (jt && jt['Put On Hold Date']) ? String(jt['Put On Hold Date']).trim() : '',
         isSkipSun, isSkipMon, isSkipTue, isSkipWed, isSkipThu, isSkipFri, isSkipSat,
         skipMtg, skipChk,
         members,
@@ -9561,6 +9586,7 @@ class SheetNavigator {
                 <div>
                   <label style="font-size: 10.5px; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 3px;">Status</label>
                   <select id="edit-crew-status-${this.escapeHtml(crew.baseJob)}"
+                          onchange="(function(sel, bj){ const endWrap = document.getElementById('edit-crew-enddate-wrap-' + bj); const holdWrap = document.getElementById('edit-crew-holddate-wrap-' + bj); if (endWrap) endWrap.style.display = sel.value === 'Completed' ? 'block' : 'none'; if (holdWrap) holdWrap.style.display = sel.value === 'On Hold' ? 'block' : 'none'; })(this, '${this.escapeJs(crew.baseJob)}')"
                           style="width: 100%; box-sizing: border-box; padding: 5px 8px; font-size: 12px; background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: 4px; color: var(--text-primary);">
                     <option value="Active" ${crew.status === 'Active' ? 'selected' : ''}>🟢 Active</option>
                     <option value="Pending Start" ${crew.status === 'Pending Start' ? 'selected' : ''}>🟡 Pending Start</option>
@@ -9581,6 +9607,18 @@ class SheetNavigator {
                     <option value="Telecom" ${crew.crewType === 'Telecom' ? 'selected' : ''}>📡 Telecom</option>
                   </select>
                 </div>
+              </div>
+
+              <div id="edit-crew-enddate-wrap-${this.escapeHtml(crew.baseJob)}" style="display: ${crew.status === 'Completed' ? 'block' : 'none'};">
+                <label style="font-size: 10.5px; font-weight: 700; color: #60a5fa; display: block; margin-bottom: 3px;">🏁 Completion Date (Actual End Date)</label>
+                <input type="date" id="edit-crew-enddate-${this.escapeHtml(crew.baseJob)}" value="${this.escapeHtml(this._toLocalIsoDate(crew.actualEndDate) || this._toLocalIsoDate(new Date()))}"
+                       style="width: 100%; box-sizing: border-box; padding: 5px 8px; font-size: 12px; background: var(--bg-primary); border: 1px solid rgba(96, 165, 250, 0.45); border-radius: 4px; color: var(--text-primary);">
+              </div>
+
+              <div id="edit-crew-holddate-wrap-${this.escapeHtml(crew.baseJob)}" style="display: ${crew.status === 'On Hold' ? 'block' : 'none'};">
+                <label style="font-size: 10.5px; font-weight: 700; color: #94a3b8; display: block; margin-bottom: 3px;">⏸️ Put On Hold Date</label>
+                <input type="date" id="edit-crew-holddate-${this.escapeHtml(crew.baseJob)}" value="${this.escapeHtml(this._toLocalIsoDate(crew.putOnHoldDate) || this._toLocalIsoDate(new Date()))}"
+                       style="width: 100%; box-sizing: border-box; padding: 5px 8px; font-size: 12px; background: var(--bg-primary); border: 1px solid rgba(148, 163, 184, 0.45); border-radius: 4px; color: var(--text-primary);">
               </div>
 
               <div>
@@ -11214,8 +11252,14 @@ class SheetNavigator {
     const notesEl = document.getElementById(`edit-crew-notes-${baseJob}`);
     const newNotes = notesEl ? notesEl.value.trim() : this._getJobTrackingNotes(jt);
     const todayFormatted = new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
+    const endDateInputVal = document.getElementById(`edit-crew-enddate-${baseJob}`)?.value || '';
+    const holdDateInputVal = document.getElementById(`edit-crew-holddate-${baseJob}`)?.value || '';
+    const statusLow = newStatus.toLowerCase();
+    const isCompletedStatus = statusLow === 'completed' || statusLow === 'closed';
+    const isOnHoldStatus = statusLow === 'on hold' || statusLow === 'hold' || statusLow === 'paused';
 
     const oldLoc = jt ? String(jt['Location'] || '').trim() : '';
+    let resolvedActualEndDate = '';
 
     if (jt) {
       jt['Location'] = newLoc;
@@ -11236,6 +11280,25 @@ class SheetNavigator {
       jt[notesHeader] = newNotes;
       jt['Notes'] = newNotes;
       jt['Last Updated'] = todayFormatted;
+
+      if (isCompletedStatus) {
+        resolvedActualEndDate = this._toUsDateStr(endDateInputVal) || this._toUsDateStr(jt['Actual End Date']) || todayFormatted;
+        jt['Actual End Date'] = resolvedActualEndDate;
+        jt['Put On Hold Date'] = '';
+        jt['Estimated Return'] = '';
+      } else if (isOnHoldStatus) {
+        jt['Put On Hold Date'] = this._toUsDateStr(holdDateInputVal) || this._toUsDateStr(jt['Put On Hold Date']) || todayFormatted;
+        jt['Actual End Date'] = '';
+      } else if (statusLow === 'active') {
+        if (!jt['Start Date']) jt['Start Date'] = todayFormatted;
+        jt['Put On Hold Date'] = '';
+        jt['Estimated Return'] = '';
+        jt['Actual End Date'] = '';
+      } else {
+        jt['Put On Hold Date'] = '';
+        jt['Estimated Return'] = '';
+        jt['Actual End Date'] = '';
+      }
 
       const jtRowIdx = jt._rowIdx || (jtTable.rows.indexOf(jt) + 2);
       if (jtTable.rawGrid && jtTable.rawGrid[jtRowIdx - 1]) {
@@ -11264,6 +11327,10 @@ class SheetNavigator {
           'Skip Sun': isSkipSun,
           'Skip Weekly Meeting': skipMtg,
           'Skip Monthly Checklist': skipChk,
+          'Start Date': jt['Start Date'] || '',
+          'Put On Hold Date': jt['Put On Hold Date'] || '',
+          'Estimated Return': jt['Estimated Return'] || '',
+          'Actual End Date': jt['Actual End Date'] || '',
           'Notes': newNotes,
           'Last Updated': todayFormatted
         }
@@ -11314,6 +11381,9 @@ class SheetNavigator {
         'Skip Sun': isSkipSun,
         'Skip Weekly Meeting': skipMtg,
         'Skip Monthly Checklist': skipChk,
+        'Start Date': statusLow === 'active' ? todayFormatted : '',
+        'Put On Hold Date': isOnHoldStatus ? (this._toUsDateStr(holdDateInputVal) || todayFormatted) : '',
+        'Actual End Date': isCompletedStatus ? (resolvedActualEndDate = this._toUsDateStr(endDateInputVal) || todayFormatted) : '',
         'Notes': newNotes,
         'Last Updated': todayFormatted
       };
@@ -11330,6 +11400,10 @@ class SheetNavigator {
         row: newJtRow._rowIdx,
         rowData: newJtRow
       });
+    }
+
+    if (isCompletedStatus && resolvedActualEndDate) {
+      await this.prunePostCompletionComplianceRows(baseJob, resolvedActualEndDate);
     }
 
     // If Location changed, cascade to primary members and their assigned equipment
@@ -18647,7 +18721,7 @@ class SheetNavigator {
       return;
     }
 
-    const today = new Date().toISOString().split('T')[0];
+    const today = this._toLocalIsoDate(new Date());
     const currentStatus = String(row['Status'] || 'Active').trim();
     const currentCrewType = String(row['Crew Type'] || 'Electric').trim();
     const loc = String(row['Location'] || '').trim();
@@ -18751,19 +18825,19 @@ class SheetNavigator {
           <div id="job-modal-dates-area" style="background: var(--bg-primary); border-radius: 8px; padding: 12px; margin-bottom: 16px; border: 1px solid var(--border-color);">
             <div id="field-on-hold" style="display: ${currentStatus === 'On Hold' ? 'block' : 'none'}; margin-bottom: 10px;">
               <label style="font-size: 11px; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 4px;">Put On Hold Date:</label>
-              <input type="date" id="input-hold-date" class="form-control" value="${row['Put On Hold Date'] || today}" style="width: 100%; padding: 6px 10px; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 4px;">
+              <input type="date" id="input-hold-date" class="form-control" value="${this._toLocalIsoDate(row['Put On Hold Date']) || today}" style="width: 100%; padding: 6px 10px; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 4px;">
               <label style="font-size: 11px; font-weight: 700; color: var(--text-muted); display: block; margin-top: 8px; margin-bottom: 4px;">Estimated Return Date:</label>
-              <input type="date" id="input-return-date" class="form-control" value="${row['Estimated Return'] || ''}" style="width: 100%; padding: 6px 10px; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 4px;">
+              <input type="date" id="input-return-date" class="form-control" value="${this._toLocalIsoDate(row['Estimated Return']) || ''}" style="width: 100%; padding: 6px 10px; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 4px;">
             </div>
 
             <div id="field-pending-start" style="display: ${currentStatus === 'Pending Start' ? 'block' : 'none'}; margin-bottom: 10px;">
               <label style="font-size: 11px; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 4px;">Estimated Start Date:</label>
-              <input type="date" id="input-start-date" class="form-control" value="${row['Start Date'] || today}" style="width: 100%; padding: 6px 10px; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 4px;">
+              <input type="date" id="input-start-date" class="form-control" value="${this._toLocalIsoDate(row['Start Date']) || today}" style="width: 100%; padding: 6px 10px; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 4px;">
             </div>
 
             <div id="field-completed" style="display: ${currentStatus === 'Completed' ? 'block' : 'none'}; margin-bottom: 10px;">
               <label style="font-size: 11px; font-weight: 700; color: var(--text-muted); display: block; margin-bottom: 4px;">Actual End Date:</label>
-              <input type="date" id="input-end-date" class="form-control" value="${row['Actual End Date'] || today}" style="width: 100%; padding: 6px 10px; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 4px;">
+              <input type="date" id="input-end-date" class="form-control" value="${this._toLocalIsoDate(row['Actual End Date']) || today}" style="width: 100%; padding: 6px 10px; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 4px;">
             </div>
 
             <div id="field-active-notice" style="display: ${currentStatus === 'Active' ? 'block' : 'none'}; font-size: 12px; color: #10b981;">
@@ -18876,16 +18950,16 @@ class SheetNavigator {
     row['Last Updated'] = todayFormatted;
 
     if (targetStatus === 'On Hold') {
-      row['Put On Hold Date'] = document.getElementById('input-hold-date').value || todayFormatted;
-      row['Estimated Return'] = document.getElementById('input-return-date').value || '';
+      row['Put On Hold Date'] = this._toUsDateStr(document.getElementById('input-hold-date').value) || todayFormatted;
+      row['Estimated Return'] = this._toUsDateStr(document.getElementById('input-return-date').value) || '';
       row['Actual End Date'] = '';
     } else if (targetStatus === 'Pending Start') {
-      row['Start Date'] = document.getElementById('input-start-date').value || '';
+      row['Start Date'] = this._toUsDateStr(document.getElementById('input-start-date').value) || '';
       row['Put On Hold Date'] = '';
       row['Estimated Return'] = '';
       row['Actual End Date'] = '';
     } else if (targetStatus === 'Completed') {
-      row['Actual End Date'] = document.getElementById('input-end-date').value || todayFormatted;
+      row['Actual End Date'] = this._toUsDateStr(document.getElementById('input-end-date').value) || todayFormatted;
       row['Put On Hold Date'] = '';
       row['Estimated Return'] = '';
     } else if (targetStatus === 'Active') {
@@ -18938,6 +19012,10 @@ class SheetNavigator {
 
     await this.recordJobTrackingScheduleChange(row, row._rowIdx, 'lifecycle_modal');
 
+    if (targetStatus === 'Completed' && row['Actual End Date']) {
+      await this.prunePostCompletionComplianceRows(jobNum, row['Actual End Date']);
+    }
+
     if (typeof this.db.setSnapshot === 'function') {
       await this.db.setSnapshot(this.db.snapshot);
     }
@@ -18946,6 +19024,119 @@ class SheetNavigator {
     if (modal) modal.remove();
 
     this.renderCurrentSheet();
+  }
+
+  _parseLocalNoonDate(val) {
+    if (!val) return null;
+    if (val instanceof Date) {
+      return isNaN(val.getTime()) ? null : new Date(val.getFullYear(), val.getMonth(), val.getDate(), 12, 0, 0);
+    }
+    const s = String(val).trim();
+    if (!s) return null;
+    const mIso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (mIso) {
+      return new Date(parseInt(mIso[1], 10), parseInt(mIso[2], 10) - 1, parseInt(mIso[3], 10), 12, 0, 0);
+    }
+    const mUs = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
+    if (mUs) {
+      let y = parseInt(mUs[3], 10);
+      if (y < 100) y += 2000;
+      return new Date(y, parseInt(mUs[1], 10) - 1, parseInt(mUs[2], 10), 12, 0, 0);
+    }
+    const d = new Date(s);
+    return isNaN(d.getTime()) ? null : new Date(d.getFullYear(), d.getMonth(), d.getDate(), 12, 0, 0);
+  }
+
+  _toLocalIsoDate(val) {
+    const d = this._parseLocalNoonDate(val);
+    if (!d) return '';
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  }
+
+  _toUsDateStr(val) {
+    const d = this._parseLocalNoonDate(val);
+    if (!d) return '';
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    const y = d.getFullYear();
+    return `${m}/${day}/${y}`;
+  }
+
+  /**
+   * Removes un-submitted Safety Compliance rows for weeks starting strictly after a job's completion date,
+   * and queues exact (Week Start + Job Number) DELETE_ROW mutations for Google Sheets sync.
+   */
+  async prunePostCompletionComplianceRows(jobNum, actualEndDateStr) {
+    const endDate = this._parseLocalNoonDate(actualEndDateStr);
+    if (!jobNum || !endDate || !this.db) return 0;
+    const scTable = this.db.getTable('safety_compliance');
+    if (!scTable || !Array.isArray(scTable.rows) || scTable.rows.length === 0) return 0;
+
+    const cleanJob = String(jobNum).trim().toLowerCase();
+    const baseJob = cleanJob.replace(/\.\d+.*$/, '').trim();
+    const toRemove = [];
+
+    scTable.rows.forEach((r, idx) => {
+      const rJob = String(r['Job Number'] || r['Crew'] || '').trim();
+      const rJobLow = rJob.toLowerCase();
+      if (rJobLow !== cleanJob && rJobLow.replace(/\.\d+.*$/, '').trim() !== baseJob) return;
+      if (String(r['Status'] || '').trim() === 'Resolved') return;
+
+      const weekStartStr = String(r['Week Start'] || r['Week'] || '').trim();
+      const weekStart = this._parseLocalNoonDate(weekStartStr);
+      if (!weekStart || weekStart <= endDate) return;
+
+      const hasSubmission = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Weekly Meeting', 'Monthly Checklist']
+        .some(col => String(r[col] || '').trim().startsWith('✅'));
+      if (hasSubmission) return;
+
+      toRemove.push({
+        rowObj: r,
+        rowIdx: r._rowIdx || (idx + 2),
+        weekStartStr: this._toUsDateStr(weekStart) || weekStartStr,
+        jobNumber: rJob
+      });
+    });
+
+    if (toRemove.length === 0) return 0;
+
+    const removeSet = new Set(toRemove.map(x => x.rowObj));
+    scTable.rows = scTable.rows.filter(r => !removeSet.has(r));
+    scTable.rows.forEach((r, idx) => { r._rowIdx = idx + 2; });
+    if (Array.isArray(scTable.headers) && scTable.headers.length > 0) {
+      scTable.rawGrid = [
+        scTable.headers,
+        ...scTable.rows.map(r => scTable.headers.map(h => r[h] !== undefined && r[h] !== null ? String(r[h]) : ''))
+      ];
+    }
+    scTable.rowCount = scTable.rows.length;
+
+    // Queue deletions descending by row index with exact Date + Item match (empty itemIdentifier prevents matching earlier weeks)
+    toRemove.sort((a, b) => b.rowIdx - a.rowIdx);
+    for (const item of toRemove) {
+      await this.db.addMutation({
+        action: 'DELETE_ROW',
+        sheetName: scTable.name || 'Safety Compliance',
+        tableKey: 'safety_compliance',
+        itemIdentifier: '',
+        row: item.rowIdx,
+        rowData: {
+          'Date': item.weekStartStr,
+          'Item': item.jobNumber
+        }
+      });
+    }
+
+    if (typeof this.db.markTableDirty === 'function') {
+      this.db.markTableDirty('safety_compliance');
+    }
+    if (typeof this.db.schedulePersistSnapshot === 'function') {
+      this.db.schedulePersistSnapshot(this.db.snapshot, 200);
+    }
+    return toRemove.length;
   }
 
   async deleteJobTrackingRow(jobNum) {

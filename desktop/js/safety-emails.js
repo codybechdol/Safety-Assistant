@@ -1382,34 +1382,62 @@ class SafetyEmailsEngine {
       scTable.headers = ["Week Start", "Job Number", "Foreman", "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Weekly Meeting", "Monthly Checklist", "Status", "Updated"];
     }
 
+    const parseWeekMs = (wStr) => {
+      const s = String(wStr || '').trim();
+      if (!s) return NaN;
+      const parts = s.split(/[-/]/);
+      if (parts.length === 3) {
+        let y, m, d;
+        if (parts[0].length === 4) {
+          y = parseInt(parts[0], 10); m = parseInt(parts[1], 10); d = parseInt(parts[2], 10);
+        } else {
+          m = parseInt(parts[0], 10); d = parseInt(parts[1], 10); y = parseInt(parts[2], 10);
+          if (y < 100) y += 2000;
+        }
+        if (!isNaN(y) && !isNaN(m) && !isNaN(d)) {
+          return new Date(y, m - 1, d, 12, 0, 0).getTime();
+        }
+      }
+      return new Date(s).getTime();
+    };
+
+    const isSameWeekStr = (w1, w2) => {
+      if (w1 === w2) return true;
+      const t1 = parseWeekMs(w1);
+      const t2 = parseWeekMs(w2);
+      return !isNaN(t1) && !isNaN(t2) && Math.abs(t1 - t2) <= 86400000 * 2;
+    };
+
+    // Track which weeks and jobs were authoritatively returned so stale deleted rows get pruned
+    const refreshedWeeks = [];
+    const returnedJobsByWeek = [];
+
     updatedRows.forEach(newRow => {
       const nwStr = String(newRow['Week Start'] || '').trim();
       const njStr = String(newRow['Job Number'] || '').trim();
+      if (nwStr) {
+        let wkIdx = refreshedWeeks.findIndex(w => isSameWeekStr(w, nwStr));
+        if (wkIdx === -1) {
+          wkIdx = refreshedWeeks.length;
+          refreshedWeeks.push(nwStr);
+          returnedJobsByWeek.push(new Set());
+        }
+        if (njStr) returnedJobsByWeek[wkIdx].add(njStr.toLowerCase());
+      }
+
       let matched = false;
       for (let r = 0; r < scTable.rows.length; r++) {
         const row = scTable.rows[r];
         const rwStr = String(row['Week Start'] || '').trim();
         const rjStr = String(row['Job Number'] || '').trim();
         
-        // Match job number
-        if (rjStr === njStr) {
-          // Check week start match (exact string or within 2 calendar days to handle timezone offset)
-          let isSameWeek = (rwStr === nwStr);
-          if (!isSameWeek && rwStr && nwStr) {
-            const t1 = new Date(rwStr).getTime();
-            const t2 = new Date(nwStr).getTime();
-            if (!isNaN(t1) && !isNaN(t2) && Math.abs(t1 - t2) <= 86400000 * 2) {
-              isSameWeek = true;
-            }
-          }
-
-          if (isSameWeek) {
-            // Keep the grid's canonical Week Start so UI filters and tabs match 100%
-            newRow['Week Start'] = rwStr;
-            Object.assign(row, newRow);
-            matched = true;
-            break;
-          }
+        // Match job number and week start (exact string or within 2 calendar days for timezone offset)
+        if (rjStr === njStr && isSameWeekStr(rwStr, nwStr)) {
+          // Keep the grid's canonical Week Start so UI filters and tabs match 100%
+          newRow['Week Start'] = rwStr;
+          Object.assign(row, newRow);
+          matched = true;
+          break;
         }
       }
       if (!matched) {
@@ -1417,6 +1445,21 @@ class SafetyEmailsEngine {
         scTable.rows.push(newRow);
       }
     });
+
+    // Prune stale local rows for any recalculated week that were removed on the server
+    // (e.g. completed jobs whose end date preceded that week), preserving manually Resolved rows
+    if (refreshedWeeks.length > 0) {
+      scTable.rows = scTable.rows.filter(row => {
+        const rwStr = String(row['Week Start'] || '').trim();
+        const rjStr = String(row['Job Number'] || '').trim();
+        const rStat = String(row['Status'] || '').trim();
+        if (!rwStr || !rjStr || rStat === 'Resolved') return true;
+        const wkIdx = refreshedWeeks.findIndex(w => isSameWeekStr(w, rwStr));
+        if (wkIdx === -1) return true;
+        return returnedJobsByWeek[wkIdx].has(rjStr.toLowerCase());
+      });
+      scTable.rows.forEach((r, idx) => { r._rowIdx = idx + 2; });
+    }
 
     // Rebuild rawGrid so grid renderers have matching data
     scTable.rawGrid = [

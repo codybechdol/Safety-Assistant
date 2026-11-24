@@ -1046,6 +1046,39 @@ class CrewPlanningEngine {
     return s === 'completed' || s === 'closed';
   }
 
+  _parseLocalNoon(val) {
+    if (!val) return null;
+    if (val instanceof Date) {
+      return isNaN(val.getTime()) ? null : new Date(val.getFullYear(), val.getMonth(), val.getDate(), 12, 0, 0);
+    }
+    const s = String(val).trim();
+    if (!s) return null;
+    const mIso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (mIso) {
+      return new Date(parseInt(mIso[1], 10), parseInt(mIso[2], 10) - 1, parseInt(mIso[3], 10), 12, 0, 0);
+    }
+    const mUs = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
+    if (mUs) {
+      let y = parseInt(mUs[3], 10);
+      if (y < 100) y += 2000;
+      return new Date(y, parseInt(mUs[1], 10) - 1, parseInt(mUs[2], 10), 12, 0, 0);
+    }
+    const d = new Date(s);
+    return isNaN(d.getTime()) ? null : new Date(d.getFullYear(), d.getMonth(), d.getDate(), 12, 0, 0);
+  }
+
+  _toIsoDate(val) {
+    const d = this._parseLocalNoon(val);
+    if (!d) return '';
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+
+  _toUsDate(val) {
+    const d = this._parseLocalNoon(val);
+    if (!d) return '';
+    return `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}/${d.getFullYear()}`;
+  }
+
   isCompletedCrewHidden(crew, jtRows = null) {
     if (!crew) return true;
     const hasMembers = Array.isArray(crew.members) && crew.members.length > 0;
@@ -7158,9 +7191,34 @@ class CrewPlanningEngine {
             jtRow['Crew Type'] = finalType;
             updated['Crew Type'] = finalType;
           }
-          if (crew.status && jtRow['Status'] !== crew.status) {
+          const statusChanged = Boolean(crew.status && jtRow['Status'] !== crew.status);
+          if (statusChanged) {
             jtRow['Status'] = crew.status;
             updated['Status'] = crew.status;
+          }
+          const stLow = String(crew.status || jtRow['Status'] || '').trim().toLowerCase();
+          const isCompSt = stLow === 'completed' || stLow === 'closed';
+          const isHoldSt = stLow === 'on hold' || stLow === 'hold' || stLow === 'paused';
+          if (isCompSt && (statusChanged || !jtRow['Actual End Date'] || crew.actualEndDate)) {
+            const endUs = this._toUsDate(crew.actualEndDate) || this._toUsDate(jtRow['Actual End Date']) || todayFormatted;
+            if (jtRow['Actual End Date'] !== endUs) {
+              jtRow['Actual End Date'] = endUs;
+              updated['Actual End Date'] = endUs;
+            }
+            if (jtRow['Put On Hold Date']) { jtRow['Put On Hold Date'] = ''; updated['Put On Hold Date'] = ''; }
+            if (jtRow['Estimated Return']) { jtRow['Estimated Return'] = ''; updated['Estimated Return'] = ''; }
+          } else if (isHoldSt && (statusChanged || !jtRow['Put On Hold Date'] || crew.putOnHoldDate)) {
+            const holdUs = this._toUsDate(crew.putOnHoldDate) || this._toUsDate(jtRow['Put On Hold Date']) || todayFormatted;
+            if (jtRow['Put On Hold Date'] !== holdUs) {
+              jtRow['Put On Hold Date'] = holdUs;
+              updated['Put On Hold Date'] = holdUs;
+            }
+            if (jtRow['Actual End Date']) { jtRow['Actual End Date'] = ''; updated['Actual End Date'] = ''; }
+          } else if (statusChanged && stLow === 'active') {
+            if (!jtRow['Start Date']) { jtRow['Start Date'] = todayFormatted; updated['Start Date'] = todayFormatted; }
+            if (jtRow['Actual End Date']) { jtRow['Actual End Date'] = ''; updated['Actual End Date'] = ''; }
+            if (jtRow['Put On Hold Date']) { jtRow['Put On Hold Date'] = ''; updated['Put On Hold Date'] = ''; }
+            if (jtRow['Estimated Return']) { jtRow['Estimated Return'] = ''; updated['Estimated Return'] = ''; }
           }
           if (crew.foreman !== undefined && String(jtRow['Foreman'] || '').trim() !== String(crew.foreman || '').trim()) {
             const nextForeman = String(crew.foreman || '').trim();
@@ -7207,6 +7265,8 @@ class CrewPlanningEngine {
             }
           }
           if (Object.keys(updated).length > 0) {
+            jtRow['Last Updated'] = todayFormatted;
+            updated['Last Updated'] = todayFormatted;
             syncRowToRawGrid(jtTable, jtRow);
             await this.db.addMutation({
               action: 'UPDATE_ROW',
@@ -7218,10 +7278,16 @@ class CrewPlanningEngine {
             });
           }
 
+          if (isCompSt && jtRow['Actual End Date'] && window.sheetNavigator && typeof window.sheetNavigator.prunePostCompletionComplianceRows === 'function') {
+            await window.sheetNavigator.prunePostCompletionComplianceRows(crew.jobNumber, jtRow['Actual End Date']);
+          }
+
           // Clean up any other duplicate rows in job_tracking matching crew.jobNumber (descending _rowIdx, without pre-splicing)
           await this.cleanupDuplicateJobTrackingRows(jtTable, jtRow, crew.jobNumber);
         } else if (jtTable) {
           // New crew created in Crew Planning not yet in Job Tracking: Add it to Job Tracking!
+          const newStatusVal = crew.status || 'Active';
+          const newStLow = String(newStatusVal).trim().toLowerCase();
           const newJtRow = {
             'Job Number': crew.jobNumber,
             'Job Name': crew._clearedJobName ? '' : (crew.jobName || crew.jobNumber),
@@ -7229,7 +7295,11 @@ class CrewPlanningEngine {
             'Foreman': crew.foreman || '',
             'Crew Type': this.detectCrewType(crew.jobNumber, crew.jobName, crew.location, crew.crewType),
             [schedCol]: crew.schedule || 'Mon-Thu (4 10s)',
-            'Status': crew.status || 'Active',
+            'Status': newStatusVal,
+            'Start Date': newStLow === 'active' ? todayFormatted : '',
+            'Put On Hold Date': (newStLow === 'on hold' || newStLow === 'hold' || newStLow === 'paused') ? (this._toUsDate(crew.putOnHoldDate) || todayFormatted) : '',
+            'Actual End Date': (newStLow === 'completed' || newStLow === 'closed') ? (this._toUsDate(crew.actualEndDate) || todayFormatted) : '',
+            'Last Updated': todayFormatted,
             'Skip Sun': crewSkips.isSkipSun !== undefined ? Boolean(crewSkips.isSkipSun) : true,
             'Skip Mon': crewSkips.isSkipMon !== undefined ? Boolean(crewSkips.isSkipMon) : false,
             'Skip Tue': crewSkips.isSkipTue !== undefined ? Boolean(crewSkips.isSkipTue) : false,
@@ -8664,6 +8734,11 @@ class CrewPlanningEngine {
     const currentForeman = crew.foreman !== undefined ? String(crew.foreman || '') : String((jtRow && jtRow['Foreman']) || '');
     const currentSchedule = crew.schedule || (jtRow && (jtRow['Work Schedule'] || jtRow['Schedule'])) || 'Mon-Thu (4 10s)';
     const currentNotes = crew.notes !== undefined ? String(crew.notes || '') : String((jtRow && jtRow['Notes']) || '');
+    const todayIso = this._toIsoDate(new Date());
+    const currentActualEndIso = this._toIsoDate(crew.actualEndDate || (jtRow && jtRow['Actual End Date'])) || todayIso;
+    const currentHoldIso = this._toIsoDate(crew.putOnHoldDate || (jtRow && jtRow['Put On Hold Date'])) || todayIso;
+    const isInitialCompleted = this.isCompletedStatus(currentStatus);
+    const isInitialOnHold = ['on hold', 'hold', 'paused'].includes(String(currentStatus).trim().toLowerCase());
 
     const sLower = currentSchedule.toLowerCase();
     let initialPreset = 'Custom';
@@ -8771,6 +8846,26 @@ class CrewPlanningEngine {
             </div>
           </div>
 
+          <!-- Status Lifecycle Date (Completed / On Hold) -->
+          <div id="planned-edit-end-date-wrap" style="display: ${isInitialCompleted ? 'block' : 'none'}; background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.35); border-radius: 6px; padding: 10px 12px;">
+            <label style="display: block; font-weight: 700; color: #93c5fd; margin-bottom: 5px; font-size: 11px;">
+              🏁 Completion Date (Actual End Date):
+            </label>
+            <input type="date" id="planned-edit-end-date" value="${this.escapeHtml(currentActualEndIso)}"
+                   style="width: 100%; box-sizing: border-box; padding: 7px 10px; background: #0f172a; border: 1px solid rgba(96, 165, 250, 0.45); border-radius: 6px; color: #ffffff; font-size: 12px;">
+            <div style="font-size: 10.5px; color: #94a3b8; margin-top: 4px;">
+              Saved to Job Tracking so Safety Compliance and Training Tracking stop after this date.
+            </div>
+          </div>
+
+          <div id="planned-edit-hold-date-wrap" style="display: ${isInitialOnHold ? 'block' : 'none'}; background: rgba(100, 116, 139, 0.14); border: 1px solid rgba(148, 163, 184, 0.35); border-radius: 6px; padding: 10px 12px;">
+            <label style="display: block; font-weight: 700; color: #cbd5e1; margin-bottom: 5px; font-size: 11px;">
+              ⏸️ Put On Hold Date:
+            </label>
+            <input type="date" id="planned-edit-hold-date" value="${this.escapeHtml(currentHoldIso)}"
+                   style="width: 100%; box-sizing: border-box; padding: 7px 10px; background: #0f172a; border: 1px solid rgba(148, 163, 184, 0.45); border-radius: 6px; color: #ffffff; font-size: 12px;">
+          </div>
+
           <!-- Schedule Preset & Label -->
           <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
             <div>
@@ -8857,6 +8952,15 @@ class CrewPlanningEngine {
 
     document.body.appendChild(overlay);
 
+    const statusSelect = overlay.querySelector('#planned-edit-status');
+    const endDateWrap = overlay.querySelector('#planned-edit-end-date-wrap');
+    const holdDateWrap = overlay.querySelector('#planned-edit-hold-date-wrap');
+    statusSelect?.addEventListener('change', () => {
+      const low = String(statusSelect.value || '').trim().toLowerCase();
+      if (endDateWrap) endDateWrap.style.display = (low === 'completed' || low === 'closed') ? 'block' : 'none';
+      if (holdDateWrap) holdDateWrap.style.display = (low === 'on hold' || low === 'hold' || low === 'paused') ? 'block' : 'none';
+    });
+
     const presetSelect = overlay.querySelector('#planned-edit-sched-preset');
     const labelInput = overlay.querySelector('#planned-edit-sched-label');
     const chkMon = overlay.querySelector('#planned-day-mon');
@@ -8935,9 +9039,17 @@ class CrewPlanningEngine {
       const newForeman = overlay.querySelector('#planned-edit-foreman')?.value?.trim() || '';
       const newCrewType = overlay.querySelector('#planned-edit-crew-type')?.value || 'Electric';
       const newStatus = overlay.querySelector('#planned-edit-status')?.value || 'Active';
+      const newEndDateRaw = overlay.querySelector('#planned-edit-end-date')?.value || '';
+      const newHoldDateRaw = overlay.querySelector('#planned-edit-hold-date')?.value || '';
       const newSchedule = overlay.querySelector('#planned-edit-sched-label')?.value?.trim() || 'Mon-Thu (4 10s)';
       const newNotes = overlay.querySelector('#planned-edit-notes')?.value?.trim() || '';
       const writeJt = overlay.querySelector('#planned-edit-write-jt')?.checked;
+      const todayUs = this._toUsDate(new Date());
+      const newStatusLow = String(newStatus).trim().toLowerCase();
+      const isNewCompleted = this.isCompletedStatus(newStatus);
+      const isNewOnHold = ['on hold', 'hold', 'paused'].includes(newStatusLow);
+      const resolvedEndUs = isNewCompleted ? (this._toUsDate(newEndDateRaw) || this._toUsDate(crew.actualEndDate) || this._toUsDate(jtRow?.['Actual End Date']) || todayUs) : '';
+      const resolvedHoldUs = isNewOnHold ? (this._toUsDate(newHoldDateRaw) || this._toUsDate(crew.putOnHoldDate) || this._toUsDate(jtRow?.['Put On Hold Date']) || todayUs) : '';
 
       if (!newJobName && (crew.jobName || jtRow?.['Job Name'])) {
         crew._clearedJobName = true;
@@ -8949,6 +9061,8 @@ class CrewPlanningEngine {
       crew.foreman = newForeman;
       crew.crewType = newCrewType;
       crew.status = newStatus;
+      crew.actualEndDate = resolvedEndUs;
+      crew.putOnHoldDate = resolvedHoldUs;
       crew.schedule = newSchedule;
       crew.notes = newNotes;
       crew.isSkipMon = !chkMon?.checked;
@@ -9019,8 +9133,26 @@ class CrewPlanningEngine {
             'Skip Fri': crew.isSkipFri,
             'Skip Sat': crew.isSkipSat,
             'Skip Sun': crew.isSkipSun,
-            'Notes': newNotes
+            'Notes': newNotes,
+            'Last Updated': todayUs
           };
+          if (isNewCompleted) {
+            updated['Actual End Date'] = resolvedEndUs;
+            updated['Put On Hold Date'] = '';
+            updated['Estimated Return'] = '';
+          } else if (isNewOnHold) {
+            updated['Put On Hold Date'] = resolvedHoldUs;
+            updated['Actual End Date'] = '';
+          } else if (newStatusLow === 'active') {
+            if (!row || !row['Start Date']) updated['Start Date'] = todayUs;
+            updated['Actual End Date'] = '';
+            updated['Put On Hold Date'] = '';
+            updated['Estimated Return'] = '';
+          } else {
+            updated['Actual End Date'] = '';
+            updated['Put On Hold Date'] = '';
+            updated['Estimated Return'] = '';
+          }
           if (Array.isArray(jtTbl.headers) && jtTbl.headers.includes('Crew Size')) {
             updated['Crew Size'] = (crew.members || []).length;
           }
@@ -9055,6 +9187,9 @@ class CrewPlanningEngine {
               itemIdentifier: jobNumber,
               rowData: newRow
             });
+          }
+          if (isNewCompleted && resolvedEndUs && window.sheetNavigator && typeof window.sheetNavigator.prunePostCompletionComplianceRows === 'function') {
+            await window.sheetNavigator.prunePostCompletionComplianceRows(jobNumber, resolvedEndUs);
           }
           if (typeof this.db.schedulePersistSnapshot === 'function') {
             this.db.schedulePersistSnapshot(this.db.snapshot, 300);
