@@ -1501,16 +1501,16 @@ END $$;`;
     const isShopPool = Boolean(options && options.isShopPool);
     const diffs = [];
     const check = (label, colName, repVal, appVal, normalizer, sheetValFormatter) => {
-      const rStr = String(repVal || '').trim();
+      const rStr = (repVal === null || repVal === undefined) ? '' : String(repVal).trim();
       if (!rStr) return; // Don't flag blank optional fields as discrepancy
-      const aStr = String(appVal || '').trim();
+      const aStr = (appVal === null || appVal === undefined) ? '' : String(appVal).trim();
       const rn = normalizer ? normalizer(rStr) : rStr.toLowerCase();
       const an = normalizer ? normalizer(aStr) : aStr.toLowerCase();
       if (rn !== an) {
         diffs.push({
           label,
           colName,
-          appValue: aStr || '(blank)',
+          appValue: aStr !== '' ? aStr : '(blank)',
           reportedValue: sheetValFormatter ? sheetValFormatter(rStr) : rStr,
           rawReported: rStr
         });
@@ -2076,7 +2076,7 @@ END $$;`;
       newRow[item.catKey === 'gloves' ? 'Glove' : 'Sleeve'] = r.itemNum;
       newRow['ESL ID'] = r.eslId || '';
       newRow['Size'] = r.size || '';
-      newRow['Class'] = r.itemClass || '2';
+      newRow['Class'] = (r.itemClass !== undefined && r.itemClass !== null && String(r.itemClass).trim() !== '') ? String(r.itemClass).trim() : '2';
       newRow['Test Date'] = testDateMdy;
     } else if (item.catKey === 'blankets') {
       newRow['Blanket'] = r.itemNum;
