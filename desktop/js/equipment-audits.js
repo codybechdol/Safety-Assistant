@@ -1930,7 +1930,23 @@ END $$;`;
     this.render();
   }
 
-  async updateTableCellByColName(catKey, appRow, appRowIdx, colName, newValue) {
+  getLocalTodayMdy() {
+    const now = new Date();
+    const mm = String(now.getMonth() + 1).padStart(2, '0');
+    const dd = String(now.getDate()).padStart(2, '0');
+    const yyyy = now.getFullYear();
+    return `${mm}/${dd}/${yyyy}`;
+  }
+
+  getLocalTodayIso() {
+    const now = new Date();
+    const mm = String(now.getMonth() + 1).padStart(2, '0');
+    const dd = String(now.getDate()).padStart(2, '0');
+    const yyyy = now.getFullYear();
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  async updateTableCellByColName(catKey, appRow, appRowIdx, colName, newValue, options = {}) {
     const table = this.db.getTable(catKey);
     if (!table || !Array.isArray(table.headers)) return false;
     const colIdx = table.headers.findIndex((h) => String(h || '').trim().toLowerCase() === String(colName).trim().toLowerCase());
@@ -1949,7 +1965,8 @@ END $$;`;
       colName: table.headers[colIdx],
       oldValue: oldVal,
       value: newValue,
-      itemNum: this.getRowPrimaryId(catKey, appRow, table.headers)
+      itemNum: this.getRowPrimaryId(catKey, appRow, table.headers),
+      skipHistory: options.skipHistory === true
     });
     return true;
   }
@@ -1957,8 +1974,19 @@ END $$;`;
   async applyDiscrepancyUpdate(key) {
     const item = this.findReconcileItem(key);
     if (!item || !item.appRow) return;
+    const hasAssignedDiff = item.diffs.some((d) => d.colName === 'Assigned To');
+    const todayMdy = this.getLocalTodayMdy();
+    if (hasAssignedDiff) {
+      await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Date Assigned', todayMdy, { skipHistory: true });
+    }
     for (const d of item.diffs) {
-      await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, d.colName, d.reportedValue);
+      await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, d.colName, d.reportedValue, { skipHistory: true });
+    }
+    if (hasAssignedDiff && typeof this.db.recordItemHistoryEvent === 'function') {
+      const table = this.db.getTable(item.catKey);
+      if (table) {
+        await this.db.recordItemHistoryEvent(table.name, item.appRow, 'Reassigned via Equipment Audit');
+      }
     }
     this.toast(`✅ Updated ${item.diffs.length} field(s) on ${item.catLabel} #${item.itemNum}`, 'success');
     await this.recordAppliedAction(key, `Updated ${item.diffs.map((d) => d.label).join(', ')}`);
@@ -1972,22 +2000,36 @@ END $$;`;
     const targetStatus = shopPool ? shopPool.canonicalStatus : 'Assigned';
     const assignee = shopPool ? shopPool.canonicalAssignedTo : (item.reported?.employeeName || req.foreman_name);
     const targetLoc = shopPool ? shopPool.location : (req.location || '');
-    const todayMdy = this.toSheetDate(new Date().toISOString().slice(0, 10));
+    const todayMdy = this.getLocalTodayMdy();
 
-    await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Status', targetStatus);
-    await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Assigned To', assignee);
-    if (targetLoc) {
-      await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Location', targetLoc);
-    }
-    if (!shopPool) {
-      await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Date Assigned', todayMdy);
-    }
+    // 1. Update Date Assigned FIRST (with skipHistory: true) so history event gets today's date, never the old date
+    await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Date Assigned', todayMdy, { skipHistory: true });
 
+    // 2. Apply any changed spec/date fields (e.g. Test Date, Calibration Date) with skipHistory: true
     for (const d of item.diffs) {
       if (d.colName !== 'Assigned To') {
-        await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, d.colName, d.reportedValue);
+        await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, d.colName, d.reportedValue, { skipHistory: true });
       }
     }
+
+    // 3. Apply Location, Status, and Assigned To atomically (skipHistory: true on each intermediate cell)
+    if (targetLoc) {
+      await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Location', targetLoc, { skipHistory: true });
+    }
+    await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Status', targetStatus, { skipHistory: true });
+    await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Assigned To', assignee, { skipHistory: true });
+
+    // 4. Record ONE clean history transition now that Date Assigned, Location, Status, and Assigned To are all final
+    if (typeof this.db.recordItemHistoryEvent === 'function') {
+      const table = this.db.getTable(item.catKey);
+      if (table) {
+        const histReason = shopPool
+          ? `Found in ${shopPool.name} (Equipment Audit)`
+          : `Reassigned via Equipment Audit (${req.foreman_name})`;
+        await this.db.recordItemHistoryEvent(table.name, item.appRow, histReason);
+      }
+    }
+
     const actionText = shopPool ? `Moved to ${shopPool.name}` : `Reassigned to ${assignee}`;
     this.toast(`🔄 ${actionText} (${item.catLabel} #${item.itemNum})`, 'success');
     await this.recordAppliedAction(key, actionText);
@@ -2002,8 +2044,8 @@ END $$;`;
     const targetStatus = shopPool ? shopPool.canonicalStatus : 'Assigned';
     const assignee = shopPool ? shopPool.canonicalAssignedTo : (r.employeeName || req.foreman_name);
     const loc = shopPool ? shopPool.location : (req.location || 'Helena');
-    const todayIso = new Date().toISOString().slice(0, 10);
-    const todayMdy = this.toSheetDate(todayIso);
+    const todayIso = this.getLocalTodayIso();
+    const todayMdy = this.getLocalTodayMdy();
 
     const testDateMdy = this.toSheetDate(r.testDate);
     const calDateMdy = this.toSheetDate(r.calibrationDate);
@@ -2011,7 +2053,7 @@ END $$;`;
     const batExpMdy = this.toSheetDate(r.batteryExpiration);
 
     const changeOutDate = (window.inventoryManager && typeof window.inventoryManager.calculateChangeOutDate === 'function')
-      ? window.inventoryManager.calculateChangeOutDate(shopPool ? (r.testDate || r.calibrationDate || r.padExpiration || todayIso) : todayIso, loc, assignee, item.catKey, {
+      ? window.inventoryManager.calculateChangeOutDate(todayIso, loc, assignee, item.catKey, {
         testDate: r.testDate,
         calibrationDate: r.calibrationDate,
         padExpiration: r.padExpiration,
@@ -2021,7 +2063,7 @@ END $$;`;
 
     const newRow = {
       'Item #': r.itemNum,
-      'Date Assigned': shopPool ? (testDateMdy || calDateMdy || todayMdy) : todayMdy,
+      'Date Assigned': todayMdy,
       'Location': loc,
       'Status': targetStatus,
       'Assigned To': assignee,
@@ -2082,9 +2124,15 @@ END $$;`;
     const item = this.findReconcileItem(key);
     const req = this._lastReconciliation?.req;
     if (!item || !item.appRow || !req) return;
-    const todayMdy = this.toSheetDate(new Date().toISOString().slice(0, 10));
-    await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Status', 'Lost');
-    await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Notes', `LOST-LOCATE (Missing on ${req.foreman_name} audit ${todayMdy})`);
+    const todayMdy = this.getLocalTodayMdy();
+    const noteText = `LOST-LOCATE (Missing on ${req.foreman_name} audit ${todayMdy})`;
+    await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Date Assigned', todayMdy, { skipHistory: true });
+    await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Status', 'Lost', { skipHistory: true });
+    await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Notes', noteText, { skipHistory: true });
+    if (typeof this.db.recordItemHistoryEvent === 'function') {
+      const table = this.db.getTable(item.catKey);
+      if (table) await this.db.recordItemHistoryEvent(table.name, item.appRow, noteText);
+    }
     this.toast(`⚠️ Flagged ${item.catLabel} #${item.itemNum} as Lost / Locate`, 'warning');
     await this.recordAppliedAction(key, 'Flagged Lost / Locate');
   }
@@ -2092,9 +2140,15 @@ END $$;`;
   async applyReturnToShelf(key) {
     const item = this.findReconcileItem(key);
     if (!item || !item.appRow) return;
-    await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Status', 'On Shelf');
-    await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Assigned To', 'On Shelf');
-    await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Location', 'Helena');
+    const todayMdy = this.getLocalTodayMdy();
+    await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Date Assigned', todayMdy, { skipHistory: true });
+    await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Location', 'Helena', { skipHistory: true });
+    await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Status', 'On Shelf', { skipHistory: true });
+    await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Assigned To', 'On Shelf', { skipHistory: true });
+    if (typeof this.db.recordItemHistoryEvent === 'function') {
+      const table = this.db.getTable(item.catKey);
+      if (table) await this.db.recordItemHistoryEvent(table.name, item.appRow, 'Returned to On Shelf (Equipment Audit)');
+    }
     this.toast(`📦 Returned ${item.catLabel} #${item.itemNum} to On Shelf`, 'success');
     await this.recordAppliedAction(key, 'Returned to On Shelf');
   }
