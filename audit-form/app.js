@@ -608,10 +608,16 @@
     updateTotalCounter();
   }
 
+  function isShopStatusAudit() {
+    const jn = String((state.request && state.request.job_number) || '').trim().toUpperCase();
+    return jn.startsWith('SHOP-');
+  }
+
   function buildDynamicFields(catKey, vals = {}) {
     const container = document.getElementById('dynamic-fields');
     if (!container) return;
 
+    const isShop = isShopStatusAudit();
     let html = '';
 
     if (catKey === 'gloves' || catKey === 'sleeves') {
@@ -631,19 +637,25 @@
       const curSize = vals.size || '';
       const isCustomSize = Boolean(!isGlove && curSize && !sizeOptions.includes(curSize));
 
+      const notesPlaceholder = (isShop && String(state.request?.job_number || '').toUpperCase() === 'SHOP-PACKED-DELIVERY')
+        ? 'Optional note (e.g., Picked for employee)'
+        : 'Optional note';
+
       html = `
-        <div class="field-group full-width">
-          <label class="field-label" for="f-employee-select">
-            <span>Assigned Employee <span class="field-req">*</span></span>
-          </label>
-          <select id="f-employee-select" class="field-select">
-            <option value="">-- Select Crew Member --</option>
-            ${empOptions}
-            <option value="__OTHER__" ${useCustomEmp ? 'selected' : ''}>+ Other / Unlisted Employee...</option>
-          </select>
-          <input type="text" id="f-employee-custom" class="field-input ${useCustomEmp ? '' : 'hidden'}"
-            placeholder="Enter employee full name" value="${useCustomEmp ? escapeHtml(curEmp) : ''}">
-        </div>
+        ${isShop ? '' : `
+          <div class="field-group full-width">
+            <label class="field-label" for="f-employee-select">
+              <span>Assigned Employee <span class="field-req">*</span></span>
+            </label>
+            <select id="f-employee-select" class="field-select">
+              <option value="">-- Select Crew Member --</option>
+              ${empOptions}
+              <option value="__OTHER__" ${useCustomEmp ? 'selected' : ''}>+ Other / Unlisted Employee...</option>
+            </select>
+            <input type="text" id="f-employee-custom" class="field-input ${useCustomEmp ? '' : 'hidden'}"
+              placeholder="Enter employee full name" value="${useCustomEmp ? escapeHtml(curEmp) : ''}">
+          </div>
+        `}
 
         <div class="field-group">
           <label class="field-label" for="f-item-num">
@@ -698,7 +710,7 @@
             <span>Notes</span>
             <span class="field-opt">Optional</span>
           </label>
-          <input type="text" id="f-notes" class="field-input" placeholder="Optional note" value="${escapeHtml(vals.notes || '')}">
+          <input type="text" id="f-notes" class="field-input" placeholder="${escapeHtml(notesPlaceholder)}" value="${escapeHtml(vals.notes || '')}">
         </div>
       `;
     } else if (catKey === 'blankets') {
@@ -1153,9 +1165,14 @@
     };
 
     if (catKey === 'gloves' || catKey === 'sleeves') {
-      const empSel = val('f-employee-select');
-      const employeeName = empSel === '__OTHER__' ? val('f-employee-custom') : empSel;
-      if (!employeeName) return { error: 'Please select or enter the assigned employee name.' };
+      let employeeName = '';
+      if (isShopStatusAudit()) {
+        employeeName = (state.request && state.request.foreman_name) || 'On Shelf';
+      } else {
+        const empSel = val('f-employee-select');
+        employeeName = empSel === '__OTHER__' ? val('f-employee-custom') : empSel;
+        if (!employeeName) return { error: 'Please select or enter the assigned employee name.' };
+      }
       const sizeSel = val('f-size-select');
       const size = sizeSel === '__OTHER__' ? val('f-size-custom') : sizeSel;
       if (!size) return { error: 'Please select or enter the size.' };
@@ -1369,7 +1386,7 @@
     }
 
     let html = '';
-    if (cat.hasEmployee) {
+    if (cat.hasEmployee && !isShopStatusAudit()) {
       const grouped = new Map();
       items.forEach((it) => {
         const emp = it.employeeName || 'Unassigned';
@@ -1441,15 +1458,16 @@
       `;
     }).join('');
 
-    const defaultSubmitter = state.draft.submittedByName || state.request?.foreman_name || '';
+    const isShop = isShopStatusAudit();
+    const defaultSubmitter = state.draft.submittedByName || (isShop ? '' : (state.request?.foreman_name || ''));
 
     body.innerHTML = `
       <p style="margin:0 0 10px 0;color:#475569;font-size:14.5px;">
-        Confirm your counts below before submitting to Safety. Total items entered: <strong>${total}</strong>.
+        Confirm your counts below before submitting. Total items entered: <strong>${total}</strong>.
       </p>
       ${uncheckedEmpty.length > 0 ? `
         <div class="review-warning-box">
-          <strong>Heads up:</strong> ${uncheckedEmpty.map((c) => c.label).join(', ')} currently show 0 items and aren't marked "None on Crew". You can still submit if your crew doesn't have those items.
+          <strong>Heads up:</strong> ${uncheckedEmpty.map((c) => c.label).join(', ')} currently show 0 items and aren't marked "${isShop ? 'None in Pool' : 'None on Crew'}". You can still submit if there are none.
         </div>
       ` : ''}
       <div class="review-grid">${rowsHtml}</div>
@@ -1457,7 +1475,7 @@
         <label class="field-label" for="f-submitted-by">
           <span>Your Name (Submitted By)</span>
         </label>
-        <input type="text" id="f-submitted-by" class="field-input" value="${escapeHtml(defaultSubmitter)}" placeholder="Foreman / Submitter Name">
+        <input type="text" id="f-submitted-by" class="field-input" value="${escapeHtml(defaultSubmitter)}" placeholder="${isShop ? 'Auditor Name (e.g., Cody Bechdol)' : 'Foreman / Submitter Name'}">
       </div>
       ${!navigator.onLine ? `
         <div class="review-warning-box" style="margin-top:12px;margin-bottom:0;">
@@ -1535,11 +1553,20 @@
   // ---------------------------------------------------------------------------
   function populateHeader() {
     const req = state.request || {};
-    document.getElementById('hdr-campaign').textContent = (req.campaign_name || 'Crew Equipment Inventory Audit').toUpperCase();
-    document.getElementById('hdr-foreman').textContent = req.foreman_name ? `${req.foreman_name} — Equipment Audit` : 'Crew Equipment Audit';
+    const isShop = isShopStatusAudit();
+    document.getElementById('hdr-campaign').textContent = (req.campaign_name || (isShop ? 'Shop Equipment Inventory Audit' : 'Crew Equipment Inventory Audit')).toUpperCase();
+    if (isShop) {
+      document.getElementById('hdr-foreman').textContent = `📦 ${req.foreman_name || 'Shop Stock'} — Inventory Audit`;
+    } else {
+      document.getElementById('hdr-foreman').textContent = req.foreman_name ? `${req.foreman_name} — Equipment Audit` : 'Crew Equipment Audit';
+    }
 
     const chips = [];
-    if (req.job_number) chips.push(`📋 Job ${req.job_number}`);
+    if (isShop) {
+      chips.push('📦 Shop / Warehouse Pool');
+    } else if (req.job_number) {
+      chips.push(`📋 Job ${req.job_number}`);
+    }
     if (req.job_name) chips.push(req.job_name);
     if (req.location) chips.push(`📍 ${req.location}`);
     if (req.expires_at) chips.push(`⏳ Due ${formatDisplayDate(String(req.expires_at).slice(0, 10))}`);

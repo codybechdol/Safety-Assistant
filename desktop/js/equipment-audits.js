@@ -36,6 +36,62 @@ class EquipmentAuditsEngine {
       { key: 'grounds', label: 'Grounds', icon: '⚡', sheetName: 'Grounds', isPersonal: false },
       { key: 'hot_sticks', label: 'Hot Sticks', icon: '🔴', sheetName: 'Hot Sticks', isPersonal: false }
     ];
+
+    this.SHOP_STATUS_POOLS = [
+      {
+        jobNumber: 'SHOP-ON-SHELF',
+        name: 'On Shelf',
+        icon: '📦',
+        jobName: 'Helena Shop — Available Stock',
+        location: 'Helena',
+        canonicalStatus: 'On Shelf',
+        canonicalAssignedTo: 'On Shelf',
+        matchStatuses: ['on shelf'],
+        matchAssignedTo: ['on shelf']
+      },
+      {
+        jobNumber: 'SHOP-IN-TESTING',
+        name: 'In Testing',
+        icon: '🔬',
+        jobName: 'Testing Lab — Out for Dielectric Test',
+        location: 'Helena',
+        canonicalStatus: 'In Testing',
+        canonicalAssignedTo: 'In Testing',
+        matchStatuses: ['in testing'],
+        matchAssignedTo: ['in testing']
+      },
+      {
+        jobNumber: 'SHOP-PACKED-DELIVERY',
+        name: 'Packed For Delivery',
+        icon: '🚚',
+        jobName: 'Helena Shop — Ready For Delivery',
+        location: 'Helena',
+        canonicalStatus: 'Ready For Delivery',
+        canonicalAssignedTo: 'Packed For Delivery',
+        matchStatuses: ['ready for delivery', 'packed for delivery'],
+        matchAssignedTo: ['packed for delivery', 'ready for delivery']
+      },
+      {
+        jobNumber: 'SHOP-PACKED-TESTING',
+        name: 'Packed For Testing',
+        icon: '🧪',
+        jobName: 'Helena Shop — Ready For Test',
+        location: 'Helena',
+        canonicalStatus: 'Ready For Test',
+        canonicalAssignedTo: 'Packed For Testing',
+        matchStatuses: ['ready for test', 'packed for testing'],
+        matchAssignedTo: ['packed for testing', 'ready for test']
+      }
+    ];
+  }
+
+  getShopAuditPoolConfig(req) {
+    if (!req) return null;
+    const jn = String(req.job_number || req.jobNumber || '').trim().toUpperCase();
+    const fn = String(req.foreman_name || req.foreman || '').trim().toLowerCase();
+    return this.SHOP_STATUS_POOLS.find((p) =>
+      p.jobNumber === jn || p.name.toLowerCase() === fn
+    ) || null;
   }
 
   init() {
@@ -324,8 +380,51 @@ class EquipmentAuditsEngine {
       });
     });
 
-    // Sort: Foremen & GF & SUP cleanly by Name
-    return leaders.sort((a, b) => a.foreman.localeCompare(b.foreman));
+    // Sort field leaders cleanly by Name
+    leaders.sort((a, b) => a.foreman.localeCompare(b.foreman));
+
+    // 4. Append the 4 Helena Shop / Status Audit Pools (On Shelf, In Testing, Packed For Delivery, Packed For Testing)
+    const activeUserName = String((window.supabaseSync && window.supabaseSync.userName) || 'Cody Bechdol').trim().toLowerCase();
+    const adminEmp = empRows.find((r) => String(r['Employee Name'] || r['Name'] || '').trim().toLowerCase() === activeUserName) || null;
+    const adminPhone = getEmpPhone(adminEmp);
+    const adminEmail = getEmpEmail(adminEmp);
+    const tables = (snap && snap.tables) || {};
+
+    this.SHOP_STATUS_POOLS.forEach((pool) => {
+      let itemCount = 0;
+      this.CATEGORIES.forEach((cat) => {
+        const rows = (tables[cat.key] && Array.isArray(tables[cat.key].rows)) ? tables[cat.key].rows : [];
+        rows.forEach((r) => {
+          if (this.isRowInShopPool(r, pool)) itemCount++;
+        });
+      });
+
+      leaders.push({
+        foreman: pool.name,
+        role: 'SHOP',
+        icon: pool.icon,
+        isShopPool: true,
+        isPrimaryLead: false,
+        jobNumber: pool.jobNumber,
+        jobName: pool.jobName,
+        location: pool.location,
+        status: 'Shop Pool',
+        shopItemCount: itemCount,
+        employees: [pool.canonicalAssignedTo],
+        phone: adminPhone,
+        email: adminEmail
+      });
+    });
+
+    return leaders;
+  }
+
+  isRowInShopPool(row, pool) {
+    if (!row || !pool) return false;
+    const st = String(row['Status'] || '').trim().toLowerCase();
+    const asg = String(row['Assigned To'] || '').trim().toLowerCase();
+    if (['lost', 'destroyed', 'failed', 'failed rubber', 'not repairable', 'retired'].includes(st)) return false;
+    return pool.matchStatuses.includes(st) || pool.matchAssignedTo.includes(asg);
   }
 
   // ---------------------------------------------------------------------------
@@ -777,13 +876,15 @@ END $$;`;
     this._pendingCrewsForModal = crews;
     this._modalRoleFilter = 'all';
     this._modalSearchText = '';
-    this._modalSelectedIdx = new Set(crews.map((_, idx) => idx));
+    // Default field leaders (F, GF, SUP) checked; Shop/Status pools unchecked until picked
+    this._modalSelectedIdx = new Set(crews.map((c, idx) => (c.isShopPool ? -1 : idx)).filter((i) => i !== -1));
 
     const defaultCampaign = `${new Date().toLocaleString('en-US', { month: 'long', year: 'numeric' })} Crew Equipment Audit`;
 
     const fCount = crews.filter((c) => c.role === 'F' || c.role === 'GTO F').length;
     const gfCount = crews.filter((c) => c.role === 'GF').length;
     const supCount = crews.filter((c) => c.role === 'SUP').length;
+    const shopCount = crews.filter((c) => c.isShopPool).length;
 
     const modal = document.createElement('div');
     modal.id = 'eq-audit-create-modal';
@@ -791,9 +892,9 @@ END $$;`;
     modal.style.cssText = 'position:fixed;inset:0;z-index:15000;background:rgba(2,6,23,0.78);display:flex;align-items:center;justify-content:center;padding:16px;pointer-events:auto;';
 
     modal.innerHTML = `
-      <div class="modal-box" style="width:100%;max-width:780px;max-height:90vh;background:#0f172a;border:1px solid rgba(59,130,246,0.45);border-radius:14px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 24px 60px rgba(0,0,0,0.6);pointer-events:auto;">
+      <div class="modal-box" style="width:100%;max-width:800px;max-height:90vh;background:#0f172a;border:1px solid rgba(59,130,246,0.45);border-radius:14px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 24px 60px rgba(0,0,0,0.6);pointer-events:auto;">
         <div style="padding:14px 18px;background:linear-gradient(135deg,#1e3a8a 0%,#1d4ed8 100%);display:flex;justify-content:space-between;align-items:center;flex-shrink:0;">
-          <h3 style="margin:0;font-size:15.5px;font-weight:800;color:#fff;">📋 Create Equipment Audit Links (Foremen, GF &amp; SUP)</h3>
+          <h3 style="margin:0;font-size:15.5px;font-weight:800;color:#fff;">📋 Create Equipment Audit Links (Foremen, GF, SUP &amp; Shop Stock)</h3>
           <button style="background:none;border:none;color:#fff;font-size:22px;cursor:pointer;line-height:1;" onclick="document.getElementById('eq-audit-create-modal').remove()">&times;</button>
         </div>
         <div style="padding:16px 18px;display:flex;flex-direction:column;gap:11px;flex:1;min-height:0;overflow:hidden;">
@@ -813,7 +914,7 @@ END $$;`;
             </div>
           </div>
           <div style="flex-shrink:0;">
-            <label style="display:block;font-size:11.5px;font-weight:700;color:#94a3b8;margin-bottom:4px;">OPTIONAL INSTRUCTIONS SHOWN AT TOP OF FOREMAN FORM</label>
+            <label style="display:block;font-size:11.5px;font-weight:700;color:#94a3b8;margin-bottom:4px;">OPTIONAL INSTRUCTIONS SHOWN AT TOP OF AUDIT FORM</label>
             <input type="text" id="eq-audit-notes" class="sheet-search" style="width:100%;font-size:12.5px;" placeholder="e.g., Please check all trucks and personal bags for rubber, blankets, grounds, sticks, testers, and AEDs.">
           </div>
           <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;flex-shrink:0;">
@@ -822,24 +923,25 @@ END $$;`;
               <button type="button" class="btn btn-secondary eq-role-pill" data-role="foremen" style="font-size:11px;padding:4px 9px;color:#93c5fd;" onclick="window.equipmentAuditsEngine.setCreateModalRoleFilter('foremen')">Foremen (${fCount})</button>
               <button type="button" class="btn btn-secondary eq-role-pill" data-role="GF" style="font-size:11px;padding:4px 9px;color:#fdba74;" onclick="window.equipmentAuditsEngine.setCreateModalRoleFilter('GF')">GF (${gfCount})</button>
               <button type="button" class="btn btn-secondary eq-role-pill" data-role="SUP" style="font-size:11px;padding:4px 9px;color:#d8b4fe;" onclick="window.equipmentAuditsEngine.setCreateModalRoleFilter('SUP')">SUP (${supCount})</button>
+              <button type="button" class="btn btn-secondary eq-role-pill" data-role="SHOP" style="font-size:11px;padding:4px 9px;color:#2dd4bf;border-color:rgba(45,212,191,0.4);" onclick="window.equipmentAuditsEngine.setCreateModalRoleFilter('SHOP')">📦 Shop / Stock (${shopCount})</button>
             </div>
-            <input type="text" id="eq-audit-modal-search" class="sheet-search" style="width:210px;font-size:12px;padding:4px 8px;" placeholder="Filter name, job #, city..." oninput="window.equipmentAuditsEngine.setCreateModalSearch(this.value)">
+            <input type="text" id="eq-audit-modal-search" class="sheet-search" style="width:200px;font-size:12px;padding:4px 8px;" placeholder="Filter name, job #, status..." oninput="window.equipmentAuditsEngine.setCreateModalSearch(this.value)">
           </div>
           <div style="display:flex;justify-content:space-between;align-items:center;flex-shrink:0;">
             <label style="font-size:12px;font-weight:700;color:#e2e8f0;display:flex;align-items:center;gap:6px;cursor:pointer;">
-              <input type="checkbox" id="eq-audit-select-all-crews" checked onchange="window.equipmentAuditsEngine.toggleSelectAllModalLeaders(this.checked)">
+              <input type="checkbox" id="eq-audit-select-all-crews" onchange="window.equipmentAuditsEngine.toggleSelectAllModalLeaders(this.checked)">
               <span id="eq-audit-select-all-label">Select All Shown (${crews.length})</span>
             </label>
-            <span style="font-size:11px;color:#94a3b8;">Each leader gets a unique private link pre-loaded with their full crew roster</span>
+            <span style="font-size:11px;color:#94a3b8;">Shop pools (On Shelf, In Testing, Packed) reconcile directly against warehouse status</span>
           </div>
           <div id="eq-audit-modal-list" style="flex:1;min-height:180px;max-height:360px;overflow-y:auto;overscroll-behavior:contain;border:1px solid var(--border-color);border-radius:8px;background:rgba(15,23,42,0.85);"></div>
         </div>
         <div style="padding:12px 18px;border-top:1px solid var(--border-color);display:flex;justify-content:space-between;align-items:center;gap:8px;background:rgba(15,23,42,0.95);flex-shrink:0;">
-          <span id="eq-audit-selected-summary" style="font-size:12px;color:#93c5fd;font-weight:700;">${crews.length} selected</span>
+          <span id="eq-audit-selected-summary" style="font-size:12px;color:#93c5fd;font-weight:700;">${this._modalSelectedIdx.size} selected</span>
           <div style="display:flex;gap:8px;">
             <button class="btn btn-secondary" onclick="document.getElementById('eq-audit-create-modal').remove()">Cancel</button>
             <button class="btn btn-primary" id="btn-eq-audit-create-confirm" style="background:linear-gradient(135deg,#059669 0%,#047857 100%);border:none;font-weight:700;" onclick="window.equipmentAuditsEngine.confirmCreateCampaign()">
-              ✨ Generate Audit Links (${crews.length})
+              ✨ Generate Audit Links (${this._modalSelectedIdx.size})
             </button>
           </div>
         </div>
@@ -863,6 +965,7 @@ END $$;`;
       if (roleFilter === 'foremen' && c.role !== 'F' && c.role !== 'GTO F') return;
       if (roleFilter === 'GF' && c.role !== 'GF') return;
       if (roleFilter === 'SUP' && c.role !== 'SUP') return;
+      if (roleFilter === 'SHOP' && !c.isShopPool) return;
       if (q) {
         const hay = `${c.foreman} ${c.role} ${c.jobNumber} ${c.jobName} ${c.location}`.toLowerCase();
         if (!hay.includes(q)) return;
@@ -880,30 +983,33 @@ END $$;`;
     const sel = this._modalSelectedIdx || new Set();
 
     const roleBadgeHtml = (role) => {
+      if (role === 'SHOP') return '<span style="font-size:10px;font-weight:800;padding:1px 6px;border-radius:4px;background:rgba(20,184,166,0.2);border:1px solid rgba(45,212,191,0.5);color:#5eead4;">SHOP STOCK</span>';
       if (role === 'SUP') return '<span style="font-size:10px;font-weight:800;padding:1px 6px;border-radius:4px;background:rgba(168,85,247,0.2);border:1px solid rgba(168,85,247,0.45);color:#d8b4fe;">SUP</span>';
       if (role === 'GF') return '<span style="font-size:10px;font-weight:800;padding:1px 6px;border-radius:4px;background:rgba(249,115,22,0.2);border:1px solid rgba(249,115,22,0.45);color:#fdba74;">GF</span>';
       return `<span style="font-size:10px;font-weight:800;padding:1px 6px;border-radius:4px;background:rgba(59,130,246,0.2);border:1px solid rgba(59,130,246,0.45);color:#93c5fd;">${this.escapeHtml(role || 'F')}</span>`;
     };
 
     if (indices.length === 0) {
-      listEl.innerHTML = `<div style="padding:24px;text-align:center;color:#94a3b8;font-size:13px;">No matching Foremen, GF, or SUP found.</div>`;
+      listEl.innerHTML = `<div style="padding:24px;text-align:center;color:#94a3b8;font-size:13px;">No matching Foremen, GF, SUP, or Shop Stock pools found.</div>`;
     } else {
       listEl.innerHTML = indices.map((idx) => {
         const c = crews[idx];
         const isChecked = sel.has(idx);
-        const crewLabel = c.employees.length === 1 ? '1 crew member' : `${c.employees.length} crew members`;
+        const subtitle = c.isShopPool
+          ? `${this.escapeHtml(c.jobName)} • ${c.shopItemCount || 0} items currently logged`
+          : `${this.escapeHtml(c.location || 'No Location')}${c.jobName ? ` • ${this.escapeHtml(c.jobName)}` : ''} • ${c.employees.length === 1 ? '1 crew member' : `${c.employees.length} crew members`}`;
         return `
-          <label style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-bottom:1px solid rgba(148,163,184,0.12);cursor:pointer;">
+          <label style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-bottom:1px solid rgba(148,163,184,0.12);cursor:pointer;${c.isShopPool ? 'background:rgba(20,184,166,0.06);' : ''}">
             <input type="checkbox" class="eq-audit-crew-chk" data-crew-idx="${idx}" ${isChecked ? 'checked' : ''} onchange="window.equipmentAuditsEngine.toggleModalLeader(${idx}, this.checked)">
             <div style="flex:1;min-width:0;">
               <div style="font-size:13px;font-weight:700;color:#f8fafc;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-                <span>${this.escapeHtml(c.foreman)}</span>
+                <span>${c.icon ? `${c.icon} ` : ''}${this.escapeHtml(c.foreman)}</span>
                 ${roleBadgeHtml(c.role)}
-                ${c.jobNumber ? `<span style="color:#60a5fa;font-weight:600;">(${this.escapeHtml(c.jobNumber)})</span>` : ''}
-                ${c.status && c.status.toLowerCase() !== 'active' ? `<span style="font-size:10px;color:#fbbf24;">• ${this.escapeHtml(c.status)}</span>` : ''}
+                ${!c.isShopPool && c.jobNumber ? `<span style="color:#60a5fa;font-weight:600;">(${this.escapeHtml(c.jobNumber)})</span>` : ''}
+                ${!c.isShopPool && c.status && c.status.toLowerCase() !== 'active' ? `<span style="font-size:10px;color:#fbbf24;">• ${this.escapeHtml(c.status)}</span>` : ''}
               </div>
               <div style="font-size:11.5px;color:#94a3b8;margin-top:1px;">
-                ${this.escapeHtml(c.location || 'No Location')}${c.jobName ? ` • ${this.escapeHtml(c.jobName)}` : ''} • ${crewLabel}
+                ${subtitle}
               </div>
             </div>
             <div style="text-align:right;font-size:11px;color:#94a3b8;flex-shrink:0;">
@@ -1391,7 +1497,8 @@ END $$;`;
     return set;
   }
 
-  compareItemFields(catKey, reported, appRow) {
+  compareItemFields(catKey, reported, appRow, options = {}) {
+    const isShopPool = Boolean(options && options.isShopPool);
     const diffs = [];
     const check = (label, colName, repVal, appVal, normalizer, sheetValFormatter) => {
       const rStr = String(repVal || '').trim();
@@ -1411,7 +1518,9 @@ END $$;`;
     };
 
     if (catKey === 'gloves' || catKey === 'sleeves') {
-      check('Assigned To', 'Assigned To', reported.employeeName, appRow['Assigned To'], (v) => this.normPerson(v));
+      if (!isShopPool) {
+        check('Assigned To', 'Assigned To', reported.employeeName, appRow['Assigned To'], (v) => this.normPerson(v));
+      }
       check('ESL ID', 'ESL ID', reported.eslId, appRow['ESL ID'], (v) => this.normId(v));
       check('Size', 'Size', reported.size, appRow['Size'], catKey === 'sleeves' ? (v) => this.normSleeveSize(v) : (v) => String(parseFloat(v) || v).toLowerCase());
       check('Class', 'Class', reported.itemClass, appRow['Class'], (v) => String(v).replace(/class\s*/i, '').trim());
@@ -1452,7 +1561,9 @@ END $$;`;
   reconcileAudit(req, sub) {
     const payload = (sub && (sub.submitted_payload || sub.draft_payload)) || {};
     const itemsByCat = (payload && payload.items) || {};
-    const crewNames = this.getCrewMatchNamesSet(req);
+    const shopPool = this.getShopAuditPoolConfig(req);
+    const crewNames = shopPool ? new Set() : this.getCrewMatchNamesSet(req);
+    const isRowInScope = (row) => (shopPool ? this.isRowInShopPool(row, shopPool) : this.isRowActiveOnCrew(row, crewNames));
     const snap = this.db ? this.db.getSnapshot() : null;
     const tables = (snap && snap.tables) || {};
 
@@ -1511,10 +1622,10 @@ END $$;`;
 
         matchedAppIndices.add(found.idx);
         const appRow = found.row;
-        const onCrew = this.isRowActiveOnCrew(appRow, crewNames);
-        const diffs = this.compareItemFields(cat.key, rep, appRow);
+        const inScope = isRowInScope(appRow);
+        const diffs = this.compareItemFields(cat.key, rep, appRow, { isShopPool: Boolean(shopPool) });
 
-        if (!onCrew) {
+        if (!inScope) {
           counts.wrong_crew++;
           results.push({
             key: keyId,
@@ -1559,10 +1670,10 @@ END $$;`;
         }
       });
 
-      // Anything active on this crew in the App that was NOT reported by the foreman
+      // Anything currently in this crew / shop status in the App that was NOT reported
       rows.forEach((appRow, idx) => {
         if (matchedAppIndices.has(idx)) return;
-        if (!this.isRowActiveOnCrew(appRow, crewNames)) return;
+        if (!isRowInScope(appRow)) return;
         const pid = this.getRowPrimaryId(cat.key, appRow, headers);
         if (!pid) return;
         counts.missing++;
@@ -1581,7 +1692,7 @@ END $$;`;
       });
     });
 
-    return { results, counts };
+    return { results, counts, shopPool };
   }
 
   renderReviewTabHtml() {
@@ -1689,11 +1800,12 @@ END $$;`;
   }
 
   renderReconcileItemCard(item, appliedAction, req) {
+    const shopPool = this.getShopAuditPoolConfig(req);
     const meta = {
       matched: { border: 'rgba(16,185,129,0.35)', bg: 'rgba(16,185,129,0.08)', badge: '🟢 Matched', color: '#34d399' },
       discrepancy: { border: 'rgba(234,179,8,0.45)', bg: 'rgba(234,179,8,0.09)', badge: '🟡 Field Discrepancy', color: '#fde047' },
-      wrong_crew: { border: 'rgba(249,115,22,0.45)', bg: 'rgba(249,115,22,0.09)', badge: '🟠 Wrong Crew / Status', color: '#fdba74' },
-      missing: { border: 'rgba(239,68,68,0.45)', bg: 'rgba(239,68,68,0.09)', badge: '🔴 Missing from Field', color: '#fca5a5' },
+      wrong_crew: { border: 'rgba(249,115,22,0.45)', bg: 'rgba(249,115,22,0.09)', badge: shopPool ? '🟠 Wrong Status / Location' : '🟠 Wrong Crew / Status', color: '#fdba74' },
+      missing: { border: 'rgba(239,68,68,0.45)', bg: 'rgba(239,68,68,0.09)', badge: shopPool ? `🔴 Missing from ${shopPool.name}` : '🔴 Missing from Field', color: '#fca5a5' },
       new_item: { border: 'rgba(59,130,246,0.45)', bg: 'rgba(59,130,246,0.09)', badge: '🔵 Unlogged / New Item', color: '#93c5fd' }
     }[item.bucket];
 
@@ -1712,32 +1824,33 @@ END $$;`;
       const curAssigned = item.appRow['Assigned To'] || '(blank)';
       const curStatus = item.appRow['Status'] || '(blank)';
       const curLoc = item.appRow['Location'] || '(blank)';
-      const targetAssignee = item.reported.employeeName || req.foreman_name;
+      const targetLabel = shopPool ? `${shopPool.name} (${shopPool.canonicalStatus})` : `${item.reported.employeeName || req.foreman_name} (${req.location || req.job_number})`;
       detailsHtml = `
         <div style="margin-top: 5px; font-size: 12px; color: #fed7aa;">
-          Currently logged in app as: <strong>${this.escapeHtml(curAssigned)}</strong> (${this.escapeHtml(curStatus)} • ${this.escapeHtml(curLoc)}) → Foreman reports on <strong>${this.escapeHtml(targetAssignee)}</strong> (${this.escapeHtml(req.location || req.job_number)}).
+          Currently logged in app as: <strong>${this.escapeHtml(curAssigned)}</strong> (${this.escapeHtml(curStatus)} • ${this.escapeHtml(curLoc)}) → Audit found in <strong>${this.escapeHtml(targetLabel)}</strong>.
         </div>
         ${item.diffs.length > 0 ? `<div style="margin-top:4px;font-size:11.5px;color:#fde68a;">Also differs: ${item.diffs.map((d) => `${d.label}: ${d.appValue} → ${d.reportedValue}`).join(' | ')}</div>` : ''}
       `;
     } else if (item.bucket === 'missing') {
       const curAssigned = item.appRow['Assigned To'] || req.foreman_name;
+      const curStatus = item.appRow['Status'] || '';
       const curDate = item.appRow['Test Date'] || item.appRow['Calibration Date'] || item.appRow['Pad Expiration'] || '';
       detailsHtml = `
         <div style="margin-top: 5px; font-size: 12px; color: #fecaca;">
-          App shows assigned to <strong>${this.escapeHtml(curAssigned)}</strong> (${this.escapeHtml(item.appRow['Location'] || '')})${curDate ? ` • Date: ${this.escapeHtml(curDate)}` : ''}, but it was <strong>not reported</strong> on this audit.
+          App shows <strong>${this.escapeHtml(curAssigned)}</strong>${curStatus ? ` (${this.escapeHtml(curStatus)})` : ''}${curDate ? ` • Date: ${this.escapeHtml(curDate)}` : ''}, but it was <strong>not reported</strong> on this audit.
         </div>
       `;
     } else if (item.bucket === 'new_item') {
       const r = item.reported;
-      const specs = [r.employeeName, r.type, r.model, r.size, r.itemClass ? `Class ${r.itemClass}` : '', r.kv, r.length, r.serialNum ? `S/N ${r.serialNum}` : '', r.eslId ? `ESL ${r.eslId}` : '', r.testDate ? `Tested ${this.toSheetDate(r.testDate)}` : '', r.calibrationDate ? `Cal ${this.toSheetDate(r.calibrationDate)}` : '', r.padExpiration ? `Pads Exp ${this.toSheetDate(r.padExpiration)}` : '', r.batteryExpiration ? `Battery Exp ${this.toSheetDate(r.batteryExpiration)}` : ''].filter(Boolean);
+      const specs = [shopPool ? '' : r.employeeName, r.type, r.model, r.size, r.itemClass ? `Class ${r.itemClass}` : '', r.kv, r.length, r.serialNum ? `S/N ${r.serialNum}` : '', r.eslId ? `ESL ${r.eslId}` : '', r.testDate ? `Tested ${this.toSheetDate(r.testDate)}` : '', r.calibrationDate ? `Cal ${this.toSheetDate(r.calibrationDate)}` : '', r.padExpiration ? `Pads Exp ${this.toSheetDate(r.padExpiration)}` : '', r.batteryExpiration ? `Battery Exp ${this.toSheetDate(r.batteryExpiration)}` : ''].filter(Boolean);
       detailsHtml = `
         <div style="margin-top: 5px; font-size: 12px; color: #bfdbfe;">
           Not found in ${this.escapeHtml(item.catLabel)} inventory. Reported specs: <strong>${this.escapeHtml(specs.join(' • ') || 'Basic entry')}</strong>
         </div>
       `;
     } else {
-      const who = item.reported?.employeeName || item.appRow?.['Assigned To'] || req.foreman_name;
-      detailsHtml = `<div style="margin-top: 3px; font-size: 11.5px; color: #a7f3d0;">Verified on ${this.escapeHtml(who)} — all dates and specs match.</div>`;
+      const who = shopPool ? shopPool.name : (item.reported?.employeeName || item.appRow?.['Assigned To'] || req.foreman_name);
+      detailsHtml = `<div style="margin-top: 3px; font-size: 11.5px; color: #a7f3d0;">Verified in ${this.escapeHtml(who)} — all dates and specs match.</div>`;
     }
 
     const escKey = this.escapeJs(item.key);
@@ -1750,19 +1863,22 @@ END $$;`;
         <button class="btn btn-secondary" style="font-size:11.5px;padding:5px 9px;" onclick="window.equipmentAuditsEngine.dismissItem('${escKey}')">Dismiss</button>
       `;
     } else if (item.bucket === 'wrong_crew') {
+      const reassignLabel = shopPool ? `🔄 Move to ${shopPool.name}` : '🔄 Reassign to Crew';
       actionsHtml = `
-        <button class="btn btn-primary admin-only-control" style="font-size:11.5px;padding:5px 10px;background:#ea580c;border:none;" onclick="window.equipmentAuditsEngine.applyReassignToCrew('${escKey}')">🔄 Reassign to Crew</button>
+        <button class="btn btn-primary admin-only-control" style="font-size:11.5px;padding:5px 10px;background:#ea580c;border:none;" onclick="window.equipmentAuditsEngine.applyReassignToCrew('${escKey}')">${this.escapeHtml(reassignLabel)}</button>
         <button class="btn btn-secondary" style="font-size:11.5px;padding:5px 9px;" onclick="window.equipmentAuditsEngine.dismissItem('${escKey}')">Dismiss</button>
       `;
     } else if (item.bucket === 'new_item') {
+      const addLabel = shopPool ? `➕ Add to ${shopPool.name}` : '➕ Add to Inventory';
       actionsHtml = `
-        <button class="btn btn-primary admin-only-control" style="font-size:11.5px;padding:5px 10px;background:#2563eb;border:none;" onclick="window.equipmentAuditsEngine.applyAddNewItem('${escKey}')">➕ Add to Inventory</button>
+        <button class="btn btn-primary admin-only-control" style="font-size:11.5px;padding:5px 10px;background:#2563eb;border:none;" onclick="window.equipmentAuditsEngine.applyAddNewItem('${escKey}')">${this.escapeHtml(addLabel)}</button>
         <button class="btn btn-secondary" style="font-size:11.5px;padding:5px 9px;" onclick="window.equipmentAuditsEngine.dismissItem('${escKey}')">Dismiss</button>
       `;
     } else if (item.bucket === 'missing') {
+      const showReturnShelf = !shopPool || shopPool.jobNumber !== 'SHOP-ON-SHELF';
       actionsHtml = `
         <button class="btn btn-secondary admin-only-control" style="font-size:11.5px;padding:5px 9px;border-color:#ef4444;color:#fca5a5;" onclick="window.equipmentAuditsEngine.applyMarkMissingLost('${escKey}')">⚠️ Flag Lost / Locate</button>
-        <button class="btn btn-secondary admin-only-control" style="font-size:11.5px;padding:5px 9px;color:#93c5fd;" onclick="window.equipmentAuditsEngine.applyReturnToShelf('${escKey}')">📦 Return On Shelf</button>
+        ${showReturnShelf ? `<button class="btn btn-secondary admin-only-control" style="font-size:11.5px;padding:5px 9px;color:#93c5fd;" onclick="window.equipmentAuditsEngine.applyReturnToShelf('${escKey}')">📦 Return On Shelf</button>` : ''}
         <button class="btn btn-secondary" style="font-size:11.5px;padding:5px 9px;" onclick="window.equipmentAuditsEngine.dismissItem('${escKey}')">Keep As-Is</button>
       `;
     }
@@ -1852,32 +1968,40 @@ END $$;`;
     const item = this.findReconcileItem(key);
     const req = this._lastReconciliation?.req;
     if (!item || !item.appRow || !req) return;
-    const assignee = item.reported?.employeeName || req.foreman_name;
+    const shopPool = this.getShopAuditPoolConfig(req);
+    const targetStatus = shopPool ? shopPool.canonicalStatus : 'Assigned';
+    const assignee = shopPool ? shopPool.canonicalAssignedTo : (item.reported?.employeeName || req.foreman_name);
+    const targetLoc = shopPool ? shopPool.location : (req.location || '');
     const todayMdy = this.toSheetDate(new Date().toISOString().slice(0, 10));
 
-    await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Status', 'Assigned');
+    await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Status', targetStatus);
     await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Assigned To', assignee);
-    if (req.location) {
-      await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Location', req.location);
+    if (targetLoc) {
+      await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Location', targetLoc);
     }
-    await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Date Assigned', todayMdy);
+    if (!shopPool) {
+      await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Date Assigned', todayMdy);
+    }
 
     for (const d of item.diffs) {
       if (d.colName !== 'Assigned To') {
         await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, d.colName, d.reportedValue);
       }
     }
-    this.toast(`🔄 Reassigned ${item.catLabel} #${item.itemNum} to ${assignee}`, 'success');
-    await this.recordAppliedAction(key, `Reassigned to ${assignee}`);
+    const actionText = shopPool ? `Moved to ${shopPool.name}` : `Reassigned to ${assignee}`;
+    this.toast(`🔄 ${actionText} (${item.catLabel} #${item.itemNum})`, 'success');
+    await this.recordAppliedAction(key, actionText);
   }
 
   async applyAddNewItem(key) {
     const item = this.findReconcileItem(key);
     const req = this._lastReconciliation?.req;
     if (!item || !item.reported || !req) return;
+    const shopPool = this.getShopAuditPoolConfig(req);
     const r = item.reported;
-    const assignee = r.employeeName || req.foreman_name;
-    const loc = req.location || 'Helena';
+    const targetStatus = shopPool ? shopPool.canonicalStatus : 'Assigned';
+    const assignee = shopPool ? shopPool.canonicalAssignedTo : (r.employeeName || req.foreman_name);
+    const loc = shopPool ? shopPool.location : (req.location || 'Helena');
     const todayIso = new Date().toISOString().slice(0, 10);
     const todayMdy = this.toSheetDate(todayIso);
 
@@ -1887,7 +2011,7 @@ END $$;`;
     const batExpMdy = this.toSheetDate(r.batteryExpiration);
 
     const changeOutDate = (window.inventoryManager && typeof window.inventoryManager.calculateChangeOutDate === 'function')
-      ? window.inventoryManager.calculateChangeOutDate(todayIso, loc, assignee, item.catKey, {
+      ? window.inventoryManager.calculateChangeOutDate(shopPool ? (r.testDate || r.calibrationDate || r.padExpiration || todayIso) : todayIso, loc, assignee, item.catKey, {
         testDate: r.testDate,
         calibrationDate: r.calibrationDate,
         padExpiration: r.padExpiration,
@@ -1897,9 +2021,9 @@ END $$;`;
 
     const newRow = {
       'Item #': r.itemNum,
-      'Date Assigned': todayMdy,
+      'Date Assigned': shopPool ? (testDateMdy || calDateMdy || todayMdy) : todayMdy,
       'Location': loc,
-      'Status': 'Assigned',
+      'Status': targetStatus,
       'Assigned To': assignee,
       'Change Out Date': changeOutDate,
       'Picked For': '',
