@@ -68,6 +68,9 @@ class EquipmentAuditsEngine {
     if (!url && this.db && this.db.snapshot && this.db.snapshot.configs && this.db.snapshot.configs.audit_form_base_url) {
       url = String(this.db.snapshot.configs.audit_form_base_url).trim();
     }
+    if (!url) {
+      url = 'https://safety-assistant-audit.pages.dev';
+    }
     return url.replace(/\/+$/, '');
   }
 
@@ -190,29 +193,29 @@ class EquipmentAuditsEngine {
   }
 
   // ---------------------------------------------------------------------------
-  // Active Crews & Foremen Discovery (from Job Tracking + Employees)
+  // Active Leadership & Crews Discovery (Foremen, GF, SUP only)
   // ---------------------------------------------------------------------------
-  getActiveCrewsList(includeExcluded = false) {
+  getBaseJobNumber(raw) {
+    const s = String(raw || '').trim();
+    if (!s) return '';
+    // Strip employee slot suffix like "007-27.1" -> "007-27"
+    return s.replace(/\.\d+$/, '').trim();
+  }
+
+  getActiveCrewsList() {
     const snap = this.db ? this.db.getSnapshot() : null;
     const jtRows = (snap && snap.tables && snap.tables.job_tracking && snap.tables.job_tracking.rows) || [];
     const empRows = (snap && snap.tables && snap.tables.employees && snap.tables.employees.rows) || [];
 
     const STATUS_LOCS = new Set(['vacation', 'light duty', 'weeds', 'leave', 'previous employee', 'medical', "worker's comp", 'unknown']);
+    const LEADER_CLASSES = new Set(['SUP', 'GF', 'F', 'GTO F', 'FOREMAN', 'GENERAL FOREMAN', 'SUPERVISOR', 'GTO FOREMAN']);
+
     const isActiveEmp = (r) => {
       const st = String(r['Status'] || '').trim().toLowerCase();
       const loc = String(r['Location'] || '').trim().toLowerCase();
-      if (st.includes('previous') || st.includes('terminated') || st.includes('inactive')) return false;
+      if (st.includes('previous') || st.includes('terminated') || st.includes('inactive') || st === 'pending') return false;
       if (loc.includes('previous employee')) return false;
       return true;
-    };
-
-    const findEmpRecord = (name) => {
-      const target = String(name || '').trim().toLowerCase().replace(/\s*\([^)]*\)/g, '');
-      if (!target) return null;
-      return empRows.find((r) => {
-        const n = String(r['Employee Name'] || r['Name'] || '').trim().toLowerCase().replace(/\s*\([^)]*\)/g, '');
-        return n === target;
-      }) || null;
     };
 
     const getEmpEmail = (emp) => {
@@ -225,81 +228,104 @@ class EquipmentAuditsEngine {
       return String(emp['Phone Number'] || emp['Phone'] || '').trim();
     };
 
-    const crewsByJob = new Map();
+    const normalizeRole = (rawClass) => {
+      const c = String(rawClass || '').trim().toUpperCase();
+      if (c === 'SUP' || c === 'SUPERVISOR') return 'SUP';
+      if (c === 'GF' || c === 'GENERAL FOREMAN') return 'GF';
+      if (c === 'GTO F' || c === 'GTO FOREMAN') return 'GTO F';
+      if (c === 'F' || c === 'FOREMAN') return 'F';
+      return c;
+    };
 
-    // 1. Seed from Job Tracking active crews
+    // 1. Index Job Tracking active jobs by base job number
+    const jtByBaseJob = new Map();
+    const jtForemanNames = new Set();
     jtRows.forEach((jt) => {
-      const jobNum = String(jt['Job Number'] || jt['Job #'] || '').trim();
-      if (!jobNum) return;
+      const baseJob = this.getBaseJobNumber(jt['Job Number'] || jt['Job #'] || '');
+      if (!baseJob) return;
       const status = String(jt['Status'] || 'Active').trim().toLowerCase();
       if (status === 'completed' || status === 'closed' || status === 'cancelled') return;
-      if (!includeExcluded && (jobNum.startsWith('002-') || jobNum.startsWith('005-'))) return;
-
       const foreman = String(jt['Foreman'] || jt['Foreman / Lead'] || jt['Lead'] || '').trim();
       const loc = String(jt['Location'] || '').trim();
       const jobName = String(jt['Job Name'] || '').trim();
-      crewsByJob.set(jobNum.toLowerCase(), {
-        jobNumber: jobNum,
+      jtByBaseJob.set(baseJob.toLowerCase(), {
+        jobNumber: baseJob,
         jobName,
         location: STATUS_LOCS.has(loc.toLowerCase()) ? '' : loc,
         foreman,
-        status: jt['Status'] || 'Active',
-        employees: [],
-        phone: '',
-        email: ''
+        status: jt['Status'] || 'Active'
       });
+      if (foreman) jtForemanNames.add(foreman.toLowerCase().replace(/\s*\([^)]*\)/g, '').trim());
     });
 
-    // 2. Attach active employees to crews
+    // 2. Group ALL active employees by base job number so every leader gets their full crew roster
+    const employeesByBaseJob = new Map();
     empRows.forEach((emp) => {
       if (!isActiveEmp(emp)) return;
       const empName = String(emp['Employee Name'] || emp['Name'] || '').trim();
       if (!empName) return;
-      const jobNum = String(emp['Job Number'] || emp['Job #'] || '').trim();
-      if (!jobNum) return;
-      if (!includeExcluded && (jobNum.startsWith('002-') || jobNum.startsWith('005-'))) return;
-
-      const key = jobNum.toLowerCase();
-      if (!crewsByJob.has(key)) {
-        const rawLoc = String(emp['Location'] || '').replace(/\s*\([^)]*\)/g, '').trim();
-        crewsByJob.set(key, {
-          jobNumber: jobNum,
-          jobName: '',
-          location: STATUS_LOCS.has(rawLoc.toLowerCase()) ? '' : rawLoc,
-          foreman: String(emp['Crew Lead'] || '').trim(),
-          status: 'Active',
-          employees: [],
-          phone: '',
-          email: ''
-        });
-      }
-      const crew = crewsByJob.get(key);
-      if (!crew.employees.includes(empName)) crew.employees.push(empName);
-      if (!crew.foreman && emp['Crew Lead']) crew.foreman = String(emp['Crew Lead']).trim();
-      if (!crew.location) {
-        const cleanLoc = String(emp['Location'] || '').replace(/\s*\([^)]*\)/g, '').trim();
-        if (cleanLoc && !STATUS_LOCS.has(cleanLoc.toLowerCase())) crew.location = cleanLoc;
-      }
+      const primaryBase = this.getBaseJobNumber(emp['Job Number'] || emp['Job #'] || '');
+      const secondaryBase = this.getBaseJobNumber(emp['Secondary Job Number'] || '');
+      [primaryBase, secondaryBase].forEach((bj) => {
+        if (!bj) return;
+        const k = bj.toLowerCase();
+        if (!employeesByBaseJob.has(k)) employeesByBaseJob.set(k, []);
+        const arr = employeesByBaseJob.get(k);
+        if (!arr.includes(empName)) arr.push(empName);
+      });
     });
 
-    // 3. Resolve foreman contact details and ensure foreman is included in crew_employees
-    const list = [];
-    crewsByJob.forEach((crew) => {
-      if (!crew.foreman && crew.employees.length > 0) {
-        crew.foreman = crew.employees[0];
-      }
-      if (!crew.foreman) return;
-      const fRec = findEmpRecord(crew.foreman);
-      crew.phone = getEmpPhone(fRec);
-      crew.email = getEmpEmail(fRec);
-      if (!crew.employees.some((e) => e.toLowerCase() === crew.foreman.toLowerCase())) {
-        crew.employees.unshift(crew.foreman);
-      }
-      crew.employees.sort((a, b) => a.localeCompare(b));
-      list.push(crew);
+    // 3. Collect ONLY Foremen (F / GTO F), General Foremen (GF), Supervisors (SUP),
+    //    and any active Job Tracking Foreman / Crew Lead = Yes
+    const seenLeaders = new Set();
+    const leaders = [];
+
+    empRows.forEach((emp) => {
+      if (!isActiveEmp(emp)) return;
+      const empName = String(emp['Employee Name'] || emp['Name'] || '').trim();
+      if (!empName) return;
+
+      const rawClass = String(emp['Job Classification'] || emp['Class'] || '').trim();
+      const normRole = normalizeRole(rawClass);
+      const isCrewLeadFlag = /^(yes|true|y|1)$/i.test(String(emp['Crew Lead'] || '').trim());
+      const cleanNameKey = empName.toLowerCase().replace(/\s*\([^)]*\)/g, '').trim();
+      const isJtForeman = jtForemanNames.has(cleanNameKey);
+      const isLeaderClass = LEADER_CLASSES.has(rawClass.toUpperCase()) || ['SUP', 'GF', 'F', 'GTO F'].includes(normRole);
+
+      if (!isLeaderClass && !isCrewLeadFlag && !isJtForeman) return;
+
+      // Skip Light Duty employees on 005- unless they are SUP/GF
+      const stLower = String(emp['Status'] || '').trim().toLowerCase();
+      if (stLower.includes('light duty') && normRole !== 'SUP' && normRole !== 'GF') return;
+
+      if (seenLeaders.has(cleanNameKey)) return;
+      seenLeaders.add(cleanNameKey);
+
+      const baseJob = this.getBaseJobNumber(emp['Job Number'] || emp['Job #'] || '');
+      const jtInfo = baseJob ? jtByBaseJob.get(baseJob.toLowerCase()) : null;
+      const rawLoc = String(emp['Location'] || '').replace(/\s*\([^)]*\)/g, '').trim();
+      const cleanLoc = (jtInfo && jtInfo.location) || (STATUS_LOCS.has(rawLoc.toLowerCase()) ? '' : rawLoc);
+
+      const crewList = baseJob ? [...(employeesByBaseJob.get(baseJob.toLowerCase()) || [])] : [empName];
+      if (!crewList.includes(empName)) crewList.unshift(empName);
+      crewList.sort((a, b) => a.localeCompare(b));
+
+      leaders.push({
+        foreman: empName,
+        role: normRole || 'F',
+        isPrimaryLead: isCrewLeadFlag || isJtForeman,
+        jobNumber: baseJob || String(emp['Job Number'] || '').trim(),
+        jobName: (jtInfo && jtInfo.jobName) || '',
+        location: cleanLoc,
+        status: String(emp['Status'] || 'Active').trim(),
+        employees: crewList,
+        phone: getEmpPhone(emp),
+        email: getEmpEmail(emp)
+      });
     });
 
-    return list.sort((a, b) => a.foreman.localeCompare(b.foreman));
+    // Sort: Foremen & GF & SUP cleanly by Name
+    return leaders.sort((a, b) => a.foreman.localeCompare(b.foreman));
   }
 
   // ---------------------------------------------------------------------------
@@ -747,22 +773,31 @@ END $$;`;
     const existing = document.getElementById('eq-audit-create-modal');
     if (existing) existing.remove();
 
-    const crews = this.getActiveCrewsList(false);
+    const crews = this.getActiveCrewsList();
+    this._pendingCrewsForModal = crews;
+    this._modalRoleFilter = 'all';
+    this._modalSearchText = '';
+    this._modalSelectedIdx = new Set(crews.map((_, idx) => idx));
+
     const defaultCampaign = `${new Date().toLocaleString('en-US', { month: 'long', year: 'numeric' })} Crew Equipment Audit`;
+
+    const fCount = crews.filter((c) => c.role === 'F' || c.role === 'GTO F').length;
+    const gfCount = crews.filter((c) => c.role === 'GF').length;
+    const supCount = crews.filter((c) => c.role === 'SUP').length;
 
     const modal = document.createElement('div');
     modal.id = 'eq-audit-create-modal';
-    modal.className = 'modal-overlay active';
-    modal.style.cssText = 'position:fixed;inset:0;z-index:2000;background:rgba(2,6,23,0.75);display:flex;align-items:center;justify-content:center;padding:16px;';
+    // NOTE: Do NOT use .modal-overlay class here because app.css sets pointer-events: none on .modal-overlay
+    modal.style.cssText = 'position:fixed;inset:0;z-index:15000;background:rgba(2,6,23,0.78);display:flex;align-items:center;justify-content:center;padding:16px;pointer-events:auto;';
 
     modal.innerHTML = `
-      <div style="width:100%;max-width:740px;max-height:90vh;background:#0f172a;border:1px solid rgba(59,130,246,0.45);border-radius:14px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 24px 60px rgba(0,0,0,0.6);">
-        <div style="padding:14px 18px;background:linear-gradient(135deg,#1e3a8a 0%,#1d4ed8 100%);display:flex;justify-content:space-between;align-items:center;">
-          <h3 style="margin:0;font-size:15.5px;font-weight:800;color:#fff;">📋 Create Equipment Audit Links for Foremen</h3>
-          <button style="background:none;border:none;color:#fff;font-size:22px;cursor:pointer;" onclick="document.getElementById('eq-audit-create-modal').remove()">&times;</button>
+      <div class="modal-box" style="width:100%;max-width:780px;max-height:90vh;background:#0f172a;border:1px solid rgba(59,130,246,0.45);border-radius:14px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 24px 60px rgba(0,0,0,0.6);pointer-events:auto;">
+        <div style="padding:14px 18px;background:linear-gradient(135deg,#1e3a8a 0%,#1d4ed8 100%);display:flex;justify-content:space-between;align-items:center;flex-shrink:0;">
+          <h3 style="margin:0;font-size:15.5px;font-weight:800;color:#fff;">📋 Create Equipment Audit Links (Foremen, GF &amp; SUP)</h3>
+          <button style="background:none;border:none;color:#fff;font-size:22px;cursor:pointer;line-height:1;" onclick="document.getElementById('eq-audit-create-modal').remove()">&times;</button>
         </div>
-        <div style="padding:16px 18px;overflow-y:auto;display:flex;flex-direction:column;gap:12px;">
-          <div style="display:grid;grid-template-columns:2fr 1fr;gap:10px;">
+        <div style="padding:16px 18px;display:flex;flex-direction:column;gap:11px;flex:1;min-height:0;overflow:hidden;">
+          <div style="display:grid;grid-template-columns:2fr 1fr;gap:10px;flex-shrink:0;">
             <div>
               <label style="display:block;font-size:11.5px;font-weight:700;color:#94a3b8;margin-bottom:4px;">AUDIT CAMPAIGN NAME</label>
               <input type="text" id="eq-audit-campaign-name" class="sheet-search" style="width:100%;font-size:13px;" value="${this.escapeHtml(defaultCampaign)}">
@@ -777,53 +812,163 @@ END $$;`;
               </select>
             </div>
           </div>
-          <div>
+          <div style="flex-shrink:0;">
             <label style="display:block;font-size:11.5px;font-weight:700;color:#94a3b8;margin-bottom:4px;">OPTIONAL INSTRUCTIONS SHOWN AT TOP OF FOREMAN FORM</label>
             <input type="text" id="eq-audit-notes" class="sheet-search" style="width:100%;font-size:12.5px;" placeholder="e.g., Please check all trucks and personal bags for rubber, blankets, grounds, sticks, testers, and AEDs.">
           </div>
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;flex-shrink:0;">
+            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+              <button type="button" class="btn btn-primary eq-role-pill" data-role="all" style="font-size:11px;padding:4px 9px;" onclick="window.equipmentAuditsEngine.setCreateModalRoleFilter('all')">All (${crews.length})</button>
+              <button type="button" class="btn btn-secondary eq-role-pill" data-role="foremen" style="font-size:11px;padding:4px 9px;color:#93c5fd;" onclick="window.equipmentAuditsEngine.setCreateModalRoleFilter('foremen')">Foremen (${fCount})</button>
+              <button type="button" class="btn btn-secondary eq-role-pill" data-role="GF" style="font-size:11px;padding:4px 9px;color:#fdba74;" onclick="window.equipmentAuditsEngine.setCreateModalRoleFilter('GF')">GF (${gfCount})</button>
+              <button type="button" class="btn btn-secondary eq-role-pill" data-role="SUP" style="font-size:11px;padding:4px 9px;color:#d8b4fe;" onclick="window.equipmentAuditsEngine.setCreateModalRoleFilter('SUP')">SUP (${supCount})</button>
+            </div>
+            <input type="text" id="eq-audit-modal-search" class="sheet-search" style="width:210px;font-size:12px;padding:4px 8px;" placeholder="Filter name, job #, city..." oninput="window.equipmentAuditsEngine.setCreateModalSearch(this.value)">
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;flex-shrink:0;">
             <label style="font-size:12px;font-weight:700;color:#e2e8f0;display:flex;align-items:center;gap:6px;cursor:pointer;">
-              <input type="checkbox" id="eq-audit-select-all-crews" checked onchange="document.querySelectorAll('.eq-audit-crew-chk').forEach(c => c.checked = this.checked)">
-              Select Foremen / Active Crews (${crews.length})
+              <input type="checkbox" id="eq-audit-select-all-crews" checked onchange="window.equipmentAuditsEngine.toggleSelectAllModalLeaders(this.checked)">
+              <span id="eq-audit-select-all-label">Select All Shown (${crews.length})</span>
             </label>
-            <span style="font-size:11px;color:#94a3b8;">Each foreman gets a unique private link pre-loaded with their crew roster</span>
+            <span style="font-size:11px;color:#94a3b8;">Each leader gets a unique private link pre-loaded with their full crew roster</span>
           </div>
-          <div style="max-height:300px;overflow-y:auto;border:1px solid var(--border-color);border-radius:8px;background:rgba(15,23,42,0.8);">
-            ${crews.length === 0 ? `<div style="padding:20px;text-align:center;color:#94a3b8;font-size:13px;">No active crews found in Job Tracking / Employees. Load your database snapshot first.</div>` : crews.map((c, idx) => `
-              <label style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-bottom:1px solid rgba(148,163,184,0.12);cursor:pointer;">
-                <input type="checkbox" class="eq-audit-crew-chk" data-crew-idx="${idx}" checked>
-                <div style="flex:1;min-width:0;">
-                  <div style="font-size:13px;font-weight:700;color:#f8fafc;">${this.escapeHtml(c.foreman)} <span style="color:#60a5fa;font-weight:600;">(${this.escapeHtml(c.jobNumber)})</span></div>
-                  <div style="font-size:11.5px;color:#94a3b8;">
-                    ${this.escapeHtml(c.location || 'No Location')}${c.jobName ? ` • ${this.escapeHtml(c.jobName)}` : ''} • ${c.employees.length} crew members
-                  </div>
-                </div>
-                <div style="text-align:right;font-size:11px;color:#94a3b8;">
-                  <div>${c.phone ? `📱 ${this.escapeHtml(c.phone)}` : '<span style="color:#f87171;">No phone</span>'}</div>
-                  <div>${c.email ? `📧 ${this.escapeHtml(c.email)}` : '<span style="color:#fbbf24;">No email</span>'}</div>
-                </div>
-              </label>
-            `).join('')}
-          </div>
+          <div id="eq-audit-modal-list" style="flex:1;min-height:180px;max-height:360px;overflow-y:auto;overscroll-behavior:contain;border:1px solid var(--border-color);border-radius:8px;background:rgba(15,23,42,0.85);"></div>
         </div>
-        <div style="padding:12px 18px;border-top:1px solid var(--border-color);display:flex;justify-content:flex-end;gap:8px;background:rgba(15,23,42,0.9);">
-          <button class="btn btn-secondary" onclick="document.getElementById('eq-audit-create-modal').remove()">Cancel</button>
-          <button class="btn btn-primary" id="btn-eq-audit-create-confirm" style="background:linear-gradient(135deg,#059669 0%,#047857 100%);border:none;font-weight:700;" onclick="window.equipmentAuditsEngine.confirmCreateCampaign()">
-            ✨ Generate Audit Links
-          </button>
+        <div style="padding:12px 18px;border-top:1px solid var(--border-color);display:flex;justify-content:space-between;align-items:center;gap:8px;background:rgba(15,23,42,0.95);flex-shrink:0;">
+          <span id="eq-audit-selected-summary" style="font-size:12px;color:#93c5fd;font-weight:700;">${crews.length} selected</span>
+          <div style="display:flex;gap:8px;">
+            <button class="btn btn-secondary" onclick="document.getElementById('eq-audit-create-modal').remove()">Cancel</button>
+            <button class="btn btn-primary" id="btn-eq-audit-create-confirm" style="background:linear-gradient(135deg,#059669 0%,#047857 100%);border:none;font-weight:700;" onclick="window.equipmentAuditsEngine.confirmCreateCampaign()">
+              ✨ Generate Audit Links (${crews.length})
+            </button>
+          </div>
         </div>
       </div>
     `;
 
-    this._pendingCrewsForModal = crews;
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) modal.remove();
+    });
+
     document.body.appendChild(modal);
+    this.renderCreateModalList();
+  }
+
+  getFilteredModalLeaderIndices() {
+    const crews = this._pendingCrewsForModal || [];
+    const roleFilter = this._modalRoleFilter || 'all';
+    const q = String(this._modalSearchText || '').trim().toLowerCase();
+    const out = [];
+    crews.forEach((c, idx) => {
+      if (roleFilter === 'foremen' && c.role !== 'F' && c.role !== 'GTO F') return;
+      if (roleFilter === 'GF' && c.role !== 'GF') return;
+      if (roleFilter === 'SUP' && c.role !== 'SUP') return;
+      if (q) {
+        const hay = `${c.foreman} ${c.role} ${c.jobNumber} ${c.jobName} ${c.location}`.toLowerCase();
+        if (!hay.includes(q)) return;
+      }
+      out.push(idx);
+    });
+    return out;
+  }
+
+  renderCreateModalList() {
+    const listEl = document.getElementById('eq-audit-modal-list');
+    if (!listEl) return;
+    const crews = this._pendingCrewsForModal || [];
+    const indices = this.getFilteredModalLeaderIndices();
+    const sel = this._modalSelectedIdx || new Set();
+
+    const roleBadgeHtml = (role) => {
+      if (role === 'SUP') return '<span style="font-size:10px;font-weight:800;padding:1px 6px;border-radius:4px;background:rgba(168,85,247,0.2);border:1px solid rgba(168,85,247,0.45);color:#d8b4fe;">SUP</span>';
+      if (role === 'GF') return '<span style="font-size:10px;font-weight:800;padding:1px 6px;border-radius:4px;background:rgba(249,115,22,0.2);border:1px solid rgba(249,115,22,0.45);color:#fdba74;">GF</span>';
+      return `<span style="font-size:10px;font-weight:800;padding:1px 6px;border-radius:4px;background:rgba(59,130,246,0.2);border:1px solid rgba(59,130,246,0.45);color:#93c5fd;">${this.escapeHtml(role || 'F')}</span>`;
+    };
+
+    if (indices.length === 0) {
+      listEl.innerHTML = `<div style="padding:24px;text-align:center;color:#94a3b8;font-size:13px;">No matching Foremen, GF, or SUP found.</div>`;
+    } else {
+      listEl.innerHTML = indices.map((idx) => {
+        const c = crews[idx];
+        const isChecked = sel.has(idx);
+        const crewLabel = c.employees.length === 1 ? '1 crew member' : `${c.employees.length} crew members`;
+        return `
+          <label style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-bottom:1px solid rgba(148,163,184,0.12);cursor:pointer;">
+            <input type="checkbox" class="eq-audit-crew-chk" data-crew-idx="${idx}" ${isChecked ? 'checked' : ''} onchange="window.equipmentAuditsEngine.toggleModalLeader(${idx}, this.checked)">
+            <div style="flex:1;min-width:0;">
+              <div style="font-size:13px;font-weight:700;color:#f8fafc;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                <span>${this.escapeHtml(c.foreman)}</span>
+                ${roleBadgeHtml(c.role)}
+                ${c.jobNumber ? `<span style="color:#60a5fa;font-weight:600;">(${this.escapeHtml(c.jobNumber)})</span>` : ''}
+                ${c.status && c.status.toLowerCase() !== 'active' ? `<span style="font-size:10px;color:#fbbf24;">• ${this.escapeHtml(c.status)}</span>` : ''}
+              </div>
+              <div style="font-size:11.5px;color:#94a3b8;margin-top:1px;">
+                ${this.escapeHtml(c.location || 'No Location')}${c.jobName ? ` • ${this.escapeHtml(c.jobName)}` : ''} • ${crewLabel}
+              </div>
+            </div>
+            <div style="text-align:right;font-size:11px;color:#94a3b8;flex-shrink:0;">
+              <div>${c.phone ? `📱 ${this.escapeHtml(c.phone)}` : '<span style="color:#f87171;">No phone</span>'}</div>
+              <div>${c.email ? `📧 ${this.escapeHtml(c.email)}` : '<span style="color:#fbbf24;">No email</span>'}</div>
+            </div>
+          </label>
+        `;
+      }).join('');
+    }
+
+    const selectAllChk = document.getElementById('eq-audit-select-all-crews');
+    const selectAllLabel = document.getElementById('eq-audit-select-all-label');
+    if (selectAllChk) {
+      selectAllChk.checked = indices.length > 0 && indices.every((i) => sel.has(i));
+    }
+    if (selectAllLabel) {
+      selectAllLabel.textContent = `Select All Shown (${indices.length})`;
+    }
+    const summaryEl = document.getElementById('eq-audit-selected-summary');
+    if (summaryEl) summaryEl.textContent = `${sel.size} selected`;
+    const confirmBtn = document.getElementById('btn-eq-audit-create-confirm');
+    if (confirmBtn && !confirmBtn.disabled) {
+      confirmBtn.textContent = `✨ Generate Audit Links (${sel.size})`;
+    }
+
+    document.querySelectorAll('.eq-role-pill').forEach((btn) => {
+      const active = btn.dataset.role === (this._modalRoleFilter || 'all');
+      btn.classList.toggle('btn-primary', active);
+      btn.classList.toggle('btn-secondary', !active);
+    });
+  }
+
+  setCreateModalRoleFilter(role) {
+    this._modalRoleFilter = role || 'all';
+    this.renderCreateModalList();
+  }
+
+  setCreateModalSearch(val) {
+    this._modalSearchText = String(val || '');
+    this.renderCreateModalList();
+  }
+
+  toggleModalLeader(idx, checked) {
+    if (!this._modalSelectedIdx) this._modalSelectedIdx = new Set();
+    if (checked) this._modalSelectedIdx.add(idx);
+    else this._modalSelectedIdx.delete(idx);
+    this.renderCreateModalList();
+  }
+
+  toggleSelectAllModalLeaders(checked) {
+    if (!this._modalSelectedIdx) this._modalSelectedIdx = new Set();
+    const indices = this.getFilteredModalLeaderIndices();
+    indices.forEach((i) => {
+      if (checked) this._modalSelectedIdx.add(i);
+      else this._modalSelectedIdx.delete(i);
+    });
+    this.renderCreateModalList();
   }
 
   async confirmCreateCampaign() {
     const crews = this._pendingCrewsForModal || [];
-    const checkedIdx = Array.from(document.querySelectorAll('.eq-audit-crew-chk:checked')).map((el) => Number(el.dataset.crewIdx));
+    const checkedIdx = Array.from(this._modalSelectedIdx || []).filter((i) => crews[i]);
     if (checkedIdx.length === 0) {
-      this.toast('Select at least one foreman/crew.', 'error');
+      this.toast('Select at least one foreman, GF, or SUP.', 'error');
       return;
     }
 
@@ -881,7 +1026,7 @@ END $$;`;
 
     const modal = document.createElement('div');
     modal.id = 'eq-audit-settings-modal';
-    modal.style.cssText = 'position:fixed;inset:0;z-index:2000;background:rgba(2,6,23,0.75);display:flex;align-items:center;justify-content:center;padding:16px;';
+    modal.style.cssText = 'position:fixed;inset:0;z-index:15000;background:rgba(2,6,23,0.78);display:flex;align-items:center;justify-content:center;padding:16px;pointer-events:auto;';
     modal.innerHTML = `
       <div style="width:100%;max-width:560px;background:#0f172a;border:1px solid rgba(59,130,246,0.45);border-radius:14px;overflow:hidden;box-shadow:0 24px 60px rgba(0,0,0,0.6);">
         <div style="padding:14px 18px;background:linear-gradient(135deg,#1e3a8a 0%,#1d4ed8 100%);display:flex;justify-content:space-between;align-items:center;">
@@ -1232,11 +1377,12 @@ END $$;`;
     // Also include current live employees on that job number
     const snap = this.db ? this.db.getSnapshot() : null;
     const emps = (snap && snap.tables && snap.tables.employees && snap.tables.employees.rows) || [];
-    const jobLower = String(req.job_number || '').trim().toLowerCase();
-    if (jobLower) {
+    const jobBase = this.getBaseJobNumber(req.job_number || '').toLowerCase();
+    if (jobBase) {
       emps.forEach((e) => {
-        const ej = String(e['Job Number'] || e['Job #'] || '').trim().toLowerCase();
-        if (ej === jobLower) {
+        const ejBase = this.getBaseJobNumber(e['Job Number'] || e['Job #'] || '').toLowerCase();
+        const secBase = this.getBaseJobNumber(e['Secondary Job Number'] || '').toLowerCase();
+        if (ejBase === jobBase || secBase === jobBase) {
           const nm = String(e['Employee Name'] || e['Name'] || '').trim();
           if (nm) set.add(this.normPerson(nm));
         }

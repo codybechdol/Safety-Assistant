@@ -1257,7 +1257,7 @@
       </section>
 
       <!-- View 5: Sync Settings -->
-      <section id="settings-view" class="view-container" style="overflow-y: auto; display: none; flex-direction: column;">
+      <section id="settings-view" class="view-container" style="overflow-y: auto; flex-direction: column;">
         <!-- Top Level Tabs Bar (Standard App Navigation) -->
         <div class="sheet-tabs-bar" style="margin-bottom: 0; background: var(--bg-secondary); border-bottom: 1px solid var(--border-color); padding: 0 16px; display: flex; gap: 6px; overflow-x: auto; flex-shrink: 0;">
           <button class="sheet-tab active" id="btn-settings-tab-sync" 
@@ -4140,7 +4140,7 @@
       if (auditEl) {
         const savedAudit = (window.equipmentAuditsEngine && typeof window.equipmentAuditsEngine.getFormBaseUrl === 'function')
           ? window.equipmentAuditsEngine.getFormBaseUrl()
-          : (localStorage.getItem('sa_audit_form_base_url') || '');
+          : (localStorage.getItem('sa_audit_form_base_url') || 'https://safety-assistant-audit.pages.dev');
         auditEl.value = savedAudit;
       }
       if (webEl) {
