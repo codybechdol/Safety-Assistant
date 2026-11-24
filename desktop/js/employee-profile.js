@@ -2414,7 +2414,7 @@ class EmployeeProfileEngine {
       desc: 'Use your phone or tablet camera directly in the app to scan rubber glove tags or equipment barcodes to instantly pull up records.'
     });
 
-    const appUrl = 'https://codybechdol.github.io/rubber-tracker/desktop/';
+    const appUrl = (localStorage.getItem('sa_web_app_url') || 'https://codybechdol.github.io/safety-assistant/desktop/').trim();
     const subject = `🛡️ Safety Assistant Access & Welcome Guide — ${displayName}`;
 
     // Generate Plain Text

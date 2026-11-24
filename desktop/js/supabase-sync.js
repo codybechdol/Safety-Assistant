@@ -221,6 +221,7 @@ class SupabaseSyncEngine {
         label: '⚙️ Sync Settings', 
         tabs: [
           { key: 'sync_setup', label: '⚡ Sync & Database Controls' },
+          { key: 'devices_guide', label: '📱 Add Devices & Cloud Guide' },
           { key: 'system_config', label: '⚙️ System Config Table' }
         ] 
       }

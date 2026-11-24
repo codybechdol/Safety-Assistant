@@ -1,4 +1,4 @@
-# Rubber Tracker System Architecture
+# Safety Assistant System Architecture
 
 ## Complete Documentation of Sheets, HTML Dialogs, and Data Flow
 
@@ -25,7 +25,7 @@
 
 # System Overview
 
-Rubber Tracker is a Google Sheets-based inventory and safety compliance management system for electrical safety equipment (rubber gloves and sleeves). The system:
+Safety Assistant is a Google Sheets-based inventory and safety compliance management system for electrical safety equipment (rubber gloves and sleeves). The system:
 
 - Tracks rubber gloves and sleeves inventory
 - Manages employee assignments and certifications
@@ -1095,6 +1095,6 @@ Rubber Tracker is a Google Sheets-based inventory and safety compliance manageme
 
 ---
 
-*This document was auto-generated from the Rubber Tracker codebase.*
+*This document was auto-generated from the Safety Assistant codebase.*
 *For questions, contact the system administrator.*
 

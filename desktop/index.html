@@ -1265,6 +1265,11 @@
                   style="display: inline-flex; align-items: center; gap: 8px; padding: 10px 18px; border: none; background: rgba(56, 189, 248, 0.12); color: #38bdf8; font-weight: 700; font-size: 13px; cursor: pointer; border-bottom: 2px solid #38bdf8; transition: all 0.15s ease;">
             <span>⚡</span> Sync &amp; Database Controls
           </button>
+          <button class="sheet-tab" id="btn-settings-tab-guide" 
+                  onclick="switchSettingsTab('guide')"
+                  style="display: inline-flex; align-items: center; gap: 8px; padding: 10px 18px; border: none; background: transparent; color: var(--text-muted); font-weight: 700; font-size: 13px; cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.15s ease;">
+            <span>📱</span> Add Devices &amp; Cloud Guide
+          </button>
           <button class="sheet-tab" id="btn-settings-tab-config" 
                   onclick="switchSettingsTab('config')"
                   style="display: inline-flex; align-items: center; gap: 8px; padding: 10px 18px; border: none; background: transparent; color: var(--text-muted); font-weight: 700; font-size: 13px; cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.15s ease;">
@@ -1274,7 +1279,21 @@
         </div>
 
         <!-- Tab 1: Sync Controls Panel -->
-        <div id="settings-sync-panel" style="padding: 24px; max-width: 680px; width: 100%; box-sizing: border-box; overflow-y: auto;">
+        <div id="settings-sync-panel" style="padding: 24px; max-width: 760px; width: 100%; box-sizing: border-box; overflow-y: auto;">
+          <!-- Quick link card to Add Devices & Cloud Guide -->
+          <div style="background: linear-gradient(135deg, rgba(59, 130, 246, 0.12) 0%, rgba(15, 23, 42, 0.9) 100%); border: 1px solid rgba(59, 130, 246, 0.4); border-radius: 8px; padding: 14px 18px; margin-bottom: 14px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+            <div>
+              <div style="font-size: 13px; font-weight: 700; color: #f8fafc; display: flex; align-items: center; gap: 6px;">
+                <span>📱</span> Add Safety Assistant to Another Computer or Tablet + Cloud Architecture Guide
+              </div>
+              <div style="font-size: 11.5px; color: #cbd5e1; margin-top: 2px;">
+                Step-by-step install guides for Windows PCs &amp; iPads/tablets, plus plain-English explanations of Supabase (device sync) and Cloudflare Pages (foreman audit host).
+              </div>
+            </div>
+            <button class="btn btn-primary" style="font-size: 11.5px; font-weight: 700; background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%); border: none; display: inline-flex; align-items: center; gap: 5px;" onclick="switchSettingsTab('guide')">
+              <span>📖</span> Open Setup &amp; Cloud Guide
+            </button>
+          </div>
           <!-- Quick link card to System Config -->
           <div style="background-color: var(--bg-secondary); border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 8px; padding: 14px 18px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
             <div>
@@ -1293,14 +1312,14 @@
           <div style="background: linear-gradient(135deg, rgba(16, 185, 129, 0.08) 0%, rgba(15, 23, 42, 0.9) 100%); border: 1px solid rgba(16, 185, 129, 0.45); border-radius: 8px; padding: 20px; margin-bottom: 20px;">
             <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; flex-wrap: wrap; gap: 8px;">
               <h3 style="font-size: 14px; margin: 0; display: flex; align-items: center; gap: 8px; color: #f8fafc;">
-                <span>⚡</span> Multi-User Real-Time Sync (Supabase)
+                <span>⚡</span> Multi-User Real-Time Sync (Supabase — Laptop &amp; Tablet Sync Engine)
               </h3>
               <span id="supabase-status-badge" class="badge" style="background: rgba(148, 163, 184, 0.15); color: #94a3b8; border: 1px solid rgba(148, 163, 184, 0.35); font-size: 10.5px; font-weight: 700; padding: 3px 8px; border-radius: 4px;">
                 Not Configured (Using Google Drive)
               </span>
             </div>
             <p style="font-size: 12px; color: var(--text-secondary); margin-bottom: 14px; line-height: 1.5;">
-              Optional high-speed PostgreSQL + Realtime WebSocket layer for multiple laptops & tablets editing simultaneously (~1s downloads, instant row-level merges). Leave blank to use standard Google Drive sync only.
+              <strong>Supabase</strong> is the cloud database service that makes your office laptop, additional computers, and field tablets sync together in real time (~1s full downloads and instant row/cell updates over WebSockets). It also securely stores Foreman Equipment Audit links, drafts, submissions, and archives.
             </p>
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
               <div>
@@ -1334,6 +1353,43 @@
               </button>
               <button class="btn btn-secondary" style="border-color: #10b981; color: #34d399; font-weight: 600;" onclick="window.supabaseSync && window.supabaseSync.downloadSnapshotFromSupabase({ showModal: true })">
                 ⚡ Download from Supabase
+              </button>
+            </div>
+          </div>
+
+          <!-- Cloudflare Pages & Tablet Web App Hosting Card -->
+          <div style="background: linear-gradient(135deg, rgba(249, 115, 22, 0.08) 0%, rgba(15, 23, 42, 0.9) 100%); border: 1px solid rgba(249, 115, 22, 0.45); border-radius: 8px; padding: 20px; margin-bottom: 20px;">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; flex-wrap: wrap; gap: 8px;">
+              <h3 style="font-size: 14px; margin: 0; display: flex; align-items: center; gap: 8px; color: #f8fafc;">
+                <span>🌐</span> Web Hosting URLs (Cloudflare Pages &amp; Tablet App)
+              </h3>
+              <span class="badge" style="background: rgba(249, 115, 22, 0.16); color: #fdba74; border: 1px solid rgba(249, 115, 22, 0.4); font-size: 10.5px; font-weight: 700; padding: 3px 8px; border-radius: 4px;">
+                $0/mo Static Hosting
+              </span>
+            </div>
+            <p style="font-size: 12px; color: var(--text-secondary); margin-bottom: 14px; line-height: 1.5;">
+              <strong>Cloudflare Pages</strong> hosts the standalone, zero-download <strong>Foreman Equipment Audit Form</strong> (<code>audit-form/</code>). No company data is stored on Cloudflare — it only serves the blank form over HTTPS and talks securely to Supabase via private links.
+            </p>
+            <div style="margin-bottom: 12px;">
+              <label style="font-size: 11px; font-weight: 700; color: #fdba74; display: block; margin-bottom: 4px;">FOREMAN EQUIPMENT AUDIT FORM URL (CLOUDFLARE PAGES)</label>
+              <div style="display: flex; gap: 6px;">
+                <input type="url" id="settings-audit-form-url-input" class="sheet-search" style="flex: 1;" placeholder="https://safety-assistant-audit.pages.dev">
+                <button class="btn btn-secondary" style="font-size: 11.5px; padding: 5px 10px;" onclick="copySettingsInputUrl('settings-audit-form-url-input', 'Foreman Audit Form URL')">📋 Copy</button>
+              </div>
+            </div>
+            <div style="margin-bottom: 14px;">
+              <label style="font-size: 11px; font-weight: 700; color: #93c5fd; display: block; margin-bottom: 4px;">SAFETY ASSISTANT WEB / TABLET APP URL (FOR IPADS &amp; WELCOME LETTERS)</label>
+              <div style="display: flex; gap: 6px;">
+                <input type="url" id="settings-web-app-url-input" class="sheet-search" style="flex: 1;" placeholder="https://codybechdol.github.io/safety-assistant/desktop/">
+                <button class="btn btn-secondary" style="font-size: 11.5px; padding: 5px 10px;" onclick="copySettingsInputUrl('settings-web-app-url-input', 'Tablet Web App URL')">📋 Copy</button>
+              </div>
+            </div>
+            <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+              <button class="btn btn-primary" style="background: linear-gradient(135deg, #ea580c 0%, #c2410c 100%); border: none; font-weight: 700;" onclick="saveCloudHostingUrls()">
+                💾 Save Hosting URLs
+              </button>
+              <button class="btn btn-secondary" style="font-size: 11.5px; color: #93c5fd;" onclick="switchSettingsTab('guide')">
+                📖 How Cloudflare &amp; Supabase Work Together
               </button>
             </div>
           </div>
@@ -1393,7 +1449,161 @@
           </div>
         </div>
 
-        <!-- Tab 2: System Config Table Panel -->
+        <!-- Tab 2: Add Devices & Cloud Architecture Guide Panel -->
+        <div id="settings-guide-panel" style="display: none; padding: 24px; max-width: 920px; width: 100%; box-sizing: border-box; overflow-y: auto;">
+          <!-- SECTION 1: Cloud Services & Hosting Explained -->
+          <div style="background: rgba(15, 23, 42, 0.72); border: 1px solid rgba(56, 189, 248, 0.35); border-radius: 10px; padding: 20px; margin-bottom: 20px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 12px;">
+              <div>
+                <h3 style="margin: 0; font-size: 16px; color: #f8fafc; display: flex; align-items: center; gap: 8px;">
+                  <span>🧩</span> How Safety Assistant Works Under the Hood (Cloud Services Explained)
+                </h3>
+                <div style="font-size: 12px; color: #94a3b8; margin-top: 3px;">
+                  Plain-English breakdown of each cloud app/service that powers device syncing, foreman audit forms, and backups.
+                </div>
+              </div>
+              <span class="badge" style="background: rgba(16, 185, 129, 0.16); color: #6ee7b7; border: 1px solid rgba(16, 185, 129, 0.4); font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 999px;">
+                All Free Tiers ($0/mo)
+              </span>
+            </div>
+
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 12px;">
+              <!-- Supabase Card -->
+              <div style="background: linear-gradient(135deg, rgba(16, 185, 129, 0.1) 0%, rgba(30, 41, 59, 0.85) 100%); border: 1px solid rgba(16, 185, 129, 0.4); border-radius: 8px; padding: 15px;">
+                <div style="font-size: 13.5px; font-weight: 800; color: #6ee7b7; margin-bottom: 6px;">
+                  ⚡ Supabase (PostgreSQL + Realtime) — Laptop &amp; Tablet Sync Engine
+                </div>
+                <p style="font-size: 12px; color: #e2e8f0; margin: 0 0 8px 0; line-height: 1.55;">
+                  <strong>This is the service that makes your laptop, additional computers, and tablets stay synced together in real time.</strong>
+                </p>
+                <ul style="margin: 0; padding-left: 18px; font-size: 12px; color: #cbd5e1; line-height: 1.55;">
+                  <li><strong>Live Multi-Device Sync:</strong> Whenever you edit a cell, complete a swap, or update a crew on your laptop or tablet, Supabase streams that exact change over WebSockets (<code>sa_mutations</code> &amp; <code>sa_tables</code>) to every other open device in milliseconds.</li>
+                  <li><strong>Fast Downloads (~1 second):</strong> Clicking <em>Download Snapshot</em> on a new computer or tablet pulls the entire database straight from Supabase.</li>
+                  <li><strong>Foreman Equipment Audits Database:</strong> Securely stores private foreman audit links, multi-day drafts, submitted equipment counts, and your permanent Audit Archive (<code>sa_audit_requests</code> &amp; <code>sa_audit_submissions</code>).</li>
+                  <li><strong>Dashboard:</strong> <code>supabase.com/dashboard</code> (Project: <em>Safety Assistant</em>).</li>
+                </ul>
+              </div>
+
+              <!-- Cloudflare Pages Card -->
+              <div style="background: linear-gradient(135deg, rgba(249, 115, 22, 0.1) 0%, rgba(30, 41, 59, 0.85) 100%); border: 1px solid rgba(249, 115, 22, 0.4); border-radius: 8px; padding: 15px;">
+                <div style="font-size: 13.5px; font-weight: 800; color: #fdba74; margin-bottom: 6px;">
+                  🌐 Cloudflare Pages — Web Host for the Foreman Audit Form
+                </div>
+                <p style="font-size: 12px; color: #e2e8f0; margin: 0 0 8px 0; line-height: 1.55;">
+                  <strong>Yes — Cloudflare Pages is the free static web host for the new Foreman Equipment Audit Form.</strong>
+                </p>
+                <ul style="margin: 0; padding-left: 18px; font-size: 12px; color: #cbd5e1; line-height: 1.55;">
+                  <li><strong>What It Hosts:</strong> Only the blank mobile/iPad web form files from the <code>audit-form/</code> folder in your GitHub repository — <strong>zero company data or inventory is stored on Cloudflare</strong>.</li>
+                  <li><strong>How Foremen Use It:</strong> They tap their unique link from SMS or Email; it opens full-screen in Safari/Chrome with zero downloads or logins, caches offline via Service Worker, and saves drafts/submissions directly into <strong>Supabase</strong> using token-locked functions.</li>
+                  <li><strong>Why Cloudflare Pages:</strong> $0/month, unlimited bandwidth, automatic HTTPS, and connects directly to private GitHub repositories (auto-updates ~15 seconds after every GitHub push).</li>
+                  <li><strong>Setup Summary:</strong> Connect your <code>safety-assistant</code> GitHub repo → Branch: <code>App-Migration</code> → Build Command: <em>blank</em> → Output Directory: <code>audit-form</code>.</li>
+                </ul>
+              </div>
+
+              <!-- Google Sheets / Apps Script Card -->
+              <div style="background: linear-gradient(135deg, rgba(59, 130, 246, 0.1) 0%, rgba(30, 41, 59, 0.85) 100%); border: 1px solid rgba(59, 130, 246, 0.35); border-radius: 8px; padding: 15px;">
+                <div style="font-size: 13.5px; font-weight: 800; color: #93c5fd; margin-bottom: 6px;">
+                  📊 Google Sheets, Drive &amp; Apps Script — Archive &amp; Gmail Engine
+                </div>
+                <ul style="margin: 0; padding-left: 18px; font-size: 12px; color: #cbd5e1; line-height: 1.55;">
+                  <li><strong>Master Backups:</strong> Clicking <em>Sync &amp; Save</em> writes point-in-time JSON restore points to Google Drive (<code>Safety Assistant Backups</code>) and keeps your Google Sheet repository updated.</li>
+                  <li><strong>Gmail Automation:</strong> Scans Gmail for Safety Compliance reports (JHAs, Safety Meetings, Monthly Checklists), Incident Reports, Site Audits, and Certification renewal photos.</li>
+                  <li><strong>Outbound Audit Emails:</strong> Sends personalized HTML Equipment Audit link emails directly through your Gmail account (<code>GmailApp</code>) in 1 click.</li>
+                </ul>
+              </div>
+
+              <!-- GitHub Card -->
+              <div style="background: linear-gradient(135deg, rgba(168, 85, 247, 0.1) 0%, rgba(30, 41, 59, 0.85) 100%); border: 1px solid rgba(168, 85, 247, 0.35); border-radius: 8px; padding: 15px;">
+                <div style="font-size: 13.5px; font-weight: 800; color: #d8b4fe; margin-bottom: 6px;">
+                  🐙 GitHub (Safety Assistant Repo) — Code &amp; Auto-Deploys
+                </div>
+                <ul style="margin: 0; padding-left: 18px; font-size: 12px; color: #cbd5e1; line-height: 1.55;">
+                  <li><strong>Source of Truth for Code:</strong> Stores the Desktop App (<code>desktop/</code>), Google Apps Script (<code>src/</code>), Supabase SQL (<code>supabase/</code>), and Foreman Audit Form (<code>audit-form/</code>).</li>
+                  <li><strong>Auto-Deploy Trigger:</strong> Whenever updates are pushed to GitHub, Cloudflare Pages automatically redeploys the Foreman Audit Form (and GitHub Pages / Cloudflare Pages updates the Tablet Web App).</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+
+          <!-- SECTION 2: Install on Another Windows Computer -->
+          <div style="background: rgba(15, 23, 42, 0.72); border: 1px solid rgba(148, 163, 184, 0.3); border-radius: 10px; padding: 20px; margin-bottom: 20px;">
+            <h3 style="margin: 0 0 6px 0; font-size: 15.5px; color: #f8fafc; display: flex; align-items: center; gap: 8px;">
+              <span>💻</span> How to Add Safety Assistant to Another Computer (Windows)
+            </h3>
+            <p style="font-size: 12px; color: #94a3b8; margin: 0 0 14px 0;">
+              Before setting up another supervisor's computer, create their account &amp; 4-digit PIN first via the top-right <strong>👤 User Identity</strong> menu (or in their <strong>Employee Profile</strong>).
+            </p>
+
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px;">
+              <div style="background: rgba(30, 41, 59, 0.7); border: 1px solid rgba(59, 130, 246, 0.35); border-radius: 8px; padding: 14px;">
+                <div style="font-size: 12.5px; font-weight: 800; color: #93c5fd; margin-bottom: 8px;">Option A — Standalone Installer (Recommended for Other PCs)</div>
+                <ol style="margin: 0; padding-left: 18px; font-size: 12px; color: #e2e8f0; line-height: 1.65;">
+                  <li>On your main laptop, double-click <code>build-desktop-app.bat</code> in the Safety Assistant project folder.</li>
+                  <li>Open <code>desktop\dist\</code> and copy either <strong>Safety Assistant Setup 1.0.0.exe</strong> (full installer) or the <strong>Portable .exe</strong> onto a USB drive, Google Drive, or OneDrive.</li>
+                  <li>Run the installer on the new Windows computer and open <strong>Safety Assistant</strong>. <em>(Supabase &amp; Google sync URLs are already built in!)</em></li>
+                  <li>Click the <strong>👤 User Identity</strong> button in the top-right bar, choose the user's name, set Device Type to <em>Office Laptop</em> or <em>Field Laptop</em>, and enter their 4-digit PIN.</li>
+                  <li>Click <strong>⬇️ Download Snapshot</strong> once. The full database downloads from <strong>Supabase</strong> in ~1 second, and all future edits sync automatically between computers in real time.</li>
+                </ol>
+              </div>
+
+              <div style="background: rgba(30, 41, 59, 0.7); border: 1px solid rgba(148, 163, 184, 0.25); border-radius: 8px; padding: 14px;">
+                <div style="font-size: 12.5px; font-weight: 800; color: #cbd5e1; margin-bottom: 8px;">Option B — Run Live From Project Folder (Your Own Second PC)</div>
+                <ol style="margin: 0; padding-left: 18px; font-size: 12px; color: #cbd5e1; line-height: 1.65;">
+                  <li>Install <strong>Node.js</strong> and <strong>Git</strong> on the Windows PC.</li>
+                  <li>Clone the <code>safety-assistant</code> repository from GitHub and switch to the active branch (<code>App-Migration</code>).</li>
+                  <li>Open a terminal inside the <code>desktop\</code> folder and run <code>npm install</code> once.</li>
+                  <li>Right-click <code>create_desktop_shortcut.ps1</code> → <strong>Run with PowerShell</strong> to add the <em>Safety Assistant</em> shortcut to the Desktop (auto-runs live source files without rebuilding).</li>
+                  <li>Launch Safety Assistant, verify your <strong>👤 User Identity</strong>, and click <strong>⬇️ Download Snapshot</strong>.</li>
+                </ol>
+              </div>
+            </div>
+          </div>
+
+          <!-- SECTION 3: Install on a Tablet (iPad / Android) or Phone -->
+          <div style="background: rgba(15, 23, 42, 0.72); border: 1px solid rgba(16, 185, 129, 0.35); border-radius: 10px; padding: 20px; margin-bottom: 16px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 10px;">
+              <h3 style="margin: 0; font-size: 15.5px; color: #f8fafc; display: flex; align-items: center; gap: 8px;">
+                <span>📱</span> How to Add Safety Assistant to a Tablet (iPad / Android) or Phone
+              </h3>
+              <button class="btn btn-secondary" style="font-size: 11.5px; color: #6ee7b7; border-color: rgba(16, 185, 129, 0.45);" onclick="copySettingsInputUrl('settings-web-app-url-input', 'Tablet Web App URL')">
+                📋 Copy Tablet App Link
+              </button>
+            </div>
+            <p style="font-size: 12px; color: #cbd5e1; margin: 0 0 12px 0; line-height: 1.5;">
+              Safety Assistant runs as an offline-capable Progressive Web App (PWA) on tablets &amp; phones — no App Store required! Changes made on a tablet sync live with your laptop through <strong>Supabase</strong> (and queue safely offline when out of cell service).
+            </p>
+
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; margin-bottom: 14px;">
+              <div style="background: rgba(30, 41, 59, 0.7); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 8px; padding: 14px;">
+                <div style="font-size: 12.5px; font-weight: 800; color: #6ee7b7; margin-bottom: 8px;">🍎 iPad / iPhone (Must Use Safari)</div>
+                <ol style="margin: 0; padding-left: 18px; font-size: 12px; color: #e2e8f0; line-height: 1.65;">
+                  <li>Open <strong>Safari</strong> on the iPad/iPhone and go to your <strong>Safety Assistant Web / Tablet App URL</strong> (configured on the <em>Sync &amp; Database Controls</em> tab, or sent via the user's Welcome Letter).</li>
+                  <li>Tap the <strong>Share</strong> button (square with upward arrow) at the top/bottom of Safari.</li>
+                  <li>Scroll down and tap <strong>Add to Home Screen</strong> → tap <strong>Add</strong>.</li>
+                  <li>Close Safari and launch the new <strong>🛡️ Safety Assistant</strong> icon from the Home Screen so it runs full-screen.</li>
+                  <li>Tap <strong>👤 User Identity</strong> (top-right), select the user's name, set Device Type to <em>Field Tablet</em>, enter their 4-digit PIN, and tap <strong>⬇️ Download Database</strong>.</li>
+                </ol>
+              </div>
+
+              <div style="background: rgba(30, 41, 59, 0.7); border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 8px; padding: 14px;">
+                <div style="font-size: 12.5px; font-weight: 800; color: #7dd3fc; margin-bottom: 8px;">🤖 Android Tablet / Phone (Chrome)</div>
+                <ol style="margin: 0; padding-left: 18px; font-size: 12px; color: #e2e8f0; line-height: 1.65;">
+                  <li>Open <strong>Google Chrome</strong> and visit your <strong>Safety Assistant Web / Tablet App URL</strong>.</li>
+                  <li>Tap the <strong>⋮ Menu</strong> button (top-right) and choose <strong>Install App</strong> or <strong>Add to Home Screen</strong>.</li>
+                  <li>Open the installed <strong>🛡️ Safety Assistant</strong> icon from your Home Screen.</li>
+                  <li>Tap <strong>👤 User Identity</strong>, pick the user's name, enter their 4-digit PIN, and tap <strong>⬇️ Download Database</strong>.</li>
+                  <li>Supabase Realtime automatically keeps the tablet and office laptop in sync!</li>
+                </ol>
+              </div>
+            </div>
+
+            <div style="background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.4); border-radius: 8px; padding: 12px 14px; font-size: 12px; color: #fde68a; line-height: 1.5;">
+              <strong>👷 Important — Foremen Do NOT Install Safety Assistant:</strong> When sending an Equipment Inventory Audit to foremen, simply send them their personalized <strong>Cloudflare Pages</strong> link via SMS or Email from <strong>Equipment → 📋 Equipment Audits</strong>. It opens straight in Safari/Chrome with zero download, zero login, and zero visibility into Safety Assistant.
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab 3: System Config Table Panel -->
         <div id="settings-config-panel" style="display: none; flex: 1; flex-direction: column; overflow: hidden; background: var(--bg-primary); width: 100%;">
           <!-- Injected dynamically by renderSystemConfigTable() -->
         </div>
@@ -3745,6 +3955,7 @@
       if (viewId === 'weekly-summary-view' && window.weeklySummaryEngine) window.weeklySummaryEngine.render();
       if (viewId === 'tailgate-generator-view' && window.weeklySummaryEngine) window.weeklySummaryEngine.renderTailgateWorkspace();
       if (viewId === 'settings-view') {
+        if (typeof window.hydrateHostingUrlInputs === 'function') window.hydrateHostingUrlInputs();
         if (typeof window.updateSettingsConfigBadge === 'function') window.updateSettingsConfigBadge();
         if (window.activeSettingsTab === 'config' && typeof window.renderSystemConfigTable === 'function') {
           window.renderSystemConfigTable();
@@ -3923,6 +4134,74 @@
     }
     window.toggleAutoScanStartup = toggleAutoScanStartup;
 
+    function hydrateHostingUrlInputs() {
+      const auditEl = document.getElementById('settings-audit-form-url-input');
+      const webEl = document.getElementById('settings-web-app-url-input');
+      if (auditEl) {
+        const savedAudit = (window.equipmentAuditsEngine && typeof window.equipmentAuditsEngine.getFormBaseUrl === 'function')
+          ? window.equipmentAuditsEngine.getFormBaseUrl()
+          : (localStorage.getItem('sa_audit_form_base_url') || '');
+        auditEl.value = savedAudit;
+      }
+      if (webEl) {
+        const savedWeb = (localStorage.getItem('sa_web_app_url') || (window.localDB && window.localDB.snapshot && window.localDB.snapshot.configs && window.localDB.snapshot.configs.web_app_url) || 'https://codybechdol.github.io/safety-assistant/desktop/').trim();
+        webEl.value = savedWeb;
+      }
+    }
+    window.hydrateHostingUrlInputs = hydrateHostingUrlInputs;
+
+    function saveCloudHostingUrls() {
+      const auditUrl = (document.getElementById('settings-audit-form-url-input')?.value || '').trim().replace(/\/+$/, '');
+      const webUrl = (document.getElementById('settings-web-app-url-input')?.value || '').trim();
+      if (auditUrl && !/^https?:\/\//i.test(auditUrl)) {
+        alert('Foreman Audit Form URL must start with https://');
+        return;
+      }
+      if (webUrl && !/^https?:\/\//i.test(webUrl)) {
+        alert('Web / Tablet App URL must start with https://');
+        return;
+      }
+      if (window.equipmentAuditsEngine && typeof window.equipmentAuditsEngine.setFormBaseUrl === 'function') {
+        window.equipmentAuditsEngine.setFormBaseUrl(auditUrl);
+      } else {
+        try { localStorage.setItem('sa_audit_form_base_url', auditUrl); } catch { /* ignore */ }
+      }
+      try { localStorage.setItem('sa_web_app_url', webUrl); } catch { /* ignore */ }
+      if (window.localDB && window.localDB.snapshot) {
+        if (!window.localDB.snapshot.configs) window.localDB.snapshot.configs = {};
+        window.localDB.snapshot.configs.audit_form_base_url = auditUrl;
+        window.localDB.snapshot.configs.web_app_url = webUrl;
+        if (typeof window.localDB.schedulePersistSnapshot === 'function') {
+          window.localDB.schedulePersistSnapshot(window.localDB.snapshot, 400);
+        }
+      }
+      if (typeof window.showToast === 'function') {
+        window.showToast('✅ Saved Cloudflare Pages & Tablet App URLs!', 'success');
+      } else {
+        alert('✅ Saved Cloudflare Pages & Tablet App URLs!');
+      }
+    }
+    window.saveCloudHostingUrls = saveCloudHostingUrls;
+
+    function copySettingsInputUrl(inputId, label) {
+      const el = document.getElementById(inputId);
+      const val = (el && el.value ? el.value : '').trim();
+      if (!val) {
+        alert(`Please enter and save the ${label} first.`);
+        return;
+      }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(val).then(() => {
+          if (typeof window.showToast === 'function') {
+            window.showToast(`📋 Copied ${label} to clipboard!`, 'success');
+          } else {
+            alert(`📋 Copied ${label}:\n${val}`);
+          }
+        });
+      }
+    }
+    window.copySettingsInputUrl = copySettingsInputUrl;
+
     // Settings Tabs Navigation & System Config Workspace
     window.activeSettingsTab = 'sync';
     window.systemConfigSearchTerm = '';
@@ -3932,37 +4211,31 @@
     function switchSettingsTab(tab) {
       window.activeSettingsTab = tab || 'sync';
       const syncPanel = document.getElementById('settings-sync-panel');
+      const guidePanel = document.getElementById('settings-guide-panel');
       const configPanel = document.getElementById('settings-config-panel');
       const btnSync = document.getElementById('btn-settings-tab-sync');
+      const btnGuide = document.getElementById('btn-settings-tab-guide');
       const btnConfig = document.getElementById('btn-settings-tab-config');
 
+      const setTabStyle = (btn, isActive) => {
+        if (!btn) return;
+        btn.style.background = isActive ? 'rgba(56, 189, 248, 0.12)' : 'transparent';
+        btn.style.color = isActive ? '#38bdf8' : 'var(--text-muted)';
+        btn.style.borderBottomColor = isActive ? '#38bdf8' : 'transparent';
+      };
+
+      if (syncPanel) syncPanel.style.display = tab === 'sync' ? 'block' : 'none';
+      if (guidePanel) guidePanel.style.display = tab === 'guide' ? 'block' : 'none';
+      if (configPanel) configPanel.style.display = tab === 'config' ? 'flex' : 'none';
+
+      setTabStyle(btnSync, tab === 'sync' || !tab);
+      setTabStyle(btnGuide, tab === 'guide');
+      setTabStyle(btnConfig, tab === 'config');
+
       if (tab === 'config') {
-        if (syncPanel) syncPanel.style.display = 'none';
-        if (configPanel) configPanel.style.display = 'flex';
-        if (btnSync) {
-          btnSync.style.background = 'transparent';
-          btnSync.style.color = 'var(--text-muted)';
-          btnSync.style.borderBottomColor = 'transparent';
-        }
-        if (btnConfig) {
-          btnConfig.style.background = 'rgba(56, 189, 248, 0.12)';
-          btnConfig.style.color = '#38bdf8';
-          btnConfig.style.borderBottomColor = '#38bdf8';
-        }
         renderSystemConfigTable();
       } else {
-        if (configPanel) configPanel.style.display = 'none';
-        if (syncPanel) syncPanel.style.display = 'block';
-        if (btnConfig) {
-          btnConfig.style.background = 'transparent';
-          btnConfig.style.color = 'var(--text-muted)';
-          btnConfig.style.borderBottomColor = 'transparent';
-        }
-        if (btnSync) {
-          btnSync.style.background = 'rgba(56, 189, 248, 0.12)';
-          btnSync.style.color = '#38bdf8';
-          btnSync.style.borderBottomColor = '#38bdf8';
-        }
+        hydrateHostingUrlInputs();
       }
       updateSettingsConfigBadge();
     }

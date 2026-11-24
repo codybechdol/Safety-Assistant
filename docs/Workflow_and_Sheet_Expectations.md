@@ -1,4 +1,4 @@
-# Rubber Tracker - Workflow & Sheet Expectations
+# Safety Assistant - Workflow & Sheet Expectations
 
 > **Reference File**: Always compare against `Old Versions/Last_Good.gs` before approving any code changes to ensure functionality is preserved.
 
@@ -30,7 +30,7 @@
 
 ## Overview
 
-The Rubber Tracker system manages the lifecycle of rubber gloves and sleeves used by employees. It tracks:
+The Safety Assistant system manages the lifecycle of rubber gloves and sleeves used by employees. It tracks:
 - Inventory of gloves and sleeves
 - Assignment to employees
 - Testing cycles

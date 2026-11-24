@@ -4,9 +4,9 @@ Zero-download, mobile/iPad-friendly, offline-capable web form for blind crew equ
 
 ## Hosting on Cloudflare Pages (Free — Supports Private GitHub Repos)
 
-1. Push your latest branch (`App-Migration` or `master`) to GitHub (`codybechdol/rubber-tracker`).
+1. Push your latest branch (`App-Migration` or `master`) to GitHub (`codybechdol/safety-assistant`).
 2. Go to [Cloudflare Dashboard](https://dash.cloudflare.com) → **Workers & Pages** → **Create** → **Pages** → **Connect to Git**.
-3. Select the `rubber-tracker` repository and choose the branch you deploy from.
+3. Select the `safety-assistant` (Safety Assistant) repository and choose the branch you deploy from.
 4. Configure build settings:
    - **Framework preset:** None
    - **Build command:** *(leave empty)*

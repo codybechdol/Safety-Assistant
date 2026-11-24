@@ -1,7 +1,7 @@
-# Glove Manager – Rubber Glove & Sleeve Inventory System
+# Safety Assistant — PPE, Equipment & Field Safety Platform
 
 ## Project Purpose
-The Glove Manager is a Google Sheets-based inventory management and tracking system for rubber gloves and sleeves used by electrical workers. It is designed to centralize, automate, and streamline PPE inventory, assignment workflows, compliance, and reporting.
+Safety Assistant is an offline-first desktop/tablet application backed by Supabase real-time sync and Google Sheets/Apps Script for managing electrical PPE and line equipment inventory, crew compliance, training, DOT drug testing, route planning, and foreman equipment audits.
 
 - **Platform:** Google Sheets (with custom scripts and automation)
 - **User/Admin:** Sole user and administrator

@@ -899,7 +899,7 @@ END $$;`;
           <div style="padding:12px;border-radius:8px;background:rgba(30,41,59,0.7);border:1px solid rgba(148,163,184,0.2);font-size:12px;color:#cbd5e1;line-height:1.5;">
             <strong>Cloudflare Pages Setup (2 minutes):</strong><br>
             1. Go to <strong>dash.cloudflare.com → Workers &amp; Pages → Create → Pages → Connect to Git</strong>.<br>
-            2. Select your <code>rubber-tracker</code> repository.<br>
+            2. Select your <code>safety-assistant</code> (Safety Assistant) repository.<br>
             3. Leave Build Command blank, set <strong>Build output directory</strong> to <code>audit-form</code>, and click <strong>Save and Deploy</strong>.
           </div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;">

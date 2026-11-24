@@ -10,7 +10,7 @@
 
 ## Overview
 
-Expanding the Rubber Tracker system to track additional electrical safety equipment beyond gloves and sleeves. Each new equipment type will follow the established pattern with inventory sheets, swap sheets, and history tracking.
+Expanding the Safety Assistant system to track additional electrical safety equipment beyond gloves and sleeves. Each new equipment type will follow the established pattern with inventory sheets, swap sheets, and history tracking.
 
 ### Equipment Types to Add
 
