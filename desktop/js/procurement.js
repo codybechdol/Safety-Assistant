@@ -2204,8 +2204,9 @@ class ProcurementEngine {
           else if (firstCell.toUpperCase().includes('CLASS 4')) currentClass = 'Class 4';
 
           // Skip section headers or subheaders
-          if (firstCell.includes('📍') || firstCell.includes('👤') || firstCell.includes('👷') ||
+          if (firstCell.includes('📍') || firstCell.includes('🔍') || firstCell.includes('👤') || firstCell.includes('👷') ||
               firstCell.includes('Foreman:') || firstCell.includes('Swaps') ||
+              firstCell === 'PREVIOUS EMPLOYEE' || firstCell.toLowerCase().startsWith('no swaps due') ||
               firstCell === 'Employee' || firstCell === 'Crew Lead / Employee' || firstCell === 'Item #' || firstCell === 'Serial #') {
             return;
           }
@@ -2225,17 +2226,26 @@ class ProcurementEngine {
             rowClass = currentClass;
           }
           const daysVal = parseInt(daysRaw, 10);
-          if (!isNaN(daysVal)) daysLeft = daysVal;
-
-          if (daysVal <= 0) {
+          if (daysRaw.toUpperCase().includes('OVERDUE')) {
+            daysLeft = -1;
             isImmediateRow = true;
+          } else if (!isNaN(daysVal)) {
+            daysLeft = daysVal;
+            if (daysVal <= 0) {
+              isImmediateRow = true;
+            }
           }
         } else if (typeof row === 'object' && row !== null) {
           emp = String(row['Employee'] || row['Employee Name'] || row['Assigned To'] || '').trim();
           size = String(row['Size'] || '—').trim();
           daysRaw = String(row['Days Left'] || row['Days Remaining'] || '').trim();
           const daysVal = parseInt(daysRaw, 10);
-          if (!isNaN(daysVal)) daysLeft = daysVal;
+          if (daysRaw.toUpperCase().includes('OVERDUE')) {
+            daysLeft = -1;
+            isImmediateRow = true;
+          } else if (!isNaN(daysVal)) {
+            daysLeft = daysVal;
+          }
           pickItem = String(row['Pick List Item #'] || row['Pick Item #'] || row['Pick Item'] || row['Pick List'] || row['Picked For'] || '').trim();
           status = String(row['Status'] || row['Pick List Status'] || '').trim();
           if (row['Class'] || row['KV']) {
@@ -2319,8 +2329,11 @@ class ProcurementEngine {
           return;
         }
 
-        // Filter out return/reclaim/former employee indicators
+        // Filter out return/reclaim/former employee/retest indicators
         const isPrevEmpIndicator = daysRaw.toUpperCase().includes('PREV') ||
+                                   daysRaw.toUpperCase().includes('LOST') ||
+                                   statLower.includes('needs retest') ||
+                                   statLower.includes('retest') ||
                                    statLower.includes('return to shelf') ||
                                    statLower.includes('reclaim') ||
                                    statLower.includes('previous') ||
@@ -2348,6 +2361,13 @@ class ProcurementEngine {
           statLower.includes('ready for delivery') ||
           statLower.includes('delivered') ||
           statLower.includes('in stock') ||
+          statLower.includes('needs retest') ||
+          statLower.includes('retest') ||
+          statLower.includes('in testing') ||
+          statLower.includes('ready for test') ||
+          statLower.includes('packed for testing') ||
+          statLower.includes('locate') ||
+          statLower.includes('lost') ||
           statLower.includes('excluded') ||
           statLower.includes('skipped') ||
           statLower.includes('cancel') ||

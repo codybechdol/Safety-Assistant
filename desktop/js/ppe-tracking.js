@@ -407,9 +407,9 @@ class RubberPpeTrackingEngine {
 
     if (typeof window.showToast === 'function') {
       if (isExcluded) {
-        window.showToast(`🚫 Excluded "${clean}" from Swaps & Purchase Needs while on Crew ${currentCrew}`, 'info');
+        window.showToast(`🚫 Excluded "${clean}" from Rubber PPE tracking, Swaps & Purchase Needs while on Crew ${currentCrew}`, 'info');
       } else {
-        window.showToast(`✅ Restored "${clean}" to Swaps & Purchase Needs`, 'success');
+        window.showToast(`✅ Restored "${clean}" to Rubber PPE tracking, Swaps & Purchase Needs`, 'success');
       }
     }
   }
@@ -427,17 +427,17 @@ class RubberPpeTrackingEngine {
   }
 
   /**
-   * Prompts user for confirmation before excluding an employee from Swaps & Purchase Needs
+   * Prompts user for confirmation before excluding an employee from Rubber PPE tracking, Swaps & Purchase Needs
    */
   promptExcludeEmployee(empName) {
     if (!empName) return;
     const currentCrew = this.getEmployeeBaseCrew(empName) || 'their current crew';
     const confirmed = confirm(
-      `Exclude "${empName}" from Swaps pages and Purchase Needs while on Crew ${currentCrew}?\n\n` +
+      `Exclude "${empName}" from Rubber PPE tracking, Swaps, and Purchase Needs while on Crew ${currentCrew}?\n\n` +
+      `• Missing PPE alert badges will be hidden on Crew Cards and the Rubber PPE Compliance Tracker.\n` +
       `• They will NOT appear on Glove or Sleeve Swaps pages.\n` +
       `• They will NOT generate Purchase Needs orders.\n` +
-      `• They will CONTINUE to be tracked in Rubber PPE Compliance.\n` +
-      `• If they change to another crew, they will AUTOMATICALLY be removed from this exclusion list and appear on Swaps & Purchase Needs.`
+      `• If they change to another crew, they will AUTOMATICALLY be removed from this exclusion list and restored.`
     );
     if (confirmed) {
       this.setEmployeeExcluded(empName, true);
@@ -991,10 +991,10 @@ class RubberPpeTrackingEngine {
         swapsExcludedCrew = (swEntry && typeof swEntry === 'object' && swEntry.crew) ? swEntry.crew : jobNumber;
       }
 
-      // ONLY crew discipline (Gas / Mechanic) exempts an employee from Rubber PPE tracking.
-      // Swaps-excluded employees STILL show up in the Rubber PPE Compliance Tracker!
-      const isExcluded = crewCheck.excluded;
-      const exclusionReason = crewCheck.excluded ? crewCheck.reason : (isSwapsExcluded ? `Swaps Excluded (Crew ${swapsExcludedCrew})` : '');
+      // Both crew discipline (Substation / Gas / Mechanic) and crew-locked manual exclusions
+      // exempt an employee from missing-PPE alerts on crew cards and the compliance tracker.
+      const isExcluded = crewCheck.excluded || isSwapsExcluded;
+      const exclusionReason = crewCheck.excluded ? crewCheck.reason : (isSwapsExcluded ? `Excluded on Crew ${swapsExcludedCrew}` : '');
 
       if (locClean && locClean !== '—') locationSet.add(locClean);
 
@@ -1005,10 +1005,10 @@ class RubberPpeTrackingEngine {
       const hasGloves = assignedGloves.length > 0;
       const hasSleeves = assignedSleeves.length > 0;
 
-      // Only Electric and Office crews require rubber gloves and/or sleeves.
-      // Substation, Gas, and Mechanic crews are excluded.
-      const missingGloves = !crewCheck.excluded && !hasGloves;
-      const missingSleeves = !crewCheck.excluded && classMeta.needsSleeves && !hasSleeves;
+      // Excluded employees (non-electric crew discipline or manual crew-locked exclusion list)
+      // are not flagged as missing rubber gloves or sleeves.
+      const missingGloves = !isExcluded && !hasGloves;
+      const missingSleeves = !isExcluded && classMeta.needsSleeves && !hasSleeves;
 
       const isMissingBoth = missingGloves && missingSleeves;
       const isMissingAny = missingGloves || missingSleeves;
@@ -1201,8 +1201,8 @@ class RubberPpeTrackingEngine {
     const rec = (this.currentAuditData?.records || []).find(r => this.isNameMatch(r.name, empName));
     if (!rec) return '';
 
-    // If excluded from PPE tracking, don't show any missing alerts
-    if (rec.isExcluded) return '';
+    // If excluded from PPE tracking (crew discipline or manual exclusion list), don't show any missing alerts
+    if (rec.isExcluded || rec.isSwapsExcluded) return '';
 
     if (rec.isMissingBoth) {
       return `
@@ -1377,7 +1377,7 @@ class RubberPpeTrackingEngine {
               <span>📋</span> Purchase Needs
             </button>
             <button class="btn btn-secondary" onclick="window.ppeTrackingEngine.openExclusionsDialog()" style="font-size: 12px; font-weight: 600; padding: 6px 12px; border-color: rgba(148, 163, 184, 0.4); color: #cbd5e1; display: flex; align-items: center; gap: 6px;" title="Manage employees excluded from PPE tracking">
-              <span>🚫</span> Manage Exclusions ${summary.totalExcluded > 0 ? `(${summary.totalExcluded})` : ''}
+              <span>🚫</span> Manage Exclusions ${this.excludedEmployeeMap.size > 0 ? `(${this.excludedEmployeeMap.size})` : ''}
             </button>
             <button class="btn btn-secondary" onclick="window.ppeTrackingEngine.exportToCsv()" style="font-size: 12px; font-weight: 600; padding: 6px 12px; border-color: rgba(59, 130, 246, 0.4); color: #93c5fd; display: flex; align-items: center; gap: 6px;" title="Export current filtered list to CSV">
               <span>📥</span> Export CSV
@@ -1461,11 +1461,11 @@ class RubberPpeTrackingEngine {
                onclick="window.ppeTrackingEngine.setFilter('excluded')"
                style="background: ${this.currentFilter === 'excluded' ? 'rgba(245, 158, 11, 0.22)' : 'rgba(245, 158, 11, 0.08)'}; border: 1px solid ${this.currentFilter === 'excluded' ? '#f59e0b' : 'rgba(245, 158, 11, 0.3)'}; border-radius: 8px; padding: 10px 14px; cursor: pointer; transition: all 0.15s ease;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-              <span style="font-size: 11px; font-weight: 700; color: #fbbf24; text-transform: uppercase; letter-spacing: 0.5px;">Swaps Excluded</span>
+              <span style="font-size: 11px; font-weight: 700; color: #fbbf24; text-transform: uppercase; letter-spacing: 0.5px;">Excluded</span>
               <span style="font-size: 16px;">🚫</span>
             </div>
-            <div style="font-size: 24px; font-weight: 800; color: #fde68a; line-height: 1;">${summary.totalSwapsExcluded}</div>
-            <div style="font-size: 11px; color: #fbbf24; margin-top: 4px;">Exempt on Current Crew</div>
+            <div style="font-size: 24px; font-weight: 800; color: #fde68a; line-height: 1;">${summary.totalExcluded}</div>
+            <div style="font-size: 11px; color: #fbbf24; margin-top: 4px;">${summary.totalSwapsExcluded > 0 ? `${summary.totalSwapsExcluded} Crew-Locked` : 'Exempt Personnel'}</div>
           </div>
 
           <div class="ppe-stat-card ${this.currentFilter === 'all_tracked' ? 'active-stat' : ''}"
@@ -1476,7 +1476,7 @@ class RubberPpeTrackingEngine {
               <span style="font-size: 16px;">👥</span>
             </div>
             <div style="font-size: 24px; font-weight: 800; color: #bfdbfe; line-height: 1;">${summary.totalTracked}</div>
-            <div style="font-size: 11px; color: #93c5fd; margin-top: 4px;">Active Personnel${summary.totalSwapsExcluded > 0 ? ` (${summary.totalSwapsExcluded} Swaps Excluded)` : ''}</div>
+            <div style="font-size: 11px; color: #93c5fd; margin-top: 4px;">Active Personnel${summary.totalExcluded > 0 ? ` (${summary.totalExcluded} Excluded)` : ''}</div>
           </div>
 
         </div>
@@ -1509,8 +1509,8 @@ class RubberPpeTrackingEngine {
             <button class="filter-pill ${this.currentFilter === 'fully_equipped' ? 'active' : ''}" onclick="window.ppeTrackingEngine.setFilter('fully_equipped')">
               ✅ Equipped (${summary.totalFullyEquipped})
             </button>
-            <button class="filter-pill ${this.currentFilter === 'excluded' ? 'active' : ''}" onclick="window.ppeTrackingEngine.setFilter('excluded')" style="${summary.totalSwapsExcluded > 0 ? 'border-color: rgba(245, 158, 11, 0.45); color: #fbbf24;' : ''}">
-              🚫 Swaps Excluded (${summary.totalSwapsExcluded})
+            <button class="filter-pill ${this.currentFilter === 'excluded' ? 'active' : ''}" onclick="window.ppeTrackingEngine.setFilter('excluded')" style="${summary.totalExcluded > 0 ? 'border-color: rgba(245, 158, 11, 0.45); color: #fbbf24;' : ''}">
+              🚫 Excluded (${summary.totalExcluded})
             </button>
             <button class="filter-pill ${this.currentFilter === 'all_tracked' ? 'active' : ''}" onclick="window.ppeTrackingEngine.setFilter('all_tracked')">
               All (${records.length})
@@ -1683,6 +1683,20 @@ class RubberPpeTrackingEngine {
           </button>
         </div>
       `;
+    } else if (r.isSwapsExcluded) {
+      glovesCell = `
+        <div style="display: flex; align-items: center; gap: 6px;">
+          <span class="badge" style="background: rgba(245, 158, 11, 0.12); color: #fbbf24; border: 1px dashed rgba(245, 158, 11, 0.35); font-size: 10.5px; padding: 2px 7px; border-radius: 4px;" title="Excluded from Rubber PPE tracking, Swaps & Purchase Needs while on Crew ${this.escapeHtml(r.swapsExcludedCrew || r.jobNumber)}">
+            🚫 Excluded (Crew ${this.escapeHtml(r.swapsExcludedCrew || r.jobNumber)})
+          </span>
+          <button class="btn btn-xs" 
+                  onclick="window.ppeTrackingEngine.promptQuickAssign('${this.escapeJs(r.name)}', 'gloves', '${this.escapeJs(r.gloveSize)}', '${this.escapeJs(r.location)}')"
+                  style="background: rgba(59, 130, 246, 0.15); border: 1px solid rgba(59, 130, 246, 0.35); color: #93c5fd; padding: 2px 7px; font-size: 11px; border-radius: 3px; cursor: pointer;"
+                  title="Assign an on-shelf glove to ${this.escapeHtml(r.name)}">
+            ➕ Assign
+          </button>
+        </div>
+      `;
     } else if (r.gloveOrdered) {
       const gOrd = r.gloveOrdered;
       const poText = gOrd.orderNumber ? `Order #: ${this.escapeHtml(gOrd.orderNumber)}` : 'Ordered';
@@ -1794,6 +1808,20 @@ class RubberPpeTrackingEngine {
         <div style="display: flex; align-items: center; gap: 6px;">
           <span class="badge" style="background: rgba(148, 163, 184, 0.12); color: #94a3b8; border: 1px dashed rgba(148, 163, 184, 0.3); font-size: 10.5px; padding: 2px 7px; border-radius: 4px;" title="Discipline: ${this.escapeHtml(r.crewType || 'Exempt')} crews do not require rubber PPE">
             ⚪ Not Required (${this.escapeHtml(r.crewType || 'Exempt')})
+          </span>
+          <button class="btn btn-xs" 
+                  onclick="window.ppeTrackingEngine.promptQuickAssign('${this.escapeJs(r.name)}', 'sleeves', '${this.escapeJs(r.sleeveSize)}', '${this.escapeJs(r.location)}')"
+                  style="background: rgba(168, 85, 247, 0.15); border: 1px solid rgba(168, 85, 247, 0.35); color: #d8b4fe; padding: 2px 7px; font-size: 11px; border-radius: 3px; cursor: pointer;"
+                  title="Assign an on-shelf sleeve to ${this.escapeHtml(r.name)}">
+            ➕ Assign
+          </button>
+        </div>
+      `;
+    } else if (r.isSwapsExcluded) {
+      sleevesCell = `
+        <div style="display: flex; align-items: center; gap: 6px;">
+          <span class="badge" style="background: rgba(245, 158, 11, 0.12); color: #fbbf24; border: 1px dashed rgba(245, 158, 11, 0.35); font-size: 10.5px; padding: 2px 7px; border-radius: 4px;" title="Excluded from Rubber PPE tracking, Swaps & Purchase Needs while on Crew ${this.escapeHtml(r.swapsExcludedCrew || r.jobNumber)}">
+            🚫 Excluded (Crew ${this.escapeHtml(r.swapsExcludedCrew || r.jobNumber)})
           </span>
           <button class="btn btn-xs" 
                   onclick="window.ppeTrackingEngine.promptQuickAssign('${this.escapeJs(r.name)}', 'sleeves', '${this.escapeJs(r.sleeveSize)}', '${this.escapeJs(r.location)}')"
@@ -1942,8 +1970,8 @@ class RubberPpeTrackingEngine {
             </a>
             ${r.crewLead === 'Yes' ? '<span title="Crew Lead" style="font-size: 11px;">👑</span>' : ''}
             ${r.isSwapsExcluded ? `
-              <span class="badge" style="background: rgba(245, 158, 11, 0.18); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.4); font-size: 9.5px; font-weight: 700; padding: 1px 5px; border-radius: 4px;" title="Excluded from Swaps pages & Purchase Needs while on Crew ${this.escapeHtml(r.swapsExcludedCrew || r.jobNumber)}. Auto-removes if assigned to another crew.">
-                🚫 Swaps Excluded (${this.escapeHtml(r.swapsExcludedCrew || r.jobNumber)})
+              <span class="badge" style="background: rgba(245, 158, 11, 0.18); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.4); font-size: 9.5px; font-weight: 700; padding: 1px 5px; border-radius: 4px;" title="Excluded from Rubber PPE tracking, Crew Card alerts, Swaps & Purchase Needs while on Crew ${this.escapeHtml(r.swapsExcludedCrew || r.jobNumber)}. Auto-removes if assigned to another crew.">
+                🚫 Excluded (${this.escapeHtml(r.swapsExcludedCrew || r.jobNumber)})
               </span>
             ` : ''}
           </div>
@@ -3218,9 +3246,9 @@ class RubberPpeTrackingEngine {
         <!-- Explanation Info Banner -->
         <div style="background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.25); border-left: 4px solid #f59e0b; border-radius: 6px; padding: 10px 14px; font-size: 12px; color: #cbd5e1; line-height: 1.45;">
           <div style="font-weight: 700; color: #fbbf24; margin-bottom: 2px;">
-            Rubber PPE Swaps & Purchase Needs Exclusions (Crew-Locked)
+            Rubber PPE Tracking, Swaps & Purchase Needs Exclusions (Crew-Locked)
           </div>
-          Excluded employees will <strong style="color: #f8fafc;">not appear on Glove or Sleeve Swaps pages</strong> and will <strong style="color: #f8fafc;">not generate Purchase Needs orders</strong> while on their current crew. They <strong style="color: #6ee7b7;">continue to be monitored</strong> in the Rubber PPE Compliance Tracker. If an employee is reassigned to another crew, they are <strong style="color: #38bdf8;">automatically removed</strong> from this exclusion list and reappear on Swaps & Purchase Needs.
+          Excluded employees will <strong style="color: #f8fafc;">not show missing PPE badges on Crew Cards or the Rubber PPE Compliance Tracker</strong>, will <strong style="color: #f8fafc;">not appear on Glove or Sleeve Swaps pages</strong>, and will <strong style="color: #f8fafc;">not generate Purchase Needs orders</strong> while on their current crew. If an employee is reassigned to another crew, they are <strong style="color: #38bdf8;">automatically removed</strong> from this exclusion list and restored automatically.
         </div>
 
         <!-- Quick Presets -->

@@ -3312,18 +3312,18 @@ class EmployeeProfileEngine {
             <span style="font-size: 18px;">🚫</span>
             <div>
               <div style="font-size: 12.5px; font-weight: 700; color: #fbbf24; display: flex; align-items: center; gap: 6px;">
-                <span>Excluded from Swaps & Purchase Needs</span>
+                <span>Excluded from Rubber PPE Tracking, Swaps & Purchase Needs</span>
                 <span class="badge" style="background: rgba(245, 158, 11, 0.2); color: #fde68a; font-size: 10px; padding: 1px 6px; border-radius: 4px;">
                   Crew ${this.escapeHtml(baseCrew || 'Current')}
                 </span>
               </div>
               <div style="font-size: 11px; color: #fcd34d; margin-top: 2px;">
-                This employee is excluded from Glove/Sleeve Swaps and Purchase Needs while on Crew ${this.escapeHtml(baseCrew || 'current')}. Automatically re-included if moved to another crew.
+                This employee is excluded from Rubber PPE alerts, Glove/Sleeve Swaps, and Purchase Needs while on Crew ${this.escapeHtml(baseCrew || 'current')}. Automatically re-included if moved to another crew.
               </div>
             </div>
           </div>
           <button type="button" class="btn btn-sm" onclick="if(window.ppeTrackingEngine){ window.ppeTrackingEngine.setEmployeeExcluded('${this.escapeJs(empName)}', false); if(window.employeeProfileEngine){ window.employeeProfileEngine.openProfileModal('${this.escapeJs(empName)}', 'equipment'); } }" style="background: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.35); color: #6ee7b7; font-size: 11px; padding: 3px 8px; border-radius: 4px; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;">
-            <span>↩</span> Re-Include in Swaps & Needs
+            <span>↩</span> Re-Include in PPE Tracking
           </button>
         </div>
       `;
@@ -3396,8 +3396,8 @@ class EmployeeProfileEngine {
       `;
     }
 
-    // If classification is not tracked for mandatory PPE (e.g. Office, non-lineman), do not show missing warnings
-    if (!classMeta) return prefixBanner;
+    // If classification is not tracked for mandatory PPE (e.g. Office, non-lineman) or employee is on the exclusion list, do not show missing warnings
+    if (!classMeta || isSwapsExcluded) return prefixBanner;
 
     const needsGloves = !!classMeta.needsGloves;
     const needsSleeves = !!classMeta.needsSleeves;
