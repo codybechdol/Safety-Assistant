@@ -1,0 +1,10 @@
+{
+  "name": "Crew Equipment Inventory Audit",
+  "short_name": "Equipment Audit",
+  "description": "Mobile and tablet crew equipment inventory audit form.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "browser",
+  "background_color": "#f1f5f9",
+  "theme_color": "#0f172a"
+}

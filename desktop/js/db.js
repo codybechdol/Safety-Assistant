@@ -479,6 +479,8 @@ class LocalDatabase {
     try {
       const ws = localStorage.getItem('sa_work_schedule');
       if (ws) snapshot.configs.workSchedule = ws;
+      const auditFormUrl = localStorage.getItem('sa_audit_form_base_url');
+      if (auditFormUrl) snapshot.configs.audit_form_base_url = auditFormUrl;
     } catch { /* ignore */ }
 
     // Also pull live in-memory TripPlanner state if initialized
@@ -551,6 +553,11 @@ class LocalDatabase {
     if (cfg.workSchedule) {
       try {
         localStorage.setItem('sa_work_schedule', cfg.workSchedule);
+      } catch { /* ignore */ }
+    }
+    if (cfg.audit_form_base_url) {
+      try {
+        localStorage.setItem('sa_audit_form_base_url', cfg.audit_form_base_url);
       } catch { /* ignore */ }
     }
     if (Array.isArray(cfg.CREW_IMPORT_ORDER)) {

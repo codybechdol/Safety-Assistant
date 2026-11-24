@@ -3,7 +3,7 @@
  * Provides offline caching, network-first strategy, and background sync support.
  */
 
-const CACHE_NAME = 'safety-assistant-v135';
+const CACHE_NAME = 'safety-assistant-v136';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',
@@ -44,6 +44,7 @@ const ASSETS_TO_CACHE = [
   './js/ppe-tracking.js',
   './js/incident-reports.js',
   './js/site-audits.js',
+  './js/equipment-audits.js',
   './js/weekly-summary.js',
   './js/fiscal-year.js',
   './js/location-approvals.js',

@@ -166,6 +166,7 @@ class SupabaseSyncEngine {
       { key: 'safety-compliance-view', label: '🛡️ Safety Compliance', tabs: [] },
       { key: 'incident-reports-view', label: '⚠️ Incident Reports', tabs: [] },
       { key: 'site-audits-view', label: '📋 Site Audits', tabs: [] },
+      { key: 'equipment-audits-view', label: '📋 Equipment Audits', tabs: [] },
       { key: 'expiring-certs-view', label: '📜 Expiring Certs', tabs: [] },
       { key: 'training-view', label: '🎓 Training', tabs: [] },
       { 

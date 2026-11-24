@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#0f172a">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Crew Equipment Inventory Audit</title>
+  <link rel="manifest" href="./manifest.json">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div id="app-root">
+    <!-- Loading / Error / Locked Screen -->
+    <div id="state-screen" class="state-screen">
+      <div class="state-card" id="state-card">
+        <div class="spinner" aria-hidden="true"></div>
+        <h2>Loading Equipment Audit...</h2>
+        <p>Connecting securely to retrieve your crew form.</p>
+      </div>
+    </div>
+
+    <!-- Main Audit Workspace -->
+    <div id="audit-shell" class="audit-shell hidden">
+      <!-- Top Header -->
+      <header class="top-header">
+        <div class="top-header-inner">
+          <div class="header-identity">
+            <div class="header-kicker" id="hdr-campaign">CREW EQUIPMENT INVENTORY AUDIT</div>
+            <h1 class="header-title" id="hdr-foreman">Foreman Audit</h1>
+            <div class="header-meta" id="hdr-meta"></div>
+          </div>
+          <div class="sync-pill" id="sync-status-pill" aria-live="polite">
+            <span class="sync-dot" id="sync-status-dot"></span>
+            <span id="sync-status-text">Online</span>
+          </div>
+        </div>
+
+        <!-- Optional Notice Banner (Offline / Reopened / Custom Instructions) -->
+        <div id="notice-banner" class="notice-banner hidden"></div>
+      </header>
+
+      <!-- Category Navigation Strip -->
+      <nav class="category-bar" aria-label="Equipment Categories">
+        <div class="category-scroll" id="category-tabs"></div>
+      </nav>
+
+      <!-- Main Body -->
+      <main class="audit-main">
+        <!-- Category Header & None Toggle -->
+        <section class="category-panel">
+          <div class="category-panel-head">
+            <div>
+              <h2 class="category-title" id="cat-title">Gloves</h2>
+              <p class="category-subtitle" id="cat-subtitle"></p>
+            </div>
+            <label class="none-toggle" id="none-toggle-wrap">
+              <input type="checkbox" id="cat-none-checkbox">
+              <span>None on Crew</span>
+            </label>
+          </div>
+
+          <!-- Dynamic Entry Form Card -->
+          <form id="item-entry-form" class="entry-card" autocomplete="off" novalidate>
+            <div class="entry-card-header">
+              <span class="entry-mode-badge" id="entry-mode-badge">Add New Entry</span>
+              <button type="button" id="btn-cancel-edit" class="btn-link hidden">Cancel Edit</button>
+            </div>
+            <div id="dynamic-fields" class="fields-grid"></div>
+            <div id="form-validation-msg" class="validation-msg hidden" role="alert"></div>
+            <div class="entry-actions">
+              <button type="submit" id="btn-save-item" class="btn btn-primary">
+                + Add Item
+              </button>
+              <button type="button" id="btn-save-similar" class="btn btn-secondary">
+                + Add &amp; Keep Specs
+              </button>
+            </div>
+          </form>
+
+          <!-- Entered Items List -->
+          <div class="items-section">
+            <div class="items-section-head">
+              <h3 id="items-list-heading">Logged Items (0)</h3>
+              <span class="items-hint" id="items-hint"></span>
+            </div>
+            <div id="items-list" class="items-list"></div>
+          </div>
+        </section>
+      </main>
+
+      <!-- Sticky Bottom Bar -->
+      <footer class="bottom-bar">
+        <div class="bottom-bar-inner">
+          <div class="bottom-summary">
+            <div class="bottom-count" id="total-count-label">0 items entered</div>
+            <div class="bottom-saved" id="last-saved-label">Auto-saves on device</div>
+          </div>
+          <div class="bottom-buttons">
+            <button type="button" id="btn-save-draft" class="btn btn-outline">
+              Save Draft
+            </button>
+            <button type="button" id="btn-open-review" class="btn btn-success">
+              Review &amp; Submit
+            </button>
+          </div>
+        </div>
+      </footer>
+    </div>
+
+    <!-- Review & Submit Modal -->
+    <div id="review-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="review-modal-title">
+      <div class="modal-sheet">
+        <div class="modal-head">
+          <h2 id="review-modal-title">Review &amp; Submit Audit</h2>
+          <button type="button" id="btn-close-review" class="icon-close" aria-label="Close">&times;</button>
+        </div>
+        <div class="modal-body" id="review-modal-body"></div>
+        <div class="modal-foot">
+          <button type="button" id="btn-cancel-review" class="btn btn-outline">Back to Form</button>
+          <button type="button" id="btn-confirm-submit" class="btn btn-success">Submit Equipment Audit</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>

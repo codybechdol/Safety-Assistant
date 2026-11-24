@@ -175,6 +175,10 @@
               <div class="nav-item nav-sub-item" data-view="sheets-view" data-sheet="test_batches">
                 <span class="nav-item-icon">🔬</span> Lab Test Batches & JM Portal
               </div>
+              <div class="nav-item nav-sub-item" data-view="equipment-audits-view" id="nav-equipment-audits" style="display: flex; align-items: center; justify-content: space-between;">
+                <span><span class="nav-item-icon">📋</span> Equipment Audits</span>
+                <span id="nav-equipment-audits-badge" style="display: none; background: #10b981; color: #fff; font-size: 10px; font-weight: 800; padding: 1px 6px; border-radius: 999px; margin-left: 6px;">0</span>
+              </div>
             </div>
           </div>
 
@@ -557,6 +561,26 @@
           </div>
         </div>
         <div class="grid-wrapper" id="incident-reports-content" style="overflow-y: auto; height: calc(100% - 50px); padding: 0;"></div>
+      </section>
+
+      <!-- View: Equipment Audits Workspace (Foreman Inventory Audits) -->
+      <section id="equipment-audits-view" class="view-container">
+        <div class="sheet-toolbar">
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <h2 style="font-size: 16px;">📋 Foreman Equipment Audits</h2>
+            <span class="brand-badge" id="equipment-audits-row-count">0 audits</span>
+          </div>
+          <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+            <button class="btn btn-secondary" id="btn-refresh-equipment-audits" style="font-size: 12px; font-weight: 600; display: flex; align-items: center; gap: 6px;" onclick="window.equipmentAuditsEngine.refreshData()" title="Check for new foreman drafts and submissions">
+              <span>🔄</span> Refresh
+            </button>
+            <button class="btn btn-primary admin-only-control" id="btn-new-equipment-audit" style="font-size: 12px; font-weight: 700; background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%); border: none; display: flex; align-items: center; gap: 6px; box-shadow: 0 2px 6px rgba(37, 99, 235, 0.35);" onclick="window.equipmentAuditsEngine.openCreateCampaignModal()">
+              <span>➕</span> New Equipment Audit
+            </button>
+            <input type="text" id="equipment-audits-search-input" class="sheet-search" placeholder="Search foreman, job #, location, campaign..." oninput="window.equipmentAuditsEngine.onSearchInput(this.value)">
+          </div>
+        </div>
+        <div class="grid-wrapper" id="equipment-audits-content" style="overflow-y: auto; height: calc(100% - 50px); padding: 0;"></div>
       </section>
 
       <!-- View: Site Audits Workspace -->
@@ -3501,6 +3525,7 @@
   <script src="js/ppe-tracking.js?v=20261116_01"></script>
   <script src="js/incident-reports.js?v=20261116_01"></script>
   <script src="js/site-audits.js?v=20261119_02"></script>
+  <script src="js/equipment-audits.js?v=20261123_01"></script>
   <script src="js/weekly-summary.js?v=20261014_03"></script>
   <script src="js/fiscal-year.js?v=20261001_04"></script>
   <script src="js/location-approvals.js?v=20261109_02"></script>
@@ -3713,6 +3738,10 @@
       if (viewId === 'aging-view') window.inventoryAging.loadData();
       if (viewId === 'incident-reports-view' && window.incidentReportsEngine) window.incidentReportsEngine.render();
       if (viewId === 'site-audits-view' && window.siteAuditsEngine) window.siteAuditsEngine.render();
+      if (viewId === 'equipment-audits-view' && window.equipmentAuditsEngine) {
+        window.equipmentAuditsEngine.render();
+        window.equipmentAuditsEngine.refreshData({ silent: true });
+      }
       if (viewId === 'weekly-summary-view' && window.weeklySummaryEngine) window.weeklySummaryEngine.render();
       if (viewId === 'tailgate-generator-view' && window.weeklySummaryEngine) window.weeklySummaryEngine.renderTailgateWorkspace();
       if (viewId === 'settings-view') {
@@ -4398,6 +4427,9 @@
 
         window.siteAuditsEngine = new SiteAuditsEngine(window.localDB);
         window.siteAuditsEngine.init();
+
+        window.equipmentAuditsEngine = new EquipmentAuditsEngine(window.localDB);
+        window.equipmentAuditsEngine.init();
 
         window.certsConfigEngine = new CertsConfigEngine(window.localDB);
         window.cprRosterEngine = new CprRosterEngine(window.localDB);

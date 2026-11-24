@@ -255,6 +255,56 @@ Please let me know so we can get this updated. Thanks!`;
   }
 
   /**
+   * Opens the SMS modal to send a personalized Foreman Equipment Inventory Audit link
+   */
+  openEquipmentAuditSms(req, auditUrl, onSentCallback = null) {
+    const modal = document.getElementById('sms-notification-modal');
+    const body = document.getElementById('sms-notification-modal-body');
+    const titleEl = document.getElementById('sms-notification-modal-title');
+    if (!modal || !body || !req) return;
+
+    if (titleEl) {
+      titleEl.innerHTML = '<span style="font-size: 18px;">📋</span> <span style="font-weight: 700;">Send Equipment Audit Link via SMS</span>';
+    }
+    const modalHeader = modal.querySelector('.modal-header');
+    if (modalHeader) {
+      modalHeader.style.background = 'linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%)';
+    }
+    const markBtn = modal.querySelector('.modal-footer .btn-success');
+    if (markBtn) {
+      markBtn.innerHTML = '<span>✅</span> Mark as Sent';
+      markBtn.title = 'Mark this audit link as sent without launching SMS app';
+    }
+
+    const foreman = req.foreman_name || 'Foreman';
+    const firstName = String(foreman).trim().split(' ')[0] || 'there';
+    const phone = req.foreman_phone || this.getEmployeePhone(foreman);
+    let cleanPhone = String(phone || '').replace(/[^0-9]/g, '');
+    if (cleanPhone.length === 10) cleanPhone = '1' + cleanPhone;
+
+    const dueStr = req.expires_at ? new Date(req.expires_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '';
+    const defaultMsg = `Hi ${firstName}, please complete your Crew Equipment Inventory Audit for Job ${req.job_number || 'your crew'} using your personal link:\n\n${auditUrl}\n\nNo app download or login needed — opens right on your iPad or phone and saves progress automatically across days (works offline once opened).${dueStr ? ` Please submit by ${dueStr}.` : ''} Thanks!`;
+
+    this.currentContext = {
+      type: 'equipment_audit',
+      requestId: req.id,
+      foreman,
+      firstName,
+      jobNum: req.job_number || '',
+      location: req.location || '',
+      campaignName: req.campaign_name || 'Crew Equipment Inventory Audit',
+      auditUrl,
+      phone,
+      cleanPhone,
+      defaultMsg,
+      onSentCallback
+    };
+
+    this.renderModalUI(body);
+    modal.classList.add('active');
+  }
+
+  /**
    * Opens the SMS modal for an expiring certification
    */
   openCertSms(employeeName, certType, expirationDate, rowIdx = null, colIdx = null, sheetName = 'Expiring Certs') {
@@ -411,6 +461,47 @@ Please let me know so we can get this updated. Thanks!`;
         <!-- Action Notice -->
         <div style="background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.25); border-radius: 6px; padding: 8px 12px; font-size: 12px; color: #93c5fd; display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
           <span>💡</span> Clicking <strong>Launch SMS App</strong> opens your messaging app with pre-filled recipient and text. You can also copy to clipboard or mark as notified.
+        </div>
+      `;
+      container.innerHTML = html;
+      return;
+    }
+
+    if (ctx.type === 'equipment_audit') {
+      const html = `
+        <div style="background-color: var(--bg-primary); border: 1px solid rgba(59, 130, 246, 0.4); border-radius: 8px; padding: 14px; margin-bottom: 14px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;">
+          <div>
+            <div style="font-size: 16px; font-weight: 800; color: var(--text-primary); display: flex; align-items: center; gap: 6px;">
+              <span>👷</span> ${this.escapeHtml(ctx.foreman)}
+            </div>
+            <div style="font-size: 12.5px; color: var(--text-secondary); margin-top: 2px;">
+              <strong>Job ${this.escapeHtml(ctx.jobNum || 'N/A')}</strong>${ctx.location ? ` · 📍 ${this.escapeHtml(ctx.location)}` : ''}
+            </div>
+            <div style="font-size: 11.5px; color: #93c5fd; margin-top: 3px; word-break: break-all;">
+              🔗 ${this.escapeHtml(ctx.auditUrl)}
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            ${ctx.phone ? `
+              <div style="font-size: 14px; font-weight: 700; color: #60a5fa; background: rgba(59, 130, 246, 0.15); padding: 4px 10px; border-radius: 6px; border: 1px solid rgba(59, 130, 246, 0.3);">
+                📞 ${this.escapeHtml(ctx.phone)}
+              </div>
+            ` : `
+              <div style="display: flex; align-items: center; gap: 6px;">
+                <span style="font-size: 11.5px; color: #f87171;">No phone on file:</span>
+                <input type="tel" class="sheet-search" style="width: 140px; font-size: 12px; padding: 4px 8px;" placeholder="(406) 555-1234" oninput="window.smsDialogEngine.setManualPhone(this.value)">
+              </div>
+            `}
+          </div>
+        </div>
+
+        <div style="margin-bottom: 14px;">
+          <label style="display: block; font-size: 12px; font-weight: 700; color: var(--text-secondary); margin-bottom: 6px;">💬 Text Message to Foreman (Editable)</label>
+          <textarea id="dt-sms-message-text" rows="7" style="width: 100%; background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 6px; color: var(--text-primary); padding: 10px; font-family: sans-serif; font-size: 13px; line-height: 1.45; resize: vertical;">${this.escapeHtml(ctx.defaultMsg)}</textarea>
+        </div>
+
+        <div style="background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.25); border-radius: 6px; padding: 8px 12px; font-size: 12px; color: #93c5fd; display: flex; align-items: center; gap: 8px;">
+          <span>💡</span> Clicking <strong>Launch SMS App</strong> opens your messaging app with their phone number and private audit link pre-filled (and marks this audit as Sent).
         </div>
       `;
       container.innerHTML = html;
@@ -718,6 +809,23 @@ Please let me know so we can get this updated. Thanks!`;
     if (!ctx) return;
 
     const todayStr = new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
+
+    if (ctx.type === 'equipment_audit') {
+      if (typeof ctx.onSentCallback === 'function') {
+        try {
+          await ctx.onSentCallback();
+        } catch (err) {
+          console.warn('equipment_audit onSentCallback warning:', err);
+        }
+      }
+      if (typeof window.showToast === 'function') {
+        window.showToast(`📱 Marked equipment audit SMS sent for ${ctx.foreman}`, 'success');
+      }
+      setTimeout(() => {
+        this.closeSmsModal();
+      }, 350);
+      return;
+    }
 
     if (ctx.type === 'safety_missing') {
       // 1. Save to localStorage map

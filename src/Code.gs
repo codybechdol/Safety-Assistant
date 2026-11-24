@@ -69142,6 +69142,16 @@ function doPost(e) {
 
     }
 
+    if (action === 'sendAuditEmail') {
+
+      var auditEmailRes = sendEquipmentAuditEmail(payload);
+
+      return ContentService.createTextOutput(JSON.stringify(auditEmailRes))
+
+        .setMimeType(ContentService.MimeType.JSON);
+
+    }
+
 
 
     if (action === 'checkCloudRevision') {
@@ -74222,6 +74232,97 @@ function getCertEmailAttachment(messageId, attIdx) {
 
   }
 
+}
+
+/**
+ * Sends a personalized Crew Equipment Inventory Audit link email to a foreman via GmailApp.
+ * Called from the Desktop App via doPost({ action: 'sendAuditEmail', ... }).
+ */
+function sendEquipmentAuditEmail(payload) {
+  try {
+    const to = String((payload && payload.to) || '').trim();
+    const auditUrl = String((payload && payload.auditUrl) || '').trim();
+    if (!to) return { success: false, error: 'Missing recipient email address.' };
+    if (!auditUrl) return { success: false, error: 'Missing audit form link.' };
+
+    const foremanName = String((payload && payload.foremanName) || 'Foreman').trim();
+    const firstName = String((payload && payload.firstName) || foremanName.split(' ')[0] || 'Foreman').trim();
+    const jobNumber = String((payload && payload.jobNumber) || '').trim();
+    const location = String((payload && payload.location) || '').trim();
+    const campaignName = String((payload && payload.campaignName) || 'Crew Equipment Inventory Audit').trim();
+    const dueDate = String((payload && payload.dueDate) || '').trim();
+    const notes = String((payload && payload.notes) || '').trim();
+
+    const esc = (s) => String(s || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+
+    const subject = `Equipment Inventory Audit${jobNumber ? ` — Job ${jobNumber}` : ''}`;
+
+    const plainBody = [
+      `Hi ${firstName},`,
+      '',
+      `Please complete your ${campaignName}${jobNumber ? ` for Job ${jobNumber}` : ''}${location ? ` (${location})` : ''} using your personal link below:`,
+      '',
+      auditUrl,
+      '',
+      'How it works:',
+      '- No app download or login needed — opens directly in Safari or Chrome on your iPad or phone.',
+      '- Enter all rubber and line equipment currently on your crew (Gloves, Sleeves, Blankets, MACKs, HV Testers, Phasing Sets, AED, Grounds, and Hot Sticks).',
+      '- Your progress saves automatically so you can pause and return to this same link over multiple days, even in areas without reception once opened.',
+      dueDate ? `\nPlease submit by ${dueDate}.` : '',
+      notes ? `\nNote: ${notes}` : '',
+      '',
+      'Thank you!'
+    ].join('\n');
+
+    const htmlBody = `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #0f172a; line-height: 1.5;">
+        <div style="background: #0f172a; color: #ffffff; padding: 20px 24px; border-radius: 12px 12px 0 0;">
+          <div style="font-size: 11px; font-weight: 700; letter-spacing: 0.08em; color: #93c5fd; text-transform: uppercase;">${esc(campaignName)}</div>
+          <h2 style="margin: 6px 0 0 0; font-size: 20px;">Equipment Inventory Audit${jobNumber ? ` — Job ${esc(jobNumber)}` : ''}</h2>
+          ${location ? `<div style="font-size: 13px; color: #cbd5e1; margin-top: 4px;">Location: ${esc(location)}</div>` : ''}
+        </div>
+        <div style="background: #ffffff; border: 1px solid #cbd5e1; border-top: none; border-radius: 0 0 12px 12px; padding: 22px 24px;">
+          <p style="margin-top: 0;">Hi ${esc(firstName)},</p>
+          <p>Please use your personal link below to submit an up-to-date inventory of the rubber and line equipment currently on your crew.</p>
+          ${notes ? `<div style="background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 10px 14px; margin: 14px 0; font-size: 13.5px; color: #1e3a8a;"><strong>Note:</strong> ${esc(notes)}</div>` : ''}
+          <div style="text-align: center; margin: 24px 0;">
+            <a href="${esc(auditUrl)}" style="display: inline-block; background: #2563eb; color: #ffffff; text-decoration: none; font-weight: 700; font-size: 16px; padding: 14px 28px; border-radius: 10px;">
+              Open Equipment Audit Form
+            </a>
+          </div>
+          <ul style="font-size: 13.5px; color: #475569; padding-left: 20px;">
+            <li><strong>No download or login required</strong> — opens straight in Safari or Chrome on your iPad or phone.</li>
+            <li><strong>Multi-day &amp; offline friendly</strong> — open the link once with service, and your entries auto-save so you can finish over multiple days even in dead zones.</li>
+            ${dueDate ? `<li><strong>Target due date:</strong> ${esc(dueDate)}</li>` : ''}
+          </ul>
+          <p style="font-size: 12px; color: #64748b; margin-top: 18px; word-break: break-all;">
+            If the button doesn't open, copy and paste this link:<br>
+            <a href="${esc(auditUrl)}" style="color: #2563eb;">${esc(auditUrl)}</a>
+          </p>
+        </div>
+      </div>
+    `;
+
+    GmailApp.sendEmail(to, subject, plainBody, { htmlBody: htmlBody });
+    logEvent(`Equipment Audit email sent to ${foremanName} (${to}) for Job ${jobNumber}`, 'INFO');
+
+    return {
+      success: true,
+      status: 'ok',
+      to: to,
+      subject: subject
+    };
+  } catch (err) {
+    Logger.log('sendEquipmentAuditEmail error: ' + err);
+    return {
+      success: false,
+      error: err.toString()
+    };
+  }
 }
 
 
