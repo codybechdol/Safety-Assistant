@@ -1170,11 +1170,16 @@ class ForemanReportCardEngine {
         date: dt,
         dateStr: this.formatDateUs(dt),
         jobNumber: baseJob,
+        jobName: jt ? jt.jobName : '',
+        location: String(sa.location || sa['Location'] || (jt ? jt.location : '') || '').trim(),
         foreman,
         inspector: String(sa.inspector || sa['Inspector'] || '').trim(),
         summary: String(sa.siteInspection || sa['Site Inspection'] || '').trim(),
         correctionsNeeded: String(sa.correctionsNeeded || sa['Corrections Needed'] || 'No').trim(),
-        hasCorrections: Boolean(sa.hasCorrections || /^yes\b/i.test(String(sa.correctionsNeeded || sa['Corrections Needed'] || '').trim()))
+        hasCorrections: Boolean(sa.hasCorrections || /^yes\b/i.test(String(sa.correctionsNeeded || sa['Corrections Needed'] || '').trim())),
+        emailId: String(sa.emailId || sa['Email ID'] || '').trim(),
+        pdfFilename: String(sa.pdfFilename || sa['PDF Filename'] || '').trim(),
+        id: String(sa.id || '').trim()
       };
 
       if (baseJob) {
@@ -1203,13 +1208,37 @@ class ForemanReportCardEngine {
       const fmRaw = inc['Foreman'] || inc.foreman || (jt ? jt.foreman : '');
       const foreman = this.resolveCanonicalName(fmRaw, aliasMap);
 
+      const cleanDesc = String(inc['Brief Explanation'] || inc['Explanation'] || inc.explanation || inc.description || '')
+        .replace(/Address of Incident\s*:\s*[^\n\r"']+/gi, '')
+        .replace(/Incident Type\s*:\s*[^\n\r"']+/gi, '')
+        .replace(/Date of Incident\s*:\s*[^\n\r"']+/gi, '')
+        .replace(/Involved Employee\(s\)\s*Name\s*:\s*[^\n\r"']+/gi, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      const cleanInvolved = String(inc['Involved Employee(s)'] || inc['Involved Employees'] || inc.involvedEmployees || '')
+        .replace(/Incident Type\s*:\s*[^\n\r]+/gi, '')
+        .trim();
+
       const item = {
         date: dt,
         dateStr: this.formatDateUs(dt),
+        time: String(inc['Time'] || inc.time || '').trim(),
         jobNumber: baseJob,
+        jobName: jt ? jt.jobName : '',
         foreman,
+        rawForeman: String(fmRaw || '').trim(),
+        involvedEmployees: cleanInvolved,
         type: String(inc['Incident Type'] || inc.incidentType || 'Incident').trim(),
-        description: String(inc['Brief Explanation'] || inc['Explanation'] || inc.description || '').trim(),
+        location: String(inc['Address / Location'] || inc['Location'] || inc.address || inc.location || (jt ? jt.location : '') || '').trim(),
+        unitNumber: String(inc['Unit #'] || inc.unitNumber || '').trim(),
+        ticketNumber: String(inc['Ticket #'] || inc.ticketNumber || '').trim(),
+        description: cleanDesc,
+        prevention: String(inc['Avoidable / Prevention'] || inc.avoidablePrevention || inc.prevention || '').trim(),
+        photoCount: parseInt(inc['Photo Count'] || inc.photoCount || 0, 10) || 0,
+        emailId: String(inc['Email ID'] || inc.emailId || '').trim(),
+        pdfFilename: String(inc['PDF Filename'] || inc.pdfFilename || '').trim(),
+        id: String(inc.id || '').trim(),
         status: String(inc['Status'] || inc.status || '').trim()
       };
 
@@ -1815,6 +1844,9 @@ class ForemanReportCardEngine {
         ? (empInfo.primaryJob || empInfo.secondaryJob || '')
         : '';
 
+      foremanAudits.sort((a, b) => (b.date ? b.date.getTime() : 0) - (a.date ? a.date.getTime() : 0));
+      foremanIncidents.sort((a, b) => (b.date ? b.date.getTime() : 0) - (a.date ? a.date.getTime() : 0));
+
       foremen.push({
         name: foremanName,
         location: homeLocation,
@@ -1829,6 +1861,8 @@ class ForemanReportCardEngine {
         activeJobNumbers: activeJobs.map(a => a.jobNumber),
         onHoldJobNumbers,
         jobs,
+        siteAudits: foremanAudits,
+        incidents: foremanIncidents,
         totals,
         ytdJha,
         ytdWeekly,
@@ -2312,15 +2346,19 @@ class ForemanReportCardEngine {
               <div class="frc-card-kpi-val" style="color:#60a5fa;">${t.totalJobs}</div>
               <div class="frc-card-kpi-sub">${this.escapeHtml(statusMixShort)}</div>
             </div>
-            <div class="frc-card-kpi">
+            <div class="frc-card-kpi is-clickable is-clickable-audit"
+                 onclick="event.stopPropagation(); window.foremanReportCardEngine.openRecordsModal('audits', '${this.escapeJs(fm.name)}')"
+                 title="Click to view ${t.siteAuditsCount} site audit${t.siteAuditsCount === 1 ? '' : 's'} for ${this.escapeHtml(fm.name)}">
               <div class="frc-card-kpi-lbl">Audits</div>
               <div class="frc-card-kpi-val" style="color:${t.siteAuditCorrectionsCount > 0 ? '#fbbf24' : '#38bdf8'};">${t.siteAuditsCount}</div>
-              <div class="frc-card-kpi-sub">${t.siteAuditsCount === 0 ? 'None' : (t.siteAuditCorrectionsCount > 0 ? `${t.siteAuditCorrectionsCount} corr.` : 'Clean ✓')}</div>
+              <div class="frc-card-kpi-sub">${t.siteAuditsCount === 0 ? 'None' : (t.siteAuditCorrectionsCount > 0 ? `${t.siteAuditCorrectionsCount} corr.` : 'View list →')}</div>
             </div>
-            <div class="frc-card-kpi">
+            <div class="frc-card-kpi is-clickable"
+                 onclick="event.stopPropagation(); window.foremanReportCardEngine.openRecordsModal('incidents', '${this.escapeJs(fm.name)}')"
+                 title="Click to view ${t.incidentsCount} incident report${t.incidentsCount === 1 ? '' : 's'} for ${this.escapeHtml(fm.name)}">
               <div class="frc-card-kpi-lbl">Incidents</div>
               <div class="frc-card-kpi-val" style="color:${t.incidentsCount > 0 ? '#f87171' : '#4ade80'};">${t.incidentsCount}</div>
-              <div class="frc-card-kpi-sub">${t.incidentsCount === 0 ? 'Clean ✓' : 'Logged'}</div>
+              <div class="frc-card-kpi-sub">${t.incidentsCount === 0 ? 'Clean ✓' : 'View list →'}</div>
             </div>
           </div>
 
@@ -2858,6 +2896,16 @@ class ForemanReportCardEngine {
       if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA' || activeEl.tagName === 'SELECT')) {
         return;
       }
+      // Close Incident/Audit drill-down modal on Escape before navigating away
+      const recordsModal = document.getElementById('frc-records-modal');
+      if (recordsModal) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          recordsModal.remove();
+        }
+        return;
+      }
+
       // Don't hijack arrows/Escape when any modal overlay is open
       if (document.querySelector('#frc-job-status-modal, #job-lifecycle-sheet-modal, .modal-overlay.active')) {
         return;
@@ -3194,18 +3242,22 @@ class ForemanReportCardEngine {
           <div style="font-size:22px;font-weight:900;color:#1d4ed8;margin:2px 0;">${t.totalJobs}</div>
           <div style="font-size:10px;color:#475569;font-weight:600;">${this.escapeHtml(statusMix)}</div>
         </div>
-        <div style="border:1.5px solid #cbd5e1;border-radius:6px;padding:10px 12px;background:#ffffff;text-align:center;">
+        <div class="${!isPrint ? 'frc-paper-clickable-kpi' : ''}"
+             ${!isPrint ? `onclick="window.foremanReportCardEngine.openRecordsModal('audits', '${this.escapeJs(foreman.name)}')" title="Click to view site audits logged in ${this.escapeHtml(period.shortLabel)}"` : ''}
+             style="border:1.5px solid #cbd5e1;border-radius:6px;padding:10px 12px;background:#ffffff;text-align:center;">
           <div style="font-size:10px;font-weight:800;text-transform:uppercase;color:#64748b;">Site Audits (${this.escapeHtml(period.shortLabel)})</div>
           <div style="font-size:22px;font-weight:900;color:#0369a1;margin:2px 0;">${t.siteAuditsCount}</div>
           <div style="font-size:10px;color:${t.siteAuditCorrectionsCount > 0 ? '#b45309' : '#15803d'};font-weight:700;">
-            ${t.siteAuditsCount === 0 ? 'None logged' : (t.siteAuditCorrectionsCount > 0 ? `${t.siteAuditCorrectionsCount} w/ corrections` : 'All clean ✓')}
+            ${t.siteAuditsCount === 0 ? 'None logged' : (t.siteAuditCorrectionsCount > 0 ? `${t.siteAuditCorrectionsCount} w/ corrections` : 'All clean ✓')}${!isPrint && t.siteAuditsCount > 0 ? ' · <span style="color:#2563eb;text-decoration:underline;">View →</span>' : ''}
           </div>
         </div>
-        <div style="border:1.5px solid #cbd5e1;border-radius:6px;padding:10px 12px;background:#ffffff;text-align:center;">
+        <div class="${!isPrint ? 'frc-paper-clickable-kpi is-incident' : ''}"
+             ${!isPrint ? `onclick="window.foremanReportCardEngine.openRecordsModal('incidents', '${this.escapeJs(foreman.name)}')" title="Click to view incident reports logged in ${this.escapeHtml(period.shortLabel)}"` : ''}
+             style="border:1.5px solid ${t.incidentsCount > 0 ? '#fca5a5' : '#cbd5e1'};border-radius:6px;padding:10px 12px;background:${t.incidentsCount > 0 ? '#fff5f5' : '#ffffff'};text-align:center;">
           <div style="font-size:10px;font-weight:800;text-transform:uppercase;color:#64748b;">Incident Reports</div>
           <div style="font-size:22px;font-weight:900;color:${t.incidentsCount > 0 ? '#b91c1c' : '#15803d'};margin:2px 0;">${t.incidentsCount}</div>
           <div style="font-size:10px;color:${t.incidentsCount > 0 ? '#b91c1c' : '#15803d'};font-weight:700;">
-            ${t.incidentsCount === 0 ? 'Clean record ✓' : `Logged in ${this.escapeHtml(period.shortLabel)}`}
+            ${t.incidentsCount === 0 ? 'Clean record ✓' : `Logged in ${this.escapeHtml(period.shortLabel)}`}${!isPrint && t.incidentsCount > 0 ? ' · <span style="color:#b91c1c;text-decoration:underline;">View list →</span>' : ''}
           </div>
         </div>
       </div>
@@ -3309,9 +3361,9 @@ class ForemanReportCardEngine {
                     ${this.renderCompactPctCell(j.monthly)}
                   </td>
                   <td style="border:1px solid #cbd5e1;padding:6px 6px;text-align:center;font-size:10.5px;font-weight:700;">
-                    <span title="Site Audits" style="color:#0369a1;">📋 ${j.siteAudits.length}</span>
+                    <span ${!isPrint && j.siteAudits.length > 0 ? `onclick="event.stopPropagation(); window.foremanReportCardEngine.openRecordsModal('audits', '${this.escapeJs(foreman.name)}', '${this.escapeJs(j.jobNumber)}')" style="color:#0369a1;cursor:pointer;text-decoration:underline dotted;" title="Click to view ${j.siteAudits.length} site audit(s) on ${this.escapeHtml(j.jobNumber)}"` : `title="Site Audits" style="color:#0369a1;"`}>📋 ${j.siteAudits.length}</span>
                     &nbsp;/&nbsp;
-                    <span title="Incident Reports" style="color:${j.incidents.length > 0 ? '#b91c1c' : '#64748b'};">⚠️ ${j.incidents.length}</span>
+                    <span ${!isPrint && j.incidents.length > 0 ? `onclick="event.stopPropagation(); window.foremanReportCardEngine.openRecordsModal('incidents', '${this.escapeJs(foreman.name)}', '${this.escapeJs(j.jobNumber)}')" style="color:#b91c1c;cursor:pointer;text-decoration:underline dotted;" title="Click to view ${j.incidents.length} incident report(s) on ${this.escapeHtml(j.jobNumber)}"` : `title="Incident Reports" style="color:${j.incidents.length > 0 ? '#b91c1c' : '#64748b'};"`}>⚠️ ${j.incidents.length}</span>
                   </td>
                   ${canEdit ? `
                     <td style="border:1px solid #cbd5e1;padding:6px 6px;text-align:center;" class="frc-no-print" onclick="event.stopPropagation();">
@@ -3714,10 +3766,12 @@ class ForemanReportCardEngine {
 
       <!-- Job Site Audits & Incident Reports Strip -->
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px;">
-        <div style="border:1px solid #cbd5e1;border-radius:5px;padding:8px 11px;background:#f8fafc;">
-          <div style="font-size:10.5px;font-weight:800;color:#0369a1;text-transform:uppercase;display:flex;justify-content:space-between;">
+        <div class="${!isPrint ? 'frc-paper-clickable-kpi' : ''}"
+             ${!isPrint ? `onclick="window.foremanReportCardEngine.openRecordsModal('audits', '${this.escapeJs(foreman.name)}', '${this.escapeJs(job.jobNumber)}')" title="Click to view site audits for Job ${this.escapeHtml(job.jobNumber)}"` : ''}
+             style="border:1px solid #cbd5e1;border-radius:5px;padding:8px 11px;background:#f8fafc;">
+          <div style="font-size:10.5px;font-weight:800;color:#0369a1;text-transform:uppercase;display:flex;justify-content:space-between;align-items:center;">
             <span>📋 Site Audits (${this.escapeHtml(period.shortLabel)})</span>
-            <span>${job.siteAudits.length}</span>
+            <span>${job.siteAudits.length}${!isPrint && job.siteAudits.length > 0 ? ' · <span style="font-size:9.5px;color:#2563eb;text-transform:none;text-decoration:underline;">View →</span>' : ''}</span>
           </div>
           ${job.siteAudits.length === 0 ? `
             <div style="font-size:10.5px;color:#64748b;margin-top:4px;">No site audits logged on this job in ${this.escapeHtml(period.shortLabel)}.</div>
@@ -3734,10 +3788,12 @@ class ForemanReportCardEngine {
           `}
         </div>
 
-        <div style="border:1px solid ${job.incidents.length > 0 ? '#fca5a5' : '#cbd5e1'};border-radius:5px;padding:8px 11px;background:${job.incidents.length > 0 ? '#fef2f2' : '#f8fafc'};">
-          <div style="font-size:10.5px;font-weight:800;color:${job.incidents.length > 0 ? '#b91c1c' : '#15803d'};text-transform:uppercase;display:flex;justify-content:space-between;">
+        <div class="${!isPrint ? 'frc-paper-clickable-kpi is-incident' : ''}"
+             ${!isPrint ? `onclick="window.foremanReportCardEngine.openRecordsModal('incidents', '${this.escapeJs(foreman.name)}', '${this.escapeJs(job.jobNumber)}')" title="Click to view incident reports for Job ${this.escapeHtml(job.jobNumber)}"` : ''}
+             style="border:1px solid ${job.incidents.length > 0 ? '#fca5a5' : '#cbd5e1'};border-radius:5px;padding:8px 11px;background:${job.incidents.length > 0 ? '#fef2f2' : '#f8fafc'};">
+          <div style="font-size:10.5px;font-weight:800;color:${job.incidents.length > 0 ? '#b91c1c' : '#15803d'};text-transform:uppercase;display:flex;justify-content:space-between;align-items:center;">
             <span>⚠️ Incident Reports (${this.escapeHtml(period.shortLabel)})</span>
-            <span>${job.incidents.length}</span>
+            <span>${job.incidents.length}${!isPrint && job.incidents.length > 0 ? ' · <span style="font-size:9.5px;color:#b91c1c;text-transform:none;text-decoration:underline;">View list →</span>' : ''}</span>
           </div>
           ${job.incidents.length === 0 ? `
             <div style="font-size:10.5px;color:#166534;font-weight:600;margin-top:4px;">✓ Zero incidents reported on this job.</div>
@@ -3810,6 +3866,184 @@ class ForemanReportCardEngine {
         <span>${this.escapeHtml(foreman.name)} · ${this.escapeHtml(period.shortLabel)}</span>
       </div>
     `;
+  }
+
+  // =========================================================================
+  // Incident Reports & Site Audits Drill-Down Modal
+  // =========================================================================
+
+  buildRecordsModalHtml(recordType, foreman, period, jobNumber = '') {
+    const isIncidents = recordType !== 'audits';
+    const targetJob = jobNumber ? foreman.jobs.find(j => j.jobNumber === jobNumber) : null;
+    const records = isIncidents
+      ? (targetJob ? targetJob.incidents : (foreman.incidents || []))
+      : (targetJob ? targetJob.siteAudits : (foreman.siteAudits || []));
+    const foremanJobSet = new Set(foreman.jobs.map(j => j.jobNumber));
+
+    const accentColor = isIncidents ? '#f87171' : '#38bdf8';
+    const titleIcon = isIncidents ? '⚠️' : '📋';
+    const titleNoun = isIncidents ? 'Incident Reports' : 'Site Audits';
+    const scopeLabel = targetJob
+      ? `Job ${targetJob.jobNumber}${targetJob.jobName ? ` (${targetJob.jobName})` : ''} · ${foreman.name}`
+      : `${foreman.name} · All Crew / Attributed ${period.shortLabel}`;
+
+    const bodyHtml = records.length === 0
+      ? `
+        <div style="text-align:center;padding:38px 20px;color:#94a3b8;">
+          <div style="font-size:34px;margin-bottom:8px;">${isIncidents ? '✅' : '📋'}</div>
+          <div style="font-size:14px;font-weight:800;color:#e2e8f0;margin-bottom:4px;">
+            ${isIncidents ? 'Zero Incident Reports Logged' : 'No Site Audits Logged'}
+          </div>
+          <div style="font-size:12px;">
+            No ${isIncidents ? 'incidents' : 'site audits'} were recorded for <strong>${this.escapeHtml(scopeLabel)}</strong> during ${this.escapeHtml(period.displayRangeStr)}.
+          </div>
+        </div>
+      `
+      : records.map((rec, idx) => {
+          if (isIncidents) {
+            const isOtherCrewJob = Boolean(!targetJob && rec.jobNumber && !foremanJobSet.has(rec.jobNumber));
+            const statusColor = /closed|resolved|complete/i.test(rec.status || '')
+              ? { bg: 'rgba(16,185,129,0.16)', fg: '#6ee7b7', bd: 'rgba(52,211,153,0.4)' }
+              : { bg: 'rgba(245,158,11,0.16)', fg: '#fde68a', bd: 'rgba(251,191,36,0.4)' };
+
+            return `
+              <div style="border:1px solid rgba(248,113,113,0.32);border-left:4px solid #ef4444;border-radius:8px;background:rgba(15,23,42,0.72);padding:13px 15px;display:flex;flex-direction:column;gap:8px;">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap;">
+                  <div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap;">
+                    <span style="font-size:12px;font-weight:900;color:#f8fafc;">#${idx + 1} · ${this.escapeHtml(rec.dateStr)}${rec.time ? ` (${this.escapeHtml(rec.time)})` : ''}</span>
+                    ${rec.jobNumber ? `<span style="font-family:monospace;font-size:11.5px;font-weight:800;color:#93c5fd;background:rgba(37,99,235,0.2);border:1px solid rgba(96,165,250,0.4);border-radius:4px;padding:1px 6px;">Job ${this.escapeHtml(rec.jobNumber)}${rec.jobName ? ` · ${this.escapeHtml(rec.jobName)}` : ''}</span>` : ''}
+                    <span style="font-size:11px;font-weight:800;color:#fca5a5;background:rgba(239,68,68,0.18);border:1px solid rgba(248,113,113,0.45);border-radius:12px;padding:1px 8px;">${this.escapeHtml(rec.type || 'Incident')}</span>
+                    ${rec.status ? `<span style="font-size:10.5px;font-weight:700;color:${statusColor.fg};background:${statusColor.bg};border:1px solid ${statusColor.bd};border-radius:12px;padding:1px 7px;">${this.escapeHtml(rec.status)}</span>` : ''}
+                  </div>
+                  ${rec.emailId ? `
+                    <button type="button" class="btn btn-primary"
+                            style="font-size:11px;font-weight:700;padding:4px 10px;background:linear-gradient(135deg,#2563eb 0%,#1d4ed8 100%);border:none;border-radius:5px;display:inline-flex;align-items:center;gap:4px;cursor:pointer;"
+                            onclick="if(window.incidentReportsEngine && typeof window.incidentReportsEngine.openPdfViewer === 'function'){ window.incidentReportsEngine.openPdfViewer('${this.escapeJs(rec.emailId)}', '${this.escapeJs(rec.pdfFilename || 'Incident_Report.pdf')}', '${this.escapeJs(rec.id || '')}'); }">
+                      <span>📄</span> View PDF
+                    </button>
+                  ` : ''}
+                </div>
+
+                ${isOtherCrewJob ? `
+                  <div style="font-size:11px;color:#bfdbfe;background:rgba(59,130,246,0.14);border:1px solid rgba(96,165,250,0.35);border-radius:5px;padding:5px 9px;font-weight:600;">
+                    ℹ️ Logged on <strong>Job ${this.escapeHtml(rec.jobNumber)}</strong> with <strong>${this.escapeHtml(foreman.name)}</strong> listed in the report's Foreman / Supervisor field.
+                  </div>
+                ` : ''}
+
+                <div style="display:flex;flex-wrap:wrap;gap:10px 16px;font-size:11.5px;color:#cbd5e1;">
+                  ${rec.involvedEmployees ? `<span><strong style="color:#94a3b8;">👷 Involved:</strong> ${this.escapeHtml(rec.involvedEmployees)}</span>` : ''}
+                  ${rec.foreman ? `<span><strong style="color:#94a3b8;">👑 Listed Foreman:</strong> ${this.escapeHtml(rec.foreman)}</span>` : ''}
+                  ${rec.location ? `<span><strong style="color:#94a3b8;">📍 Location:</strong> ${this.escapeHtml(rec.location)}</span>` : ''}
+                  ${rec.unitNumber ? `<span><strong style="color:#94a3b8;">🚛 Unit #:</strong> ${this.escapeHtml(rec.unitNumber)}</span>` : ''}
+                  ${rec.ticketNumber ? `<span><strong style="color:#94a3b8;">🎫 Ticket #:</strong> ${this.escapeHtml(rec.ticketNumber)}</span>` : ''}
+                  ${rec.photoCount > 0 ? `<span><strong style="color:#94a3b8;">📷 Photos:</strong> ${rec.photoCount}</span>` : ''}
+                </div>
+
+                ${rec.description ? `
+                  <div style="font-size:12px;line-height:1.48;color:#e2e8f0;background:rgba(30,41,59,0.75);border:1px solid rgba(148,163,184,0.18);border-radius:6px;padding:8px 10px;">
+                    <div style="font-size:10px;font-weight:800;text-transform:uppercase;color:#94a3b8;margin-bottom:3px;">Brief Explanation</div>
+                    ${this.escapeHtml(rec.description)}
+                  </div>
+                ` : ''}
+
+                ${rec.prevention ? `
+                  <div style="font-size:11.5px;line-height:1.45;color:#fde68a;background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.25);border-radius:6px;padding:7px 10px;">
+                    <div style="font-size:10px;font-weight:800;text-transform:uppercase;color:#fbbf24;margin-bottom:2px;">Avoidable / Prevention</div>
+                    ${this.escapeHtml(rec.prevention)}
+                  </div>
+                ` : ''}
+              </div>
+            `;
+          }
+
+          // Site Audit Card
+          const isOtherAuditJob = Boolean(!targetJob && rec.jobNumber && !foremanJobSet.has(rec.jobNumber));
+          return `
+            <div style="border:1px solid ${rec.hasCorrections ? 'rgba(251,191,36,0.4)' : 'rgba(56,189,248,0.32)'};border-left:4px solid ${rec.hasCorrections ? '#f59e0b' : '#0ea5e9'};border-radius:8px;background:rgba(15,23,42,0.72);padding:13px 15px;display:flex;flex-direction:column;gap:8px;">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap;">
+                <div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap;">
+                  <span style="font-size:12px;font-weight:900;color:#f8fafc;">#${idx + 1} · ${this.escapeHtml(rec.dateStr)}</span>
+                  ${rec.jobNumber ? `<span style="font-family:monospace;font-size:11.5px;font-weight:800;color:#93c5fd;background:rgba(37,99,235,0.2);border:1px solid rgba(96,165,250,0.4);border-radius:4px;padding:1px 6px;">Job ${this.escapeHtml(rec.jobNumber)}${rec.jobName ? ` · ${this.escapeHtml(rec.jobName)}` : ''}</span>` : ''}
+                  <span style="font-size:11px;font-weight:800;color:${rec.hasCorrections ? '#fde68a' : '#6ee7b7'};background:${rec.hasCorrections ? 'rgba(245,158,11,0.18)' : 'rgba(16,185,129,0.16)'};border:1px solid ${rec.hasCorrections ? 'rgba(251,191,36,0.45)' : 'rgba(52,211,153,0.45)'};border-radius:12px;padding:1px 8px;">${rec.hasCorrections ? '⚠️ Corrections Needed' : '✓ Clean Audit'}</span>
+                </div>
+                ${rec.emailId ? `
+                  <button type="button" class="btn btn-primary"
+                          style="font-size:11px;font-weight:700;padding:4px 10px;background:linear-gradient(135deg,#0284c7 0%,#0369a1 100%);border:none;border-radius:5px;display:inline-flex;align-items:center;gap:4px;cursor:pointer;"
+                          onclick="if(window.siteAuditsEngine && typeof window.siteAuditsEngine.openPdfViewer === 'function'){ window.siteAuditsEngine.openPdfViewer('${this.escapeJs(rec.emailId)}', '${this.escapeJs(rec.pdfFilename || 'Site_Audit.pdf')}', '${this.escapeJs(rec.id || '')}'); }">
+                    <span>📄</span> View Audit PDF
+                  </button>
+                ` : ''}
+              </div>
+              ${isOtherAuditJob ? `
+                <div style="font-size:11px;color:#bfdbfe;background:rgba(59,130,246,0.14);border:1px solid rgba(96,165,250,0.35);border-radius:5px;padding:5px 9px;font-weight:600;">
+                  ℹ️ Logged on <strong>Job ${this.escapeHtml(rec.jobNumber)}</strong> with <strong>${this.escapeHtml(foreman.name)}</strong> listed as Foreman.
+                </div>
+              ` : ''}
+              <div style="display:flex;flex-wrap:wrap;gap:10px 16px;font-size:11.5px;color:#cbd5e1;">
+                ${rec.inspector ? `<span><strong style="color:#94a3b8;">🔍 Inspector:</strong> ${this.escapeHtml(rec.inspector)}</span>` : ''}
+                ${rec.location ? `<span><strong style="color:#94a3b8;">📍 Location:</strong> ${this.escapeHtml(rec.location)}</span>` : ''}
+              </div>
+              ${rec.summary ? `
+                <div style="font-size:12px;line-height:1.45;color:#e2e8f0;background:rgba(30,41,59,0.75);border:1px solid rgba(148,163,184,0.18);border-radius:6px;padding:8px 10px;">
+                  ${this.escapeHtml(rec.summary)}
+                </div>
+              ` : ''}
+              ${rec.hasCorrections && rec.correctionsNeeded && !/^yes$/i.test(rec.correctionsNeeded) ? `
+                <div style="font-size:11.5px;line-height:1.45;color:#fde68a;background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.25);border-radius:6px;padding:7px 10px;">
+                  <div style="font-size:10px;font-weight:800;text-transform:uppercase;color:#fbbf24;margin-bottom:2px;">Corrections Needed</div>
+                  ${this.escapeHtml(rec.correctionsNeeded)}
+                </div>
+              ` : ''}
+            </div>
+          `;
+        }).join('');
+
+    const navTargetView = isIncidents ? 'incident-reports-view' : 'site-audits-view';
+    const navTargetLabel = isIncidents ? 'Open Incident Reports Tab →' : 'Open Site Audits Tab →';
+
+    return `
+      <div style="background:var(--bg-secondary,#1e293b);border:1px solid var(--border-color,#334155);border-radius:10px;width:100%;max-width:780px;max-height:86vh;display:flex;flex-direction:column;color:var(--text-primary,#f8fafc);box-shadow:0 22px 55px rgba(0,0,0,0.65);overflow:hidden;">
+        <div style="padding:14px 18px;background:rgba(15,23,42,0.85);border-bottom:1px solid var(--border-color,#334155);display:flex;justify-content:space-between;align-items:center;gap:12px;">
+          <div>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <h3 style="margin:0;font-size:15.5px;font-weight:800;color:${accentColor};">${titleIcon} ${titleNoun} (${records.length})</h3>
+              <span style="font-size:11px;font-weight:700;color:#cbd5e1;background:rgba(148,163,184,0.16);border:1px solid rgba(148,163,184,0.3);border-radius:12px;padding:1px 8px;">${this.escapeHtml(period.shortLabel)}</span>
+            </div>
+            <div style="font-size:12px;color:#94a3b8;margin-top:3px;font-weight:600;">${this.escapeHtml(scopeLabel)} · ${this.escapeHtml(period.displayRangeStr)}</div>
+          </div>
+          <button type="button" onclick="document.getElementById('frc-records-modal').remove()" style="background:none;border:none;color:#94a3b8;font-size:20px;cursor:pointer;line-height:1;padding:2px 6px;" title="Close (Esc)">✕</button>
+        </div>
+
+        <div style="padding:16px 18px;overflow-y:auto;display:flex;flex-direction:column;gap:12px;flex:1;">
+          ${bodyHtml}
+        </div>
+
+        <div style="padding:12px 18px;background:rgba(15,23,42,0.7);border-top:1px solid var(--border-color,#334155);display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+          <button type="button" class="btn btn-secondary" style="font-size:11.5px;font-weight:700;" onclick="document.getElementById('frc-records-modal').remove(); if(typeof window.navigateToView === 'function'){ window.navigateToView('${navTargetView}'); }">
+            ${navTargetLabel}
+          </button>
+          <button type="button" class="btn btn-primary" style="font-size:12px;font-weight:700;padding:6px 16px;" onclick="document.getElementById('frc-records-modal').remove()">Close</button>
+        </div>
+      </div>
+    `;
+  }
+
+  openRecordsModal(recordType, foremanName, jobNumber = '') {
+    if (typeof document === 'undefined') return;
+    const existing = document.getElementById('frc-records-modal');
+    if (existing) existing.remove();
+
+    const model = this.cachedModel || this.buildDataModel();
+    const foreman = model.foremenMap.get(foremanName || this.selectedForeman);
+    if (!foreman) return;
+
+    const modal = document.createElement('div');
+    modal.id = 'frc-records-modal';
+    modal.style.cssText = 'position:fixed;inset:0;z-index:10050;background:rgba(2,6,23,0.75);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;padding:18px;';
+    modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
+    modal.innerHTML = this.buildRecordsModalHtml(recordType, foreman, model.period, jobNumber);
+
+    document.body.appendChild(modal);
   }
 
   // =========================================================================

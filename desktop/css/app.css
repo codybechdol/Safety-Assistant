@@ -4414,6 +4414,39 @@ body.view-only-mode .card-drop-zone {
   border-radius: 6px;
   padding: 6px 4px;
   text-align: center;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.12s ease;
+}
+
+.frc-card-kpi.is-clickable {
+  cursor: pointer;
+}
+
+.frc-card-kpi.is-clickable:hover {
+  border-color: rgba(248, 113, 113, 0.65);
+  background: rgba(239, 68, 68, 0.14);
+  transform: translateY(-1px);
+}
+
+.frc-card-kpi.is-clickable-audit:hover {
+  border-color: rgba(56, 189, 248, 0.65);
+  background: rgba(14, 165, 233, 0.14);
+  transform: translateY(-1px);
+}
+
+.frc-paper-clickable-kpi {
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.12s ease;
+}
+
+.frc-paper-clickable-kpi:hover {
+  border-color: #2563eb !important;
+  box-shadow: 0 3px 10px rgba(37, 99, 235, 0.16);
+  transform: translateY(-1px);
+}
+
+.frc-paper-clickable-kpi.is-incident:hover {
+  border-color: #dc2626 !important;
+  box-shadow: 0 3px 10px rgba(220, 38, 38, 0.18);
 }
 
 .frc-card-kpi-lbl {
