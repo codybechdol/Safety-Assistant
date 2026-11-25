@@ -5755,9 +5755,9 @@ function scanIncidentReportEmails(options) {
             parsed.ticketNumber = parsed.ticketNumber.replace(parsed.unitNumber, '').trim();
           }
 
-          // Supervisor / Foreman Name from PDF
+          // Supervisor Name from PDF (kept as fallback only — Job # crew foreman takes priority below)
           var supMatch = fullContent.match(/Supervisor Name\s*:\s*([A-Za-z\s]+?)(?=\s*(?:Date|$))/i);
-          if (supMatch && supMatch[1].trim()) parsed.foreman = supMatch[1].trim();
+          if (supMatch && supMatch[1].trim()) parsed.pdfSupervisor = supMatch[1].trim();
         }
 
         // Cross-reference Job Number from Employee name if job # missing
@@ -5777,8 +5777,11 @@ function scanIncidentReportEmails(options) {
           }
         }
 
-        // Cross-reference Foreman with Job Tracking
-        if (!parsed.foreman && parsed.jobNumber) {
+        // Job-Number-First Foreman Attribution:
+        // Crews routinely enter their Area Superintendent (e.g. Sydney Wade, Cory Mahana) or Safety Director
+        // in the PDF "Supervisor Name" field. Assign to the Job #'s crew foreman first; only fall back to
+        // PDF Supervisor Name when no crew foreman can be resolved from Job Tracking / Crew Lead.
+        if (parsed.jobNumber) {
           var cleanJob = parsed.jobNumber.replace(/^0+/, '');
           if (foremanByJob[parsed.jobNumber]) {
             parsed.foreman = foremanByJob[parsed.jobNumber];
@@ -5788,6 +5791,9 @@ function scanIncidentReportEmails(options) {
             var cl = getCrewLead(parsed.jobNumber);
             if (cl && cl.name) parsed.foreman = cl.name;
           }
+        }
+        if (!parsed.foreman && parsed.pdfSupervisor) {
+          parsed.foreman = parsed.pdfSupervisor;
         }
 
         // Fallback Date of Incident to email date if parsing failed

@@ -646,15 +646,15 @@ class WeeklySummaryEngine {
     fourteenDaysAgo.setDate(today.getDate() - 14);
 
     const incTable = this.db ? this.db.getTable('incident_reports') : null;
-    let incidentRows = (incTable && incTable.rows && incTable.rows.length > 0) ? incTable.rows : [];
-
-    if (incidentRows.length === 0 && window.incidentReportsEngine) {
-      if (typeof window.incidentReportsEngine.loadIncidents === 'function') {
+    let incidentRows = [];
+    if (window.incidentReportsEngine && typeof window.incidentReportsEngine.loadIncidents === 'function') {
+      try {
         const loaded = window.incidentReportsEngine.loadIncidents();
         if (Array.isArray(loaded) && loaded.length > 0) incidentRows = loaded;
-      } else if (Array.isArray(window.incidentReportsEngine.incidents)) {
-        incidentRows = window.incidentReportsEngine.incidents;
-      }
+      } catch (e) {}
+    }
+    if (incidentRows.length === 0) {
+      incidentRows = (incTable && incTable.rows && incTable.rows.length > 0) ? incTable.rows : [];
     }
 
     if (Array.isArray(incidentRows)) {

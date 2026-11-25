@@ -161,13 +161,21 @@ class IncidentReportsEngine {
     const table = snap?.tables?.['incident_reports'] || this.db?.getTable?.('incident_reports');
     const rows = table?.rows || [];
 
-    // Build foreman and job city lookup map from Job Tracking
+    // Build foreman and job city lookup maps from Job Tracking AND Safety Compliance (Job-#-first attribution)
     const jtTable = snap?.tables?.['job_tracking'] || this.db?.getTable?.('job_tracking');
     const jtRows = jtTable?.rows || [];
     const jobInfoMap = new Map();
 
+    const stripBaseJob = (j) => {
+      let s = String(j || '').trim().replace(/^job\s*#?\s*/i, '');
+      s = s.replace(/\s*\([^)]*\)\s*$/g, '').trim();
+      s = s.replace(/\s+-\s+.*$/g, '').trim();
+      s = s.replace(/\.\d+.*$/, '').trim();
+      return s;
+    };
+
     jtRows.forEach(jr => {
-      const jNum = String(jr['Job Number'] || jr['Job #'] || '').trim().replace(/^job\s*#?\s*/i, '');
+      const jNum = stripBaseJob(jr['Job Number'] || jr['Job #'] || '');
       const fMan = String(jr['Foreman'] || jr['Crew Lead'] || jr['Lead'] || '').trim();
       const city = String(jr['Location'] || jr['Job Location'] || '').trim();
       const name = String(jr['Job Name'] || '').trim();
@@ -177,6 +185,61 @@ class IncidentReportsEngine {
         if (noZero) jobInfoMap.set(noZero, { foreman: fMan, location: city, jobName: name });
       }
     });
+
+    // Build Safety Compliance job+week -> foreman timeline so historical / migrated jobs
+    // (e.g. 009-26, 018-26, 049-26, 052-26) resolve to the exact foreman running that job that week
+    const scTable = snap?.tables?.['safety_compliance'] || this.db?.getTable?.('safety_compliance');
+    const scRows = scTable?.rows || [];
+    const scWeeksByJob = new Map(); // jobKey -> Array<{ weekStartMs, weekKey, foreman }>
+    const fmtDateKey = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+    scRows.forEach(sr => {
+      const bj = stripBaseJob(sr['Job Number'] || sr['Crew'] || sr['Job #'] || '');
+      const fm = String(sr['Foreman'] || sr['Crew Lead'] || sr['Lead'] || '').trim();
+      const ws = this.parseDate(sr['Week Start'] || sr['Week']);
+      if (!bj || !fm || !ws || isNaN(ws.getTime())) return;
+      const entry = { weekStartMs: ws.getTime(), weekKey: fmtDateKey(ws), foreman: fm };
+      [bj, bj.replace(/^0+/, '')].filter(Boolean).forEach(k => {
+        if (!scWeeksByJob.has(k)) scWeeksByJob.set(k, []);
+        scWeeksByJob.get(k).push(entry);
+      });
+    });
+
+    const resolveCrewForemanByJob = (jobStr, incidentDateObj) => {
+      const bj = stripBaseJob(jobStr);
+      if (!bj) return '';
+      const noZero = bj.replace(/^0+/, '');
+      const wks = scWeeksByJob.get(bj) || scWeeksByJob.get(noZero);
+      if (wks && wks.length > 0 && incidentDateObj && !isNaN(incidentDateObj.getTime())) {
+        const sun = new Date(incidentDateObj.getFullYear(), incidentDateObj.getMonth(), incidentDateObj.getDate() - incidentDateObj.getDay(), 12, 0, 0);
+        const targetKey = fmtDateKey(sun);
+        const exact = wks.find(w => w.weekKey === targetKey);
+        if (exact) return exact.foreman;
+
+        let best = null;
+        let bestDist = Infinity;
+        wks.forEach(w => {
+          const diff = incidentDateObj.getTime() - w.weekStartMs;
+          const dist = Math.abs(diff);
+          const weighted = diff >= 0 ? dist : dist + 86400000;
+          if (weighted < bestDist) {
+            bestDist = weighted;
+            best = w;
+          }
+        });
+        if (best) return best.foreman;
+      }
+      const jt = jobInfoMap.get(bj) || jobInfoMap.get(noZero);
+      if (jt && jt.foreman) return jt.foreman;
+      // Check FY-transitioned successor in Job Tracking (e.g. 009-26 -> 009-27)
+      const fyM = bj.match(/^(\d+)-(\d{2})$/);
+      if (fyM) {
+        const nextJob = `${fyM[1]}-${String(parseInt(fyM[2], 10) + 1).padStart(2, '0')}`;
+        const succ = jobInfoMap.get(nextJob) || jobInfoMap.get(nextJob.replace(/^0+/, ''));
+        if (succ && succ.foreman) return succ.foreman;
+      }
+      return '';
+    };
 
     const parsedRows = rows.map((row, idx) => {
       const rawDate = row['Date of Incident'] || row['Date'] || row['Date Received'] || '';
@@ -188,12 +251,31 @@ class IncidentReportsEngine {
       const yearQuarter = `${year}-${quarterKey}`;
 
       const rawJob = String(row['Job #'] || row['Job Number'] || '').trim().replace(/^job\s*#?\s*/i, '');
-      const jtMatch = jobInfoMap.get(rawJob) || jobInfoMap.get(rawJob.replace(/^0+/, '')) || {};
-
-      let foreman = String(row['Foreman'] || '').trim();
-      if (!foreman || foreman.toLowerCase() === 'n/a' || foreman === '—') {
-        foreman = jtMatch.foreman || '';
+      const baseJobClean = stripBaseJob(rawJob);
+      let jtMatch = jobInfoMap.get(baseJobClean) || jobInfoMap.get(baseJobClean.replace(/^0+/, '')) || null;
+      if (!jtMatch && baseJobClean) {
+        const fyM = baseJobClean.match(/^(\d+)-(\d{2})$/);
+        if (fyM) {
+          const nextJob = `${fyM[1]}-${String(parseInt(fyM[2], 10) + 1).padStart(2, '0')}`;
+          jtMatch = jobInfoMap.get(nextJob) || jobInfoMap.get(nextJob.replace(/^0+/, '')) || null;
+        }
       }
+      jtMatch = jtMatch || {};
+
+      // Job-Number-First Foreman Resolution:
+      // The PDF form asks for "Supervisor Name", where crews routinely list their Area Superintendent
+      // (e.g. Sydney Wade, Cory Mahana, Joshua Roberts) or Safety Director instead of the crew foreman.
+      // Prioritize the crew foreman assigned to that Job # on the incident date, while preserving
+      // the supervisor listed on the form for visibility.
+      const rawListedFormForeman = String(row['Foreman'] || '').trim();
+      const cleanListed = (!rawListedFormForeman || rawListedFormForeman.toLowerCase() === 'n/a' || rawListedFormForeman === '—')
+        ? ''
+        : rawListedFormForeman;
+      const jobCrewForeman = baseJobClean ? resolveCrewForemanByJob(baseJobClean, dObj) : '';
+      const foreman = jobCrewForeman || cleanListed;
+      const supervisorListed = (cleanListed && foreman && cleanListed.toLowerCase() !== foreman.toLowerCase())
+        ? cleanListed
+        : '';
 
       const rawType = String(row['Incident Type'] || 'General Incident').trim();
       const tags = this.splitIncidentTags(rawType);
@@ -269,6 +351,7 @@ class IncidentReportsEngine {
         jobLocation: jtMatch.location || String(row['Address / Location'] || '').trim(),
         jobName: jtMatch.jobName || '',
         foreman: foreman || 'Supervisor',
+        supervisorListed: supervisorListed,
         involvedEmployees: involvedEmployees,
         incidentType: rawType,
         tags: tags,
@@ -434,6 +517,7 @@ class IncidentReportsEngine {
         return (
           i.jobNumber.toLowerCase().includes(q) ||
           i.foreman.toLowerCase().includes(q) ||
+          (i.supervisorListed || '').toLowerCase().includes(q) ||
           i.involvedEmployees.toLowerCase().includes(q) ||
           i.explanation.toLowerCase().includes(q) ||
           i.addressLocation.toLowerCase().includes(q) ||
@@ -656,10 +740,16 @@ class IncidentReportsEngine {
               </span>
             ` : ''}
 
-            <!-- Foreman Badge -->
+            <!-- Foreman Badge (Resolved by Job # + Incident Date) -->
             <span style="background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.35); font-size: 12px; font-weight: 700; padding: 3px 10px; border-radius: 6px; display: inline-flex; align-items: center; gap: 5px;">
               <span>👷 Foreman:</span> <strong>${this.escapeHtml(inc.foreman || 'Unassigned')}</strong>
             </span>
+
+            ${inc.supervisorListed ? `
+              <span style="background: rgba(148, 163, 184, 0.12); color: #cbd5e1; border: 1px solid rgba(148, 163, 184, 0.3); font-size: 11.5px; font-weight: 600; padding: 3px 9px; border-radius: 6px; display: inline-flex; align-items: center; gap: 4px;" title="Supervisor written on the incident PDF form (assigned by Job # to crew foreman above)">
+                <span>📝 Form Supervisor:</span> ${this.escapeHtml(inc.supervisorListed)}
+              </span>
+            ` : ''}
 
             <!-- Involved Employee(s) -->
             ${inc.involvedEmployees ? `

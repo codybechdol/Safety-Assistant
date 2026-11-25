@@ -1135,10 +1135,74 @@ class ForemanReportCardEngine {
     });
 
     // -----------------------------------------------------------------------
-    // 6. Index Site Audits & Incident Reports in Period
+    // Helper to locate FY-transitioned successor job (e.g. 009-26 -> 009-27, 021-26 -> 021-27)
+    const findFySuccessor = (baseJob) => {
+      if (!baseJob) return null;
+      const mapped = fyAliasMap[baseJob] ? this.getBaseJobNumber(fyAliasMap[baseJob]) : '';
+      if (mapped && mapped !== baseJob && jtByBaseJob.has(mapped)) {
+        return jtByBaseJob.get(mapped);
+      }
+      const m = String(baseJob).match(/^(\d+)-(\d{2})$/);
+      if (m) {
+        const nextFy = String(parseInt(m[2], 10) + 1).padStart(2, '0');
+        const candidate = `${m[1]}-${nextFy}`;
+        if (jtByBaseJob.has(candidate)) {
+          return jtByBaseJob.get(candidate);
+        }
+      }
+      return null;
+    };
+
+    // Build chronological Safety Compliance foreman index by job for accurate Job-#-first attribution
+    // of Incident Reports and Site Audits (crews routinely write their Area Superintendent such as
+    // Sydney Wade / Cory Mahana / Joshua Roberts or Safety Director in the PDF "Supervisor Name" box).
+    const scWeeksByJobForLookup = new Map(); // baseJob -> Array<{ weekStart, weekStartKey, foreman }>
+    mergedForemanJobWeeks.forEach(wk => {
+      if (!wk.baseJob || !isValidForemanName(wk.foreman)) return;
+      if (!scWeeksByJobForLookup.has(wk.baseJob)) scWeeksByJobForLookup.set(wk.baseJob, []);
+      scWeeksByJobForLookup.get(wk.baseJob).push({
+        weekStart: wk.weekStart,
+        weekStartKey: wk.weekStartKey,
+        foreman: wk.foreman
+      });
+    });
+
+    const resolveJobForemanOnDate = (baseJob, dt) => {
+      if (!baseJob) return '';
+      const wks = scWeeksByJobForLookup.get(baseJob);
+      if (wks && wks.length > 0 && dt) {
+        const sun = new Date(dt.getFullYear(), dt.getMonth(), dt.getDate() - dt.getDay(), 12, 0, 0);
+        const wsKey = this.dateKey(sun);
+        const exact = wks.find(w => w.weekStartKey === wsKey);
+        if (exact) return exact.foreman;
+
+        // Nearest prior (or closest overall) SC week for that exact job (handles FY rollover week e.g. 09/29 on 021-26)
+        let best = null;
+        let bestDist = Infinity;
+        wks.forEach(w => {
+          const diff = dt.getTime() - w.weekStart.getTime();
+          const dist = Math.abs(diff);
+          // Slightly prefer prior week over future week on tie
+          const weighted = diff >= 0 ? dist : dist + 86400000;
+          if (weighted < bestDist) {
+            bestDist = weighted;
+            best = w;
+          }
+        });
+        if (best) return best.foreman;
+      }
+      const jt = jtByBaseJob.get(baseJob);
+      if (jt && isValidForemanName(jt.foreman)) return jt.foreman;
+      const succ = findFySuccessor(baseJob);
+      if (succ && isValidForemanName(succ.foreman)) return succ.foreman;
+      return '';
+    };
+
+    // -----------------------------------------------------------------------
+    // 6. Index Site Audits & Incident Reports in Period (Job-#-First Attribution)
     // -----------------------------------------------------------------------
     const auditsByJob = new Map();      // baseJob -> Array
-    const auditsByForeman = new Map();  // canonicalForeman -> Array (deduped)
+    const auditsByForeman = new Map();  // canonicalForeman -> Array (jobless fallback only)
     let rawAudits = [];
     if (typeof window !== 'undefined' && window.siteAuditsEngine && typeof window.siteAuditsEngine.loadAudits === 'function') {
       try { rawAudits = window.siteAuditsEngine.loadAudits() || []; } catch (e) { rawAudits = []; }
@@ -1150,10 +1214,13 @@ class ForemanReportCardEngine {
           jobNumber: r['Job #'] || r['Job Number'] || '',
           foremanPrimary: r['Foreman'] || '',
           foremanDisplay: r['Foreman'] || '',
+          location: r['Location'] || '',
           inspector: r['Inspector'] || '',
           siteInspection: r['Site Inspection'] || '',
           correctionsNeeded: r['Corrections Needed'] || '',
-          hasCorrections: /^yes\b/i.test(String(r['Corrections Needed'] || '').trim())
+          hasCorrections: /^yes\b/i.test(String(r['Corrections Needed'] || '').trim()),
+          emailId: r['Email ID'] || '',
+          pdfFilename: r['PDF Filename'] || ''
         }));
       }
     }
@@ -1162,9 +1229,11 @@ class ForemanReportCardEngine {
       const dt = sa.dateObj instanceof Date ? sa.dateObj : this.parseDate(sa.auditDate || sa.dateReceived || sa['Audit Date']);
       if (!dt || dt < period.start || dt > period.end) return;
       const baseJob = this.getBaseJobNumber(sa.jobNumber || sa['Job #'] || sa['Job Number'] || '');
-      const jt = baseJob ? jtByBaseJob.get(baseJob) : null;
-      const fmRaw = sa.foremanPrimary || sa.foremanDisplay || sa['Foreman'] || (jt ? jt.foreman : '');
-      const foreman = this.resolveCanonicalName(fmRaw, aliasMap);
+      const jt = baseJob ? (jtByBaseJob.get(baseJob) || findFySuccessor(baseJob)) : null;
+      const fmRaw = sa.foremanPrimary || sa.foremanDisplay || sa['Foreman'] || '';
+      const reportedForeman = this.resolveCanonicalName(fmRaw, aliasMap);
+      const jobForeman = baseJob ? resolveJobForemanOnDate(baseJob, dt) : '';
+      const foreman = jobForeman || reportedForeman;
 
       const item = {
         date: dt,
@@ -1173,6 +1242,7 @@ class ForemanReportCardEngine {
         jobName: jt ? jt.jobName : '',
         location: String(sa.location || sa['Location'] || (jt ? jt.location : '') || '').trim(),
         foreman,
+        reportedSupervisor: reportedForeman,
         inspector: String(sa.inspector || sa['Inspector'] || '').trim(),
         summary: String(sa.siteInspection || sa['Site Inspection'] || '').trim(),
         correctionsNeeded: String(sa.correctionsNeeded || sa['Corrections Needed'] || 'No').trim(),
@@ -1185,15 +1255,14 @@ class ForemanReportCardEngine {
       if (baseJob) {
         if (!auditsByJob.has(baseJob)) auditsByJob.set(baseJob, []);
         auditsByJob.get(baseJob).push(item);
-      }
-      if (foreman) {
+      } else if (foreman) {
         if (!auditsByForeman.has(foreman)) auditsByForeman.set(foreman, []);
         auditsByForeman.get(foreman).push(item);
       }
     });
 
     const incidentsByJob = new Map();
-    const incidentsByForeman = new Map();
+    const incidentsByForeman = new Map(); // jobless fallback only
     const incTable = this.db ? this.db.getTable('incident_reports') : null;
     let rawIncidents = (incTable && Array.isArray(incTable.rows)) ? incTable.rows : [];
     if (rawIncidents.length === 0 && typeof window !== 'undefined' && window.incidentReportsEngine && typeof window.incidentReportsEngine.loadIncidents === 'function') {
@@ -1204,9 +1273,16 @@ class ForemanReportCardEngine {
       const dt = this.parseDate(inc['Date of Incident'] || inc['Date Received'] || inc['Date'] || inc.incidentDate || inc.date);
       if (!dt || dt < period.start || dt > period.end) return;
       const baseJob = this.getBaseJobNumber(inc['Job #'] || inc['Job Number'] || inc.jobNumber || inc.job || '');
-      const jt = baseJob ? jtByBaseJob.get(baseJob) : null;
-      const fmRaw = inc['Foreman'] || inc.foreman || (jt ? jt.foreman : '');
-      const foreman = this.resolveCanonicalName(fmRaw, aliasMap);
+      const jt = baseJob ? (jtByBaseJob.get(baseJob) || findFySuccessor(baseJob)) : null;
+
+      // Job-Number-First Attribution:
+      // The PDF form asks for "Supervisor Name", where crews routinely list their Area Superintendent
+      // (e.g. Sydney Wade, Cory Mahana, Joshua Roberts) or Safety Director (Cody Bechdol).
+      // Assign incidents by Job # + Incident Date -> crew foreman running that job that week!
+      const rawSupStr = String(inc['Foreman'] || inc.supervisorListed || inc.foreman || '').trim();
+      const reportedSupervisor = this.resolveCanonicalName(rawSupStr, aliasMap);
+      const jobForeman = baseJob ? resolveJobForemanOnDate(baseJob, dt) : '';
+      const foreman = jobForeman || (baseJob ? '' : reportedSupervisor);
 
       const cleanDesc = String(inc['Brief Explanation'] || inc['Explanation'] || inc.explanation || inc.description || '')
         .replace(/Address of Incident\s*:\s*[^\n\r"']+/gi, '')
@@ -1227,7 +1303,8 @@ class ForemanReportCardEngine {
         jobNumber: baseJob,
         jobName: jt ? jt.jobName : '',
         foreman,
-        rawForeman: String(fmRaw || '').trim(),
+        reportedSupervisor: reportedSupervisor || rawSupStr,
+        rawForeman: rawSupStr,
         involvedEmployees: cleanInvolved,
         type: String(inc['Incident Type'] || inc.incidentType || 'Incident').trim(),
         location: String(inc['Address / Location'] || inc['Location'] || inc.address || inc.location || (jt ? jt.location : '') || '').trim(),
@@ -1245,8 +1322,7 @@ class ForemanReportCardEngine {
       if (baseJob) {
         if (!incidentsByJob.has(baseJob)) incidentsByJob.set(baseJob, []);
         incidentsByJob.get(baseJob).push(item);
-      }
-      if (foreman) {
+      } else if (foreman) {
         if (!incidentsByForeman.has(foreman)) incidentsByForeman.set(foreman, []);
         incidentsByForeman.get(foreman).push(item);
       }
@@ -1257,25 +1333,6 @@ class ForemanReportCardEngine {
     // -----------------------------------------------------------------------
     // foremanMap: canonicalForeman -> Map(baseJob -> jobAccumulator)
     const foremanJobsMap = new Map();
-
-    const findFySuccessor = (baseJob) => {
-      if (!baseJob) return null;
-      // 1. Explicit FY_TRANSITION_ALIAS_MAP entry
-      const mapped = fyAliasMap[baseJob] ? this.getBaseJobNumber(fyAliasMap[baseJob]) : '';
-      if (mapped && mapped !== baseJob && jtByBaseJob.has(mapped)) {
-        return jtByBaseJob.get(mapped);
-      }
-      // 2. Same job prefix with next FY suffix (e.g. 021-26 -> 021-27) when old job was migrated in-place
-      const m = String(baseJob).match(/^(\d+)-(\d{2})$/);
-      if (m) {
-        const nextFy = String(parseInt(m[2], 10) + 1).padStart(2, '0');
-        const candidate = `${m[1]}-${nextFy}`;
-        if (jtByBaseJob.has(candidate)) {
-          return jtByBaseJob.get(candidate);
-        }
-      }
-      return null;
-    };
 
     const ensureForemanJob = (foreman, baseJob) => {
       if (!isValidForemanName(foreman) || !baseJob || this.isExcludedJob(baseJob)) return null;
@@ -1599,6 +1656,28 @@ class ForemanReportCardEngine {
       const empInfo = empByCanonical.get(foremanName);
       const jobs = [];
 
+      const makeIncidentDedupKey = (inc) => {
+        const empToks = String(inc.involvedEmployees || '')
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, ' ')
+          .trim()
+          .split(/\s+/)
+          .filter(t => t.length > 2)
+          .slice(0, 4)
+          .sort()
+          .join('_');
+        if (inc.dateStr && inc.jobNumber && empToks) {
+          return `${inc.dateStr}|${inc.jobNumber}|${empToks}`;
+        }
+        return `${inc.dateStr}|${inc.jobNumber}|${inc.type}|${inc.description.slice(0, 40)}`;
+      };
+      const isBetterIncRevision = (cand, prev) => {
+        const candMod = /modified/i.test(cand.pdfFilename || '');
+        const prevMod = /modified/i.test(prev.pdfFilename || '');
+        if (candMod !== prevMod) return candMod;
+        return (cand.description || '').length > (prev.description || '').length;
+      };
+
       jMap.forEach(acc => {
         acc.weeks.sort((a, b) => b.weekStart.getTime() - a.weekStart.getTime()); // newest week first
         acc.monthlyDetails.sort((a, b) => a.monthKey.localeCompare(b.monthKey));
@@ -1607,9 +1686,18 @@ class ForemanReportCardEngine {
         const weekly = this.computeMetricStats(acc.weeklyOnTime, acc.weeklyLate, acc.weeklyMissing, acc.weeklyPending);
         const monthly = this.computeMetricStats(acc.monthlyOnTime, acc.monthlyLate, acc.monthlyMissing, acc.monthlyPending, acc.monthlyExempt);
 
-        // Site audits & incidents on this job in period (attributed to this foreman or job when foreman ran it)
+        // Site audits & incidents on this job in period (attributed by Job # + date to the foreman running it; deduplicated across PDF revisions)
         const jobAudits = (auditsByJob.get(acc.jobNumber) || []).filter(a => !a.foreman || a.foreman === foremanName);
-        const jobIncidents = (incidentsByJob.get(acc.jobNumber) || []).filter(i => !i.foreman || i.foreman === foremanName);
+        const rawJobIncidents = (incidentsByJob.get(acc.jobNumber) || []).filter(i => !i.foreman || i.foreman === foremanName);
+        const dedupJobIncMap = new Map();
+        rawJobIncidents.forEach(inc => {
+          const dk = makeIncidentDedupKey(inc);
+          const prev = dedupJobIncMap.get(dk);
+          if (!prev || isBetterIncRevision(inc, prev)) {
+            dedupJobIncMap.set(dk, inc);
+          }
+        });
+        const jobIncidents = Array.from(dedupJobIncMap.values());
         jobAudits.sort((a, b) => b.date.getTime() - a.date.getTime());
         jobIncidents.sort((a, b) => b.date.getTime() - a.date.getTime());
 
@@ -1694,17 +1782,17 @@ class ForemanReportCardEngine {
       totals.siteAuditsCount = foremanAudits.length;
       totals.siteAuditCorrectionsCount = foremanAudits.filter(a => a.hasCorrections).length;
 
-      const seenIncKeys = new Set();
-      const foremanIncidents = [];
+      const seenIncMap = new Map();
       const addInc = (inc) => {
-        const k = `${inc.dateStr}|${inc.jobNumber}|${inc.type}|${inc.description.slice(0, 40)}`;
-        if (!seenIncKeys.has(k)) {
-          seenIncKeys.add(k);
-          foremanIncidents.push(inc);
+        const k = makeIncidentDedupKey(inc);
+        const prev = seenIncMap.get(k);
+        if (!prev || isBetterIncRevision(inc, prev)) {
+          seenIncMap.set(k, inc);
         }
       };
       jobs.forEach(j => j.incidents.forEach(addInc));
       (incidentsByForeman.get(foremanName) || []).forEach(addInc);
+      const foremanIncidents = Array.from(seenIncMap.values());
       totals.incidentsCount = foremanIncidents.length;
 
       const ytdJha = this.computeMetricStats(totals.jhaOnTime, totals.jhaLate, totals.jhaMissing, totals.jhaPending);
@@ -3932,7 +4020,8 @@ class ForemanReportCardEngine {
 
                 <div style="display:flex;flex-wrap:wrap;gap:10px 16px;font-size:11.5px;color:#cbd5e1;">
                   ${rec.involvedEmployees ? `<span><strong style="color:#94a3b8;">👷 Involved:</strong> ${this.escapeHtml(rec.involvedEmployees)}</span>` : ''}
-                  ${rec.foreman ? `<span><strong style="color:#94a3b8;">👑 Listed Foreman:</strong> ${this.escapeHtml(rec.foreman)}</span>` : ''}
+                  ${rec.foreman ? `<span><strong style="color:#94a3b8;">👑 Crew Foreman:</strong> ${this.escapeHtml(rec.foreman)}</span>` : ''}
+                  ${rec.reportedSupervisor && rec.reportedSupervisor.toLowerCase() !== (rec.foreman || '').toLowerCase() ? `<span><strong style="color:#94a3b8;">📝 Supervisor on Form:</strong> ${this.escapeHtml(rec.reportedSupervisor)}</span>` : ''}
                   ${rec.location ? `<span><strong style="color:#94a3b8;">📍 Location:</strong> ${this.escapeHtml(rec.location)}</span>` : ''}
                   ${rec.unitNumber ? `<span><strong style="color:#94a3b8;">🚛 Unit #:</strong> ${this.escapeHtml(rec.unitNumber)}</span>` : ''}
                   ${rec.ticketNumber ? `<span><strong style="color:#94a3b8;">🎫 Ticket #:</strong> ${this.escapeHtml(rec.ticketNumber)}</span>` : ''}
