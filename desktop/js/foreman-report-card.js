@@ -2149,12 +2149,60 @@ class ForemanReportCardEngine {
       previous: foremen.filter(f => f.roleGroup === 'previous').length
     };
 
+    // Company-wide weighted averages for the selected period (for benchmark markers on every report card)
+    let coJhaOT = 0, coJhaL = 0, coJhaM = 0, coJhaP = 0;
+    let coWkOT = 0, coWkL = 0, coWkM = 0, coWkP = 0;
+    let coMoOT = 0, coMoL = 0, coMoM = 0, coMoP = 0, coMoEx = 0;
+    let coDaysSum = 0, coDaysForemen = 0;
+    let coJobsSum = 0, coAuditsSum = 0, coIncSum = 0;
+
+    foremen.forEach(f => {
+      coJhaOT += f.totals.jhaOnTime;
+      coJhaL += f.totals.jhaLate;
+      coJhaM += f.totals.jhaMissing;
+      coJhaP += f.totals.jhaPending;
+
+      coWkOT += f.totals.weeklyOnTime;
+      coWkL += f.totals.weeklyLate;
+      coWkM += f.totals.weeklyMissing;
+      coWkP += f.totals.weeklyPending;
+
+      coMoOT += f.totals.monthlyOnTime;
+      coMoL += f.totals.monthlyLate;
+      coMoM += f.totals.monthlyMissing;
+      coMoP += f.totals.monthlyPending;
+      coMoEx += f.totals.monthlyExempt;
+
+      if (f.totals.daysWorked > 0) {
+        coDaysSum += f.totals.daysWorked;
+        coDaysForemen++;
+      }
+      coJobsSum += f.totals.totalJobs;
+      coAuditsSum += f.totals.siteAuditsCount;
+      coIncSum += f.totals.incidentsCount;
+    });
+
+    const round1 = (v) => Math.round(v * 10) / 10;
+    const fmCount = foremen.length || 1;
+    const companyAverages = {
+      foremenCount: foremen.length,
+      fieldForemenCount: coDaysForemen,
+      jha: this.computeMetricStats(coJhaOT, coJhaL, coJhaM, coJhaP),
+      weekly: this.computeMetricStats(coWkOT, coWkL, coWkM, coWkP),
+      monthly: this.computeMetricStats(coMoOT, coMoL, coMoM, coMoP, coMoEx),
+      avgDaysWorked: coDaysForemen > 0 ? Math.round(coDaysSum / coDaysForemen) : 0,
+      avgJobsWorked: foremen.length > 0 ? round1(coJobsSum / fmCount) : 0,
+      avgSiteAudits: foremen.length > 0 ? round1(coAuditsSum / fmCount) : 0,
+      avgIncidents: foremen.length > 0 ? round1(coIncSum / fmCount) : 0
+    };
+
     const model = {
       period,
       availableYears,
       foremen,
       foremenMap: new Map(foremen.map(f => [f.name, f])),
       roleCounts,
+      companyAverages,
       generatedAt: refDate
     };
     this.cachedModel = model;
@@ -2296,7 +2344,8 @@ class ForemanReportCardEngine {
     return list;
   }
 
-  renderForemanOverviewCardHtml(fm, period) {
+  renderForemanOverviewCardHtml(fm, period, companyAverages = null) {
+    const co = companyAverages || (this.cachedModel ? this.cachedModel.companyAverages : null);
     const t = fm.totals;
     const roleCardClass = fm.roleStatus === 'active_foreman'
       ? 'role-active'
@@ -2350,36 +2399,55 @@ class ForemanReportCardEngine {
       t.completedJobsCount > 0 ? `${t.completedJobsCount} Comp` : ''
     ].filter(Boolean).slice(0, 2).join(' · ') || '—';
 
-    const renderMiniMetric = (label, stats, unitShort) => {
+    const renderMiniMetric = (label, stats, unitShort, coMetric) => {
+      const hasAvg = Boolean(coMetric && coMetric.expected > 0 && coMetric.submittedPct !== null);
+      const avgPct = hasAvg ? Math.max(0, Math.min(100, coMetric.submittedPct)) : null;
+      const avgTitle = hasAvg
+        ? `Company Avg (${period.shortLabel}): ${avgPct}% Submitted (${coMetric.onTimePct}% On-Time · ${coMetric.latePct}% Late · ${coMetric.missingPct}% Missing)`
+        : '';
+      const avgPinHtml = hasAvg
+        ? `<div class="frc-card-avg-pin" style="left:${avgPct}%;" title="${this.escapeHtml(avgTitle)}"></div>`
+        : '';
+
       if (!stats || stats.expected === 0) {
         const emptyLbl = stats && stats.exempt > 0
           ? `Exempt (<4w)`
           : (stats && stats.pending > 0 ? `⏳ ${stats.pending} pending` : 'N/A');
         return `
-          <div class="frc-card-metric-row">
+          <div class="frc-card-metric-row" title="${this.escapeHtml(avgTitle)}">
             <div class="frc-card-metric-top">
               <span class="frc-card-metric-lbl">${this.escapeHtml(label)}</span>
-              <span class="frc-card-metric-pct" style="color:#64748b;font-weight:700;font-size:10.5px;">${this.escapeHtml(emptyLbl)}</span>
+              <span class="frc-card-metric-pct" style="color:#64748b;font-weight:700;font-size:10.5px;">${this.escapeHtml(emptyLbl)}${hasAvg ? ` <span style="color:#38bdf8;font-size:9.5px;margin-left:3px;">◆ Avg ${avgPct}%</span>` : ''}</span>
             </div>
-            <div class="frc-card-bar"></div>
+            <div class="frc-card-bar-wrap">
+              <div class="frc-card-bar"></div>
+              ${avgPinHtml}
+            </div>
           </div>
         `;
       }
       const pctColor = stats.submittedPct >= 95 ? '#4ade80' : (stats.submittedPct >= 80 ? '#fbbf24' : '#f87171');
+      const delta = hasAvg ? (stats.submittedPct - avgPct) : null;
+      const deltaHtml = delta !== null
+        ? `<span style="color:${delta > 0 ? '#4ade80' : (delta < 0 ? '#f87171' : '#94a3b8')};font-weight:800;margin-left:4px;" title="${this.escapeHtml(avgTitle)}">${delta > 0 ? `+${delta}%` : (delta < 0 ? `${delta}%` : 'avg')}</span>`
+        : '';
       return `
-        <div class="frc-card-metric-row">
+        <div class="frc-card-metric-row" title="${this.escapeHtml(avgTitle)}">
           <div class="frc-card-metric-top">
             <span class="frc-card-metric-lbl">${this.escapeHtml(label)}</span>
-            <span class="frc-card-metric-pct" style="color:${pctColor};">${stats.submittedPct}% <span style="font-size:9.5px;font-weight:600;color:#94a3b8;">sub</span></span>
+            <span class="frc-card-metric-pct" style="color:${pctColor};">${stats.submittedPct}% <span style="font-size:9.5px;font-weight:600;color:#94a3b8;">sub</span>${deltaHtml}</span>
           </div>
-          <div class="frc-card-bar">
-            ${stats.onTimePct > 0 ? `<div style="width:${stats.onTimePct}%;background:#16a34a;"></div>` : ''}
-            ${stats.latePct > 0 ? `<div style="width:${stats.latePct}%;background:#f59e0b;"></div>` : ''}
-            ${stats.missingPct > 0 ? `<div style="width:${stats.missingPct}%;background:#dc2626;"></div>` : ''}
+          <div class="frc-card-bar-wrap">
+            <div class="frc-card-bar">
+              ${stats.onTimePct > 0 ? `<div style="width:${stats.onTimePct}%;background:#16a34a;"></div>` : ''}
+              ${stats.latePct > 0 ? `<div style="width:${stats.latePct}%;background:#f59e0b;"></div>` : ''}
+              ${stats.missingPct > 0 ? `<div style="width:${stats.missingPct}%;background:#dc2626;"></div>` : ''}
+            </div>
+            ${avgPinHtml}
           </div>
           <div class="frc-card-metric-detail">
             <span><span style="color:#86efac;">${stats.onTimePct}% OT</span> · <span style="color:#fde68a;">${stats.latePct}% L</span> · <span style="color:#fca5a5;">${stats.missingPct}% M</span></span>
-            <span>${stats.submitted}/${stats.expected} ${this.escapeHtml(unitShort)}</span>
+            <span>${stats.submitted}/${stats.expected} ${this.escapeHtml(unitShort)}${hasAvg ? ` · <span style="color:#7dd3fc;">◆ ${avgPct}%</span>` : ''}</span>
           </div>
         </div>
       `;
@@ -2424,43 +2492,67 @@ class ForemanReportCardEngine {
         <div class="frc-card-body">
           <!-- Cover Page 4 KPI Tiles -->
           <div class="frc-card-kpis">
-            <div class="frc-card-kpi">
+            <div class="frc-card-kpi" title="${co && !isWeeklyOnly ? `Company Avg: ${co.avgDaysWorked} days worked per field foreman` : ''}">
               <div class="frc-card-kpi-lbl">${isWeeklyOnly ? 'Weeks' : 'Days'}</div>
               <div class="frc-card-kpi-val">${isWeeklyOnly ? fm.ytdWeekly.expected : t.daysWorked}</div>
-              <div class="frc-card-kpi-sub">${isWeeklyOnly ? 'Weekly-only' : 'Scheduled'}</div>
+              <div class="frc-card-kpi-sub">${isWeeklyOnly ? 'Weekly-only' : (co && co.avgDaysWorked > 0 ? `◆ Avg ${co.avgDaysWorked}` : 'Scheduled')}</div>
             </div>
-            <div class="frc-card-kpi">
+            <div class="frc-card-kpi" title="${co ? `Company Avg: ${co.avgJobsWorked} jobs per foreman` : ''}">
               <div class="frc-card-kpi-lbl">Jobs</div>
               <div class="frc-card-kpi-val" style="color:#60a5fa;">${t.totalJobs}</div>
               <div class="frc-card-kpi-sub">${this.escapeHtml(statusMixShort)}</div>
             </div>
             <div class="frc-card-kpi is-clickable is-clickable-audit"
                  onclick="event.stopPropagation(); window.foremanReportCardEngine.openRecordsModal('audits', '${this.escapeJs(fm.name)}')"
-                 title="Click to view ${t.siteAuditsCount} site audit${t.siteAuditsCount === 1 ? '' : 's'} for ${this.escapeHtml(fm.name)}">
+                 title="Click to view ${t.siteAuditsCount} site audit${t.siteAuditsCount === 1 ? '' : 's'} for ${this.escapeHtml(fm.name)}${co ? ` (Company Avg: ${co.avgSiteAudits})` : ''}">
               <div class="frc-card-kpi-lbl">Audits</div>
               <div class="frc-card-kpi-val" style="color:${t.siteAuditCorrectionsCount > 0 ? '#fbbf24' : '#38bdf8'};">${t.siteAuditsCount}</div>
-              <div class="frc-card-kpi-sub">${t.siteAuditsCount === 0 ? 'None' : (t.siteAuditCorrectionsCount > 0 ? `${t.siteAuditCorrectionsCount} corr.` : 'View list →')}</div>
+              <div class="frc-card-kpi-sub">${t.siteAuditsCount === 0 ? (co ? `◆ Avg ${co.avgSiteAudits}` : 'None') : (t.siteAuditCorrectionsCount > 0 ? `${t.siteAuditCorrectionsCount} corr.` : 'View list →')}</div>
             </div>
             <div class="frc-card-kpi is-clickable"
                  onclick="event.stopPropagation(); window.foremanReportCardEngine.openRecordsModal('incidents', '${this.escapeJs(fm.name)}')"
-                 title="Click to view ${t.incidentsCount} incident report${t.incidentsCount === 1 ? '' : 's'} for ${this.escapeHtml(fm.name)}">
+                 title="Click to view ${t.incidentsCount} incident report${t.incidentsCount === 1 ? '' : 's'} for ${this.escapeHtml(fm.name)}${co ? ` (Company Avg: ${co.avgIncidents})` : ''}">
               <div class="frc-card-kpi-lbl">Incidents</div>
               <div class="frc-card-kpi-val" style="color:${t.incidentsCount > 0 ? '#f87171' : '#4ade80'};">${t.incidentsCount}</div>
-              <div class="frc-card-kpi-sub">${t.incidentsCount === 0 ? 'Clean ✓' : 'View list →'}</div>
+              <div class="frc-card-kpi-sub">${t.incidentsCount === 0 ? (co ? `◆ Avg ${co.avgIncidents}` : 'Clean ✓') : 'View list →'}</div>
             </div>
           </div>
 
-          <!-- Cover Page Weighted Compliance Bars -->
+          <!-- Cover Page Weighted Compliance Bars with Company Avg Markers -->
           <div class="frc-card-metrics">
-            ${renderMiniMetric('Daily JHA', fm.ytdJha, 'd')}
-            ${renderMiniMetric('Weekly Safety', fm.ytdWeekly, 'w')}
-            ${renderMiniMetric('Monthly Inspection', fm.ytdMonthly, 'mo')}
+            ${renderMiniMetric('Daily JHA', fm.ytdJha, 'd', co ? co.jha : null)}
+            ${renderMiniMetric('Weekly Safety', fm.ytdWeekly, 'w', co ? co.weekly : null)}
+            ${renderMiniMetric('Monthly Inspection', fm.ytdMonthly, 'mo', co ? co.monthly : null)}
           </div>
         </div>
 
         <div class="frc-card-footer">
           <div style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${footerLeftHtml}</div>
           <span class="frc-card-open-cue">Open Report Card →</span>
+        </div>
+      </div>
+    `;
+  }
+
+  renderCompanyAvgSummaryBarHtml(model) {
+    const co = model && model.companyAverages ? model.companyAverages : null;
+    if (!co) return '';
+    const fmtPct = (m) => (m && m.expected > 0)
+      ? `<strong style="color:#38bdf8;">${m.submittedPct}%</strong> <span style="color:#94a3b8;font-weight:600;">(${m.onTimePct}% OT)</span>`
+      : `<span style="color:#64748b;">N/A</span>`;
+    return `
+      <div class="frc-company-avg-bar" title="Workday/week/month-weighted averages across all ${co.foremenCount} foremen in ${this.escapeHtml(model.period.shortLabel)}. Marked with a vertical white/blue pin (◆) on every metric bar.">
+        <div style="display:flex;align-items:center;gap:6px;font-weight:800;color:#7dd3fc;white-space:nowrap;">
+          <span style="color:#38bdf8;">◆</span>
+          <span>${this.escapeHtml(model.period.shortLabel)} Company Averages:</span>
+        </div>
+        <div class="frc-company-avg-items">
+          <span class="frc-company-avg-pill">Daily JHA: ${fmtPct(co.jha)}</span>
+          <span class="frc-company-avg-pill">Weekly Safety: ${fmtPct(co.weekly)}</span>
+          <span class="frc-company-avg-pill">Monthly Insp.: ${fmtPct(co.monthly)}</span>
+          <span class="frc-company-avg-pill">Days: <strong style="color:#f8fafc;">${co.avgDaysWorked}</strong></span>
+          <span class="frc-company-avg-pill">Audits: <strong style="color:#38bdf8;">${co.avgSiteAudits}</strong></span>
+          <span class="frc-company-avg-pill">Incidents: <strong style="color:#fca5a5;">${co.avgIncidents}</strong></span>
         </div>
       </div>
     `;
@@ -2479,7 +2571,7 @@ class ForemanReportCardEngine {
 
     const useSections = this.roleFilter === 'all' && this.cardSortBy === 'role' && !String(this.searchQuery || '').trim();
     if (!useSections) {
-      return `<div class="frc-cards-grid">${visibleForemen.map(fm => this.renderForemanOverviewCardHtml(fm, model.period)).join('')}</div>`;
+      return `<div class="frc-cards-grid">${visibleForemen.map(fm => this.renderForemanOverviewCardHtml(fm, model.period, model.companyAverages)).join('')}</div>`;
     }
 
     const sections = [
@@ -2496,10 +2588,10 @@ class ForemanReportCardEngine {
             <span>${this.escapeHtml(sec.title)}</span>
             <span style="font-size:11px;font-weight:700;color:#64748b;">(${sec.items.length})</span>
           </div>
-          <span style="font-size:11px;color:#64748b;font-weight:600;">${this.escapeHtml(model.period.shortLabel)} · Click any card for full report card book</span>
+          <span style="font-size:11px;color:#64748b;font-weight:600;">${this.escapeHtml(model.period.shortLabel)} · ◆ Pin = Company Avg · Click any card for full report card</span>
         </div>
         <div class="frc-cards-grid">
-          ${sec.items.map(fm => this.renderForemanOverviewCardHtml(fm, model.period)).join('')}
+          ${sec.items.map(fm => this.renderForemanOverviewCardHtml(fm, model.period, model.companyAverages)).join('')}
         </div>
       </div>
     `).join('');
@@ -2584,6 +2676,8 @@ class ForemanReportCardEngine {
               </select>
             </div>
           </div>
+
+          ${this.renderCompanyAvgSummaryBarHtml(model)}
 
           <div id="frc-cards-grid-body" style="display:flex;flex-direction:column;gap:18px;">
             ${this.renderForemanCardsGridBodyHtml(model, visibleForemen)}
@@ -3147,9 +3241,24 @@ class ForemanReportCardEngine {
     return `<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:12px;font-size:10.5px;font-weight:800;background:${st.bg};color:${st.color};border:1px solid ${st.border};white-space:nowrap;">${st.icon} ${this.escapeHtml(label)}</span>`;
   }
 
-  renderMetricCardHtml(title, unitSingular, unitPlural, stats, subtitleNote = '') {
+  renderMetricCardHtml(title, unitSingular, unitPlural, stats, subtitleNote = '', companyAvg = null) {
     const hasData = stats && stats.expected > 0;
     const unitLabel = stats && stats.expected === 1 ? unitSingular : unitPlural;
+    const hasAvg = Boolean(companyAvg && companyAvg.expected > 0 && companyAvg.submittedPct !== null);
+    const avgPct = hasAvg ? Math.max(0, Math.min(100, companyAvg.submittedPct)) : null;
+    const avgLabelLeft = hasAvg ? Math.max(14, Math.min(86, avgPct)) : 50;
+    const avgTooltip = hasAvg
+      ? `Company Average: ${avgPct}% Submitted (${companyAvg.onTimePct}% On-Time · ${companyAvg.latePct}% Late · ${companyAvg.missingPct}% Missing across ${companyAvg.expected} ${unitPlural})`
+      : '';
+
+    const renderAvgMarkerOnBar = (barHeightPx) => {
+      if (!hasAvg) return '';
+      return `
+        <div style="position:absolute;top:-13px;left:${avgLabelLeft}%;transform:translateX(-50%);font-size:8.5px;font-weight:800;color:#0369a1;white-space:nowrap;line-height:1;letter-spacing:0.1px;" title="${this.escapeHtml(avgTooltip)}">◆ Avg ${avgPct}%</div>
+        <div style="position:absolute;top:-4px;left:${avgPct}%;transform:translateX(-50%);width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-top:5px solid #0284c7;z-index:3;" title="${this.escapeHtml(avgTooltip)}"></div>
+        <div style="position:absolute;top:-1px;left:${avgPct}%;transform:translateX(-50%);width:2.5px;height:${barHeightPx + 4}px;background:#0f172a;box-shadow:0 0 0 1px #ffffff;border-radius:1px;z-index:2;" title="${this.escapeHtml(avgTooltip)}"></div>
+      `;
+    };
 
     if (!hasData) {
       let emptyReason = `No finalized ${unitPlural} in period`;
@@ -3160,12 +3269,16 @@ class ForemanReportCardEngine {
       }
       return `
         <div style="border:1.5px solid #cbd5e1;border-radius:6px;padding:12px 14px;background:#f8fafc;">
-          <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:${hasAvg ? '15px' : '6px'};">
             <div style="font-size:11.5px;font-weight:800;text-transform:uppercase;letter-spacing:0.4px;color:#0f172a;">${this.escapeHtml(title)}</div>
             <div style="font-size:14px;font-weight:800;color:#64748b;">N/A</div>
           </div>
-          <div style="height:10px;border-radius:5px;background:#e2e8f0;margin-bottom:8px;"></div>
+          <div style="position:relative;margin-bottom:9px;">
+            <div style="height:10px;border-radius:5px;background:#e2e8f0;border:1px solid #cbd5e1;"></div>
+            ${renderAvgMarkerOnBar(10)}
+          </div>
           <div style="font-size:11px;color:#475569;font-weight:600;">${this.escapeHtml(emptyReason)}</div>
+          ${hasAvg ? `<div style="font-size:9.5px;color:#0369a1;font-weight:700;margin-top:4px;">◆ Co. Avg: ${avgPct}% Sub (${companyAvg.onTimePct}% OT)</div>` : ''}
           ${subtitleNote ? `<div style="font-size:10px;color:#64748b;margin-top:3px;">${this.escapeHtml(subtitleNote)}</div>` : ''}
         </div>
       `;
@@ -3174,10 +3287,20 @@ class ForemanReportCardEngine {
     const subColor = stats.submittedPct >= 95 ? '#15803d' : (stats.submittedPct >= 80 ? '#b45309' : '#b91c1c');
     const pendingTag = stats.pending > 0 ? ` · ⏳ ${stats.pending} pending` : '';
     const exemptTag = stats.exempt > 0 ? ` · ${stats.exempt} exempt (<4w)` : '';
+    const delta = hasAvg ? (stats.submittedPct - avgPct) : null;
+    const deltaBadge = delta !== null
+      ? (() => {
+          const bg = delta > 0 ? '#dcfce7' : (delta < 0 ? '#fee2e2' : '#f1f5f9');
+          const fg = delta > 0 ? '#166534' : (delta < 0 ? '#991b1b' : '#475569');
+          const bd = delta > 0 ? '#86efac' : (delta < 0 ? '#fca5a5' : '#cbd5e1');
+          const txt = delta > 0 ? `+${delta}% vs avg` : (delta < 0 ? `${delta}% vs avg` : 'At Co. Avg');
+          return `<span style="background:${bg};color:${fg};border:1px solid ${bd};border-radius:10px;padding:0 5px;font-size:9px;font-weight:800;white-space:nowrap;">${txt}</span>`;
+        })()
+      : '';
 
     return `
       <div style="border:1.5px solid #1e293b;border-radius:6px;padding:12px 14px;background:#ffffff;">
-        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:${hasAvg ? '15px' : '6px'};">
           <div style="font-size:11.5px;font-weight:800;text-transform:uppercase;letter-spacing:0.4px;color:#0f172a;">${this.escapeHtml(title)}</div>
           <div style="text-align:right;">
             <span style="font-size:17px;font-weight:900;color:${subColor};">${stats.submittedPct}%</span>
@@ -3185,11 +3308,14 @@ class ForemanReportCardEngine {
           </div>
         </div>
 
-        <!-- Mutually Exclusive Stacked Bar (Green / Amber / Red = 100%) -->
-        <div style="display:flex;height:11px;border-radius:5px;overflow:hidden;background:#e2e8f0;border:1px solid #94a3b8;margin-bottom:9px;">
-          ${stats.onTimePct > 0 ? `<div style="width:${stats.onTimePct}%;background:#16a34a;" title="On-Time: ${stats.onTimePct}%"></div>` : ''}
-          ${stats.latePct > 0 ? `<div style="width:${stats.latePct}%;background:#f59e0b;" title="Late: ${stats.latePct}%"></div>` : ''}
-          ${stats.missingPct > 0 ? `<div style="width:${stats.missingPct}%;background:#dc2626;" title="Missing: ${stats.missingPct}%"></div>` : ''}
+        <!-- Mutually Exclusive Stacked Bar (Green / Amber / Red = 100%) + Company Average Marker -->
+        <div style="position:relative;margin-bottom:10px;">
+          <div style="display:flex;height:11px;border-radius:5px;overflow:hidden;background:#e2e8f0;border:1px solid #94a3b8;">
+            ${stats.onTimePct > 0 ? `<div style="width:${stats.onTimePct}%;background:#16a34a;" title="On-Time: ${stats.onTimePct}%"></div>` : ''}
+            ${stats.latePct > 0 ? `<div style="width:${stats.latePct}%;background:#f59e0b;" title="Late: ${stats.latePct}%"></div>` : ''}
+            ${stats.missingPct > 0 ? `<div style="width:${stats.missingPct}%;background:#dc2626;" title="Missing: ${stats.missingPct}%"></div>` : ''}
+          </div>
+          ${renderAvgMarkerOnBar(11)}
         </div>
 
         <!-- Mutually Exclusive Percentages Grid -->
@@ -3212,6 +3338,12 @@ class ForemanReportCardEngine {
           <span><strong>${stats.submitted}/${stats.expected}</strong> ${unitLabel} submitted</span>
           <span>${this.escapeHtml((pendingTag + exemptTag).replace(/^\s*·\s*/, ''))}</span>
         </div>
+        ${hasAvg ? `
+          <div style="font-size:9.5px;color:#0369a1;font-weight:700;margin-top:4px;padding-top:4px;border-top:1px dashed #cbd5e1;display:flex;justify-content:space-between;align-items:center;gap:4px;flex-wrap:wrap;">
+            <span>◆ Co. Avg: <strong>${avgPct}%</strong> Sub (${companyAvg.onTimePct}% OT)</span>
+            ${deltaBadge}
+          </div>
+        ` : ''}
         ${subtitleNote ? `<div style="font-size:9.5px;color:#64748b;margin-top:3px;">${this.escapeHtml(subtitleNote)}</div>` : ''}
       </div>
     `;
@@ -3250,9 +3382,10 @@ class ForemanReportCardEngine {
   // PAGE 1: Foreman Cover Page HTML
   // =========================================================================
 
-  renderCoverPageHtml(foreman, period, pages, { isPrint = false } = {}) {
+  renderCoverPageHtml(foreman, period, pages, { isPrint = false, companyAverages = null } = {}) {
     const canEdit = !isPrint && this.canEditJobStatus();
     const filteredJobs = this.getFilteredJobsForForeman(foreman);
+    const coAvg = companyAverages || (this.cachedModel ? this.cachedModel.companyAverages : null);
 
     // Recompute displayed YTD totals respecting status filters only if subset? No — Cover Page shows true YTD totals for the foreman across the period!
     const t = foreman.totals;
@@ -3324,11 +3457,13 @@ class ForemanReportCardEngine {
           <div style="font-size:10px;font-weight:800;text-transform:uppercase;color:#64748b;">${t.daysWorked === 0 && foreman.ytdWeekly.expected > 0 ? 'Weeks Tracked' : 'Total Days Worked'}</div>
           <div style="font-size:22px;font-weight:900;color:#0f172a;margin:2px 0;">${t.daysWorked === 0 && foreman.ytdWeekly.expected > 0 ? foreman.ytdWeekly.expected : t.daysWorked}</div>
           <div style="font-size:10px;color:#475569;font-weight:600;">${t.daysWorked === 0 && foreman.ytdWeekly.expected > 0 ? `Weekly-only (${this.escapeHtml(period.shortLabel)})` : `Scheduled workdays (${this.escapeHtml(period.shortLabel)})`}</div>
+          ${coAvg && coAvg.avgDaysWorked > 0 && !(t.daysWorked === 0 && foreman.ytdWeekly.expected > 0) ? `<div style="font-size:9px;color:#0369a1;font-weight:700;margin-top:3px;">◆ Co. avg: ${coAvg.avgDaysWorked}d</div>` : ''}
         </div>
         <div style="border:1.5px solid #cbd5e1;border-radius:6px;padding:10px 12px;background:#ffffff;text-align:center;">
           <div style="font-size:10px;font-weight:800;text-transform:uppercase;color:#64748b;">Jobs Worked</div>
           <div style="font-size:22px;font-weight:900;color:#1d4ed8;margin:2px 0;">${t.totalJobs}</div>
           <div style="font-size:10px;color:#475569;font-weight:600;">${this.escapeHtml(statusMix)}</div>
+          ${coAvg && coAvg.avgJobsWorked > 0 ? `<div style="font-size:9px;color:#0369a1;font-weight:700;margin-top:3px;">◆ Co. avg: ${coAvg.avgJobsWorked}</div>` : ''}
         </div>
         <div class="${!isPrint ? 'frc-paper-clickable-kpi' : ''}"
              ${!isPrint ? `onclick="window.foremanReportCardEngine.openRecordsModal('audits', '${this.escapeJs(foreman.name)}')" title="Click to view site audits logged in ${this.escapeHtml(period.shortLabel)}"` : ''}
@@ -3338,6 +3473,7 @@ class ForemanReportCardEngine {
           <div style="font-size:10px;color:${t.siteAuditCorrectionsCount > 0 ? '#b45309' : '#15803d'};font-weight:700;">
             ${t.siteAuditsCount === 0 ? 'None logged' : (t.siteAuditCorrectionsCount > 0 ? `${t.siteAuditCorrectionsCount} w/ corrections` : 'All clean ✓')}${!isPrint && t.siteAuditsCount > 0 ? ' · <span style="color:#2563eb;text-decoration:underline;">View →</span>' : ''}
           </div>
+          ${coAvg ? `<div style="font-size:9px;color:#0369a1;font-weight:700;margin-top:3px;">◆ Co. avg: ${coAvg.avgSiteAudits}</div>` : ''}
         </div>
         <div class="${!isPrint ? 'frc-paper-clickable-kpi is-incident' : ''}"
              ${!isPrint ? `onclick="window.foremanReportCardEngine.openRecordsModal('incidents', '${this.escapeJs(foreman.name)}')" title="Click to view incident reports logged in ${this.escapeHtml(period.shortLabel)}"` : ''}
@@ -3347,18 +3483,19 @@ class ForemanReportCardEngine {
           <div style="font-size:10px;color:${t.incidentsCount > 0 ? '#b91c1c' : '#15803d'};font-weight:700;">
             ${t.incidentsCount === 0 ? 'Clean record ✓' : `Logged in ${this.escapeHtml(period.shortLabel)}`}${!isPrint && t.incidentsCount > 0 ? ' · <span style="color:#b91c1c;text-decoration:underline;">View list →</span>' : ''}
           </div>
+          ${coAvg ? `<div style="font-size:9px;color:#0369a1;font-weight:700;margin-top:3px;">◆ Co. avg: ${coAvg.avgIncidents}</div>` : ''}
         </div>
       </div>
 
       <!-- Foreman YTD Overall Compliance Report Card -->
-      <div style="font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:0.4px;border-bottom:2px solid #0f172a;padding-bottom:4px;margin-bottom:10px;color:#0f172a;display:flex;justify-content:space-between;align-items:baseline;">
+      <div style="font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:0.4px;border-bottom:2px solid #0f172a;padding-bottom:4px;margin-bottom:10px;color:#0f172a;display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:6px;">
         <span>1. Foreman Overall Compliance Report Card (${this.escapeHtml(period.shortLabel)} Weighted Totals)</span>
-        <span style="font-size:10px;font-weight:600;color:#64748b;text-transform:none;">On-Time % + Late % + Missing % = 100%</span>
+        <span style="font-size:10px;font-weight:600;color:#64748b;text-transform:none;"><strong style="color:#0369a1;">◆ = Co. Avg</strong> &nbsp;·&nbsp; On-Time % + Late % + Missing % = 100%</span>
       </div>
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:18px;">
-        ${this.renderMetricCardHtml('Daily JHA Compliance', 'day', 'days', foreman.ytdJha, 'Weighted by scheduled days worked')}
-        ${this.renderMetricCardHtml('Weekly Safety Meeting', 'week', 'weeks', foreman.ytdWeekly, 'Weighted by active crew weeks')}
-        ${this.renderMetricCardHtml('Monthly Inspection', 'month', 'months', foreman.ytdMonthly, '≥4 consec. wks · On-time thru 7th of next mo')}
+        ${this.renderMetricCardHtml('Daily JHA Compliance', 'day', 'days', foreman.ytdJha, 'Weighted by scheduled days worked', coAvg ? coAvg.jha : null)}
+        ${this.renderMetricCardHtml('Weekly Safety Meeting', 'week', 'weeks', foreman.ytdWeekly, 'Weighted by active crew weeks', coAvg ? coAvg.weekly : null)}
+        ${this.renderMetricCardHtml('Monthly Inspection', 'month', 'months', foreman.ytdMonthly, '≥4 consec. wks · On-time thru 7th of next mo', coAvg ? coAvg.monthly : null)}
       </div>
 
       <!-- Quick Callout to Page 2 Current State if Active or On-Hold Fallback -->
@@ -3690,8 +3827,9 @@ class ForemanReportCardEngine {
   // PAGES 3..N: Individual Job Report Card HTML
   // =========================================================================
 
-  renderJobReportCardHtml(foreman, job, period, { isPrint = false } = {}) {
+  renderJobReportCardHtml(foreman, job, period, { isPrint = false, companyAverages = null } = {}) {
     const canEdit = !isPrint && this.canEditJobStatus();
+    const coAvg = companyAverages || (this.cachedModel ? this.cachedModel.companyAverages : null);
     const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
     const dateBadges = [];
@@ -3842,14 +3980,14 @@ class ForemanReportCardEngine {
       ` : ''}
 
       <!-- 3-Column Job Compliance Percentages -->
-      <div style="font-size:11.5px;font-weight:900;text-transform:uppercase;letter-spacing:0.4px;border-bottom:2px solid #0f172a;padding-bottom:3px;margin-bottom:10px;color:#0f172a;display:flex;justify-content:space-between;">
+      <div style="font-size:11.5px;font-weight:900;text-transform:uppercase;letter-spacing:0.4px;border-bottom:2px solid #0f172a;padding-bottom:3px;margin-bottom:10px;color:#0f172a;display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:6px;">
         <span>1. Compliance Breakdown — Job ${this.escapeHtml(job.jobNumber)}</span>
-        <span style="font-size:10px;font-weight:600;color:#64748b;text-transform:none;">On-Time % + Late % + Missing % = 100%</span>
+        <span style="font-size:10px;font-weight:600;color:#64748b;text-transform:none;"><strong style="color:#0369a1;">◆ = Co. Avg</strong> &nbsp;·&nbsp; On-Time % + Late % + Missing % = 100%</span>
       </div>
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px;">
-        ${this.renderMetricCardHtml('Daily JHA', 'day', 'days', job.jha, `${job.daysWorked} scheduled workday${job.daysWorked === 1 ? '' : 's'}`)}
-        ${this.renderMetricCardHtml('Weekly Safety', 'week', 'weeks', job.weekly, `${job.weekly.expected} finalized week${job.weekly.expected === 1 ? '' : 's'}`)}
-        ${this.renderMetricCardHtml('Monthly Inspection', 'month', 'months', job.monthly, '≥4 consec. wks · Due by 7th of next mo')}
+        ${this.renderMetricCardHtml('Daily JHA', 'day', 'days', job.jha, `${job.daysWorked} scheduled workday${job.daysWorked === 1 ? '' : 's'}`, coAvg ? coAvg.jha : null)}
+        ${this.renderMetricCardHtml('Weekly Safety', 'week', 'weeks', job.weekly, `${job.weekly.expected} finalized week${job.weekly.expected === 1 ? '' : 's'}`, coAvg ? coAvg.weekly : null)}
+        ${this.renderMetricCardHtml('Monthly Inspection', 'month', 'months', job.monthly, '≥4 consec. wks · Due by 7th of next mo', coAvg ? coAvg.monthly : null)}
       </div>
 
       <!-- Job Site Audits & Incident Reports Strip -->
