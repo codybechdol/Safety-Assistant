@@ -129,6 +129,21 @@ function ensureRecommendedCompanionSheetsExist(ss) {
         'Notes'
       ],
       color: '#0369a1'
+    },
+    {
+      name: typeof SHEET_FIRE_EXTINGUISHERS !== 'undefined' ? SHEET_FIRE_EXTINGUISHERS : 'Fire Extinguishers',
+      headers: ['Vehicle / Equipment #', 'Size', 'Test Date', 'Date Verified', 'Location', 'Status', 'Assigned To', 'Job #', 'Change Out Date', 'Notes'],
+      color: '#b91c1c'
+    },
+    {
+      name: typeof SHEET_FIRE_EXTINGUISHER_SWAPS !== 'undefined' ? SHEET_FIRE_EXTINGUISHER_SWAPS : 'Fire Extinguisher Swaps',
+      headers: ['Crew Lead / Foreman', 'Vehicle / Equipment #', 'Size', 'Location', 'Test Date', 'Change Out Date', 'Days Left', 'Status', 'Notes'],
+      color: '#dc2626'
+    },
+    {
+      name: typeof SHEET_FIRST_AID_KITS !== 'undefined' ? SHEET_FIRST_AID_KITS : 'First Aid Kits',
+      headers: ['Vehicle / Equipment #', 'Status', 'Date Verified', 'Location', 'Assigned To', 'Job #', 'Notes'],
+      color: '#059669'
     }
   ];
 
@@ -294,6 +309,8 @@ function exportFullDatabaseSnapshot(tableKeysFilter) {
     { key: 'aed', name: typeof SHEET_AED !== 'undefined' ? SHEET_AED : 'AED' },
     { key: 'grounds', name: typeof SHEET_GROUNDS !== 'undefined' ? SHEET_GROUNDS : 'Grounds' },
     { key: 'hot_sticks', name: typeof SHEET_HOT_STICKS !== 'undefined' ? SHEET_HOT_STICKS : 'Hot Sticks' },
+    { key: 'fire_extinguishers', name: typeof SHEET_FIRE_EXTINGUISHERS !== 'undefined' ? SHEET_FIRE_EXTINGUISHERS : 'Fire Extinguishers' },
+    { key: 'first_aid_kits', name: typeof SHEET_FIRST_AID_KITS !== 'undefined' ? SHEET_FIRST_AID_KITS : 'First Aid Kits' },
     { key: 'task_metadata', name: 'Task Metadata' },
     { key: 'glove_swaps', name: typeof SHEET_GLOVE_SWAPS !== 'undefined' ? SHEET_GLOVE_SWAPS : 'Glove Swaps' },
     { key: 'sleeve_swaps', name: typeof SHEET_SLEEVE_SWAPS !== 'undefined' ? SHEET_SLEEVE_SWAPS : 'Sleeve Swaps' },
@@ -304,6 +321,7 @@ function exportFullDatabaseSnapshot(tableKeysFilter) {
     { key: 'aed_swaps', name: 'AED Swaps' },
     { key: 'ground_swaps', name: 'Ground Swaps' },
     { key: 'hot_stick_swaps', name: 'Hot Stick Swaps' },
+    { key: 'fire_extinguisher_swaps', name: typeof SHEET_FIRE_EXTINGUISHER_SWAPS !== 'undefined' ? SHEET_FIRE_EXTINGUISHER_SWAPS : 'Fire Extinguisher Swaps' },
     { key: 'safety_compliance', name: typeof SHEET_SAFETY_COMPLIANCE !== 'undefined' ? SHEET_SAFETY_COMPLIANCE : 'Safety Compliance' },
     { key: 'expiring_certs', name: 'Expiring Certs' },
     { key: 'training_tracking', name: 'Training Tracking' },
@@ -1310,6 +1328,8 @@ function patchSyncSnapshotInDrive(sheetsModified, configsModified, extraConfigs,
       'aed': 'aed',
       'grounds': 'grounds',
       'hot sticks': 'hot_sticks',
+      'fire extinguishers': 'fire_extinguishers',
+      'first aid kits': 'first_aid_kits',
       'task metadata': 'task_metadata',
       'glove swaps': 'glove_swaps',
       'sleeve swaps': 'sleeve_swaps',
@@ -1320,6 +1340,7 @@ function patchSyncSnapshotInDrive(sheetsModified, configsModified, extraConfigs,
       'aed swaps': 'aed_swaps',
       'ground swaps': 'ground_swaps',
       'hot stick swaps': 'hot_stick_swaps',
+      'fire extinguisher swaps': 'fire_extinguisher_swaps',
       'safety compliance': 'safety_compliance',
       'expiring certs': 'expiring_certs',
       'training tracking': 'training_tracking',
@@ -1943,6 +1964,12 @@ function applyBatchSyncMutations(mutations, returnSnapshot, options) {
       mut.rowData = mut.rowData || mut.data || null;
       var sheetName = mut.sheetName;
       var sheet = sheetName ? getSheetCaseInsensitive(sheetName) : null;
+      if (!sheet && sheetName && typeof ensureRecommendedCompanionSheetsExist === 'function') {
+        try {
+          ensureRecommendedCompanionSheetsExist(ss);
+          sheet = getSheetCaseInsensitive(sheetName);
+        } catch (_ensErr) {}
+      }
       var actionsWithoutSheet = [
         'DELETE_TASK',
         'SET_TASK_STATUS',
@@ -3295,14 +3322,14 @@ function applyBatchSyncMutations(mutations, returnSnapshot, options) {
               return val;
             });
 
-            var isInvSheet = ['gloves', 'sleeves', 'blankets', 'macks', 'hv testers', 'phasing sets', 'aed', 'grounds', 'hot sticks', 'hv_testers', 'phasing_sets', 'hot_sticks'].indexOf(sheetLower) !== -1;
+            var isInvSheet = ['gloves', 'sleeves', 'blankets', 'macks', 'hv testers', 'phasing sets', 'aed', 'grounds', 'hot sticks', 'fire extinguishers', 'first aid kits', 'hv_testers', 'phasing_sets', 'hot_sticks', 'fire_extinguishers', 'first_aid_kits'].indexOf(sheetLower) !== -1;
             var isEmpSheet = (sheetLower === 'employees' || sheetLower === 'previous employees' || sheetLower === 'previous_employees');
             var isJtSheet = (sheetLower === 'job tracking' || sheetLower === 'job_tracking');
             var isLogEmailSheet = (sheetLower === 'site audits' || sheetLower === 'site_audits' || sheetLower === 'incident reports' || sheetLower === 'incident_reports');
 
             var itemKey = '';
             if (isInvSheet) {
-              itemKey = String(mut.rowData['Item #'] || mut.rowData['Glove'] || mut.rowData['Sleeve'] || mut.rowData['Blanket'] || mut.rowData['MACK'] || mut.rowData['Serial #'] || mut.rowData['HVT #'] || mut.rowData['Phasing Set #'] || mut.rowData['AED #'] || mut.rowData['Ground #'] || mut.rowData['Hot Stick #'] || mut.itemIdentifier || '').trim();
+              itemKey = String(mut.rowData['Vehicle / Equipment #'] || mut.rowData['Item #'] || mut.rowData['Glove'] || mut.rowData['Sleeve'] || mut.rowData['Blanket'] || mut.rowData['MACK'] || mut.rowData['Serial #'] || mut.rowData['HVT #'] || mut.rowData['Phasing Set #'] || mut.rowData['AED #'] || mut.rowData['Ground #'] || mut.rowData['Hot Stick #'] || mut.itemIdentifier || '').trim();
             } else if (isEmpSheet) {
               itemKey = String(mut.rowData['Name'] || mut.rowData['Employee Name'] || mut.rowData['Employee'] || mut.itemIdentifier || '').trim();
             } else if (isJtSheet) {

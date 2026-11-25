@@ -96,6 +96,9 @@ class SheetNavigator {
       { key: 'ground_swaps', label: '🔄 Ground Swaps', icon: '🔄', isSwap: true },
       { key: 'hot_sticks', label: '🔴 Hot Sticks', icon: '🔴', isSwap: false },
       { key: 'hot_stick_swaps', label: '🔄 Hot Stick Swaps', icon: '🔄', isSwap: true },
+      { key: 'fire_extinguishers', label: '🧯 Fire Extinguishers', icon: '🧯', isSwap: false },
+      { key: 'fire_extinguisher_swaps', label: '🔄 Fire Ext. Swaps', icon: '🔄', isSwap: true },
+      { key: 'first_aid_kits', label: '🩹 First Aid Kits', icon: '🩹', isSwap: false },
       { key: 'test_batches', label: '🔬 Lab Test Batches', icon: '🔬', isSwap: false }
     ];
   }
@@ -504,6 +507,9 @@ class SheetNavigator {
       ground_swaps: { group: 'equipment', item: 'grounds', subtab: 'swaps', invKey: 'grounds', swapKey: 'ground_swaps' },
       hot_sticks: { group: 'equipment', item: 'hot_sticks', subtab: 'inventory', invKey: 'hot_sticks', swapKey: 'hot_stick_swaps' },
       hot_stick_swaps: { group: 'equipment', item: 'hot_sticks', subtab: 'swaps', invKey: 'hot_sticks', swapKey: 'hot_stick_swaps' },
+      fire_extinguishers: { group: 'equipment', item: 'fire_extinguishers', subtab: 'inventory', invKey: 'fire_extinguishers', swapKey: 'fire_extinguisher_swaps' },
+      fire_extinguisher_swaps: { group: 'equipment', item: 'fire_extinguishers', subtab: 'swaps', invKey: 'fire_extinguishers', swapKey: 'fire_extinguisher_swaps' },
+      first_aid_kits: { group: 'equipment', item: 'first_aid_kits', subtab: 'inventory', invKey: 'first_aid_kits', swapKey: null },
       test_batches: { group: 'equipment', item: 'test_batches', subtab: 'inventory', invKey: 'test_batches', swapKey: null }
     };
     return mappings[key] || { group: 'employees', item: 'employees', subtab: 'inventory', invKey: 'employees', swapKey: null };
@@ -520,7 +526,7 @@ class SheetNavigator {
     this.searchTerm = '';
     const sInput = document.getElementById('sheet-search-input');
     if (sInput) sInput.value = '';
-    const INVENTORY_KEYS = ['gloves', 'sleeves', 'blankets', 'macks', 'hv_testers', 'phasing_sets', 'aed', 'grounds', 'hot_sticks'];
+    const INVENTORY_KEYS = ['gloves', 'sleeves', 'blankets', 'macks', 'hv_testers', 'phasing_sets', 'aed', 'grounds', 'hot_sticks', 'fire_extinguishers', 'first_aid_kits'];
     if (sheetKey === 'employees') {
       this.multiSort = ['Location', 'Job Number'];
       this.sortCol = null;
@@ -673,6 +679,8 @@ class SheetNavigator {
         { id: 'aed', label: 'AED', icon: '🏥', invKey: 'aed', swapKey: 'aed_swaps' },
         { id: 'grounds', label: 'Grounds', icon: '⚡', invKey: 'grounds', swapKey: 'ground_swaps' },
         { id: 'hot_sticks', label: 'Hot Sticks', icon: '🔴', invKey: 'hot_sticks', swapKey: 'hot_stick_swaps' },
+        { id: 'fire_extinguishers', label: 'Fire Extinguishers', icon: '🧯', invKey: 'fire_extinguishers', swapKey: 'fire_extinguisher_swaps' },
+        { id: 'first_aid_kits', label: 'First Aid Kits', icon: '🩹', invKey: 'first_aid_kits', swapKey: null },
         { id: 'test_batches', label: 'Lab Test Batches', icon: '🔬', invKey: 'test_batches', swapKey: null }
       ];
     }
@@ -7728,7 +7736,8 @@ class SheetNavigator {
 
     const INVENTORY_KEYS = [
       'gloves', 'sleeves', 'blankets', 'macks',
-      'hv_testers', 'phasing_sets', 'aed', 'grounds', 'hot_sticks'
+      'hv_testers', 'phasing_sets', 'aed', 'grounds', 'hot_sticks',
+      'fire_extinguishers', 'first_aid_kits'
     ];
     const isEmployeeOrJobSheet = this.currentSheetKey === 'employees' || this.currentSheetKey === 'job_tracking';
     const isInventorySheet = INVENTORY_KEYS.includes(this.currentSheetKey);
@@ -7744,7 +7753,9 @@ class SheetNavigator {
       phasing_sets: 'Phasing Set',
       aed: 'AED',
       grounds: 'Ground',
-      hot_sticks: 'Hot Stick'
+      hot_sticks: 'Hot Stick',
+      fire_extinguishers: 'Fire Extinguisher',
+      first_aid_kits: 'First Aid Kit'
     };
 
     if (btnImportCrews) {
@@ -13455,7 +13466,7 @@ class SheetNavigator {
       this.renderJobTrackingTable(container, countBadge, tableData);
       return;
     }
-    const isEquipmentSheet = ['gloves', 'sleeves', 'blankets', 'macks', 'hv_testers', 'phasing_sets', 'aed', 'grounds', 'hot_sticks'].includes(this.currentSheetKey);
+    const isEquipmentSheet = ['gloves', 'sleeves', 'blankets', 'macks', 'hv_testers', 'phasing_sets', 'aed', 'grounds', 'hot_sticks', 'fire_extinguishers', 'first_aid_kits'].includes(this.currentSheetKey);
     const isInventorySheet = isEquipmentSheet;
     const isJobTracking = this.currentSheetKey === 'job_tracking';
     if (isJobTracking && tableData.headers && !tableData.headers.some(h => String(h).trim().toLowerCase() === 'crew type')) {
@@ -15342,13 +15353,13 @@ class SheetNavigator {
 
             // 3. For single-key sheets (inventory by item#, employees by name), use itemIdentifier fallback
             const isMultiRowSheet = ['expiring_certs', 'training_tracking', 'safety_compliance', 'dot_drug_tests'].includes(this.currentSheetKey);
-            const isEquipmentKey = ['gloves', 'sleeves', 'blankets', 'macks', 'hv_testers', 'phasing_sets', 'aed', 'grounds', 'hot_sticks'].includes(this.currentSheetKey);
+            const isEquipmentKey = ['gloves', 'sleeves', 'blankets', 'macks', 'hv_testers', 'phasing_sets', 'aed', 'grounds', 'hot_sticks', 'fire_extinguishers', 'first_aid_kits'].includes(this.currentSheetKey);
             const normItem = (isEquipmentKey && typeof this.normalizeEquipmentIdentifier === 'function') ? this.normalizeEquipmentIdentifier(itemIdentifier) : '';
 
             if (!tableRow && !isMultiRowSheet) {
               if (itemIdentifier && tableData.rows) {
                 tableRow = tableData.rows.find(r => {
-                  const rawId = String(r['HVT #'] || r['HV Tester'] || r['Phasing Set'] || r['PS #'] || r['AED #'] || r['Serial #'] || r['Item #'] || r['Glove'] || r['Sleeve'] || r['Blanket'] || r['MACK'] || r['Name'] || r['Employee Name'] || r['Job Number'] || Object.values(r)[0] || '').trim();
+                  const rawId = String(r['Vehicle / Equipment #'] || r['HVT #'] || r['HV Tester'] || r['Phasing Set'] || r['PS #'] || r['AED #'] || r['Serial #'] || r['Item #'] || r['Glove'] || r['Sleeve'] || r['Blanket'] || r['MACK'] || r['Name'] || r['Employee Name'] || r['Job Number'] || Object.values(r)[0] || '').trim();
                   if (rawId.toLowerCase() === itemIdentifier.toLowerCase()) return true;
                   if (normItem && typeof this.normalizeEquipmentIdentifier === 'function' && this.normalizeEquipmentIdentifier(rawId) === normItem) return true;
                   return false;
@@ -15391,7 +15402,7 @@ class SheetNavigator {
           const isAssignedCol = (hLower.includes('assigned') || hLower === 'holder') && !hLower.includes('date');
           const isStatusCol = hLower === 'status' || hLower === 'item status';
           const valLower = newVal.toLowerCase();
-          const isInventorySheet = ['gloves', 'sleeves', 'blankets', 'macks', 'hv_testers', 'phasing_sets', 'aed', 'grounds', 'hot_sticks'].includes(this.currentSheetKey);
+          const isInventorySheet = ['gloves', 'sleeves', 'blankets', 'macks', 'hv_testers', 'phasing_sets', 'aed', 'grounds', 'hot_sticks', 'fire_extinguishers', 'first_aid_kits'].includes(this.currentSheetKey);
           const isOnShelf = valLower === 'on shelf' || valLower === 'onshelf' || valLower === 'shelf';
 
           const isUnreconciledShelf = (isAssignedCol || isStatusCol) && isOnShelf && isInventorySheet && tableRow && (tableRow['Status'] !== 'On Shelf' || tableRow['Location'] !== 'Helena');

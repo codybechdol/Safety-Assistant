@@ -53,6 +53,11 @@ var SHEET_HOT_STICKS = 'Hot Sticks';
 var SHEET_HOT_STICK_SWAPS = 'Hot Stick Swaps';
 var SHEET_HOT_STICKS_HISTORY = 'Hot Sticks History';
 
+// Phase 7: Fire Extinguishers & First Aid Kits (vehicle / job shack safety gear)
+var SHEET_FIRE_EXTINGUISHERS = 'Fire Extinguishers';
+var SHEET_FIRE_EXTINGUISHER_SWAPS = 'Fire Extinguisher Swaps';
+var SHEET_FIRST_AID_KITS = 'First Aid Kits';
+
 // DOT Drug Testing
 var SHEET_DRUG_TESTS = 'DOT Drug Tests';
 var SHEET_DRUG_CLINICS = 'Drug Test Clinics';

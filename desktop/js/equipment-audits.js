@@ -34,7 +34,9 @@ class EquipmentAuditsEngine {
       { key: 'phasing_sets', label: 'Phasing Sets', icon: '⚡', sheetName: 'Phasing Sets', isPersonal: false },
       { key: 'aed', label: 'AED', icon: '🏥', sheetName: 'AED', isPersonal: false },
       { key: 'grounds', label: 'Grounds', icon: '⚡', sheetName: 'Grounds', isPersonal: false },
-      { key: 'hot_sticks', label: 'Hot Sticks', icon: '🔴', sheetName: 'Hot Sticks', isPersonal: false }
+      { key: 'hot_sticks', label: 'Hot Sticks', icon: '🔴', sheetName: 'Hot Sticks', isPersonal: false },
+      { key: 'fire_extinguishers', label: 'Fire Extinguishers', icon: '🧯', sheetName: 'Fire Extinguishers', isPersonal: false, isVehicleBased: true, fieldOnly: true },
+      { key: 'first_aid_kits', label: 'First Aid Kits', icon: '🩹', sheetName: 'First Aid Kits', isPersonal: false, isVehicleBased: true, fieldOnly: true }
     ];
 
     this.SHOP_STATUS_POOLS = [
@@ -64,8 +66,8 @@ class EquipmentAuditsEngine {
         jobNumber: 'SHOP-PACKED-DELIVERY',
         name: 'Packed For Delivery',
         icon: '🚚',
-        jobName: 'Helena Shop — Ready For Delivery',
-        location: 'Helena',
+        jobName: "Cody's Truck / Shop — Ready For Delivery",
+        location: "Cody's Truck",
         canonicalStatus: 'Ready For Delivery',
         canonicalAssignedTo: 'Packed For Delivery',
         matchStatuses: ['ready for delivery', 'packed for delivery'],
@@ -211,6 +213,25 @@ class EquipmentAuditsEngine {
       (Array.isArray(subs) ? subs : []).forEach((s) => {
         if (s && s.request_id) this.submissionsByReqId.set(s.request_id, s);
       });
+
+      // Auto-backfill active employee roster on any open Packed For Delivery audit link created with placeholder roster
+      const allActiveEmps = this.getAllActiveEmployeeNames();
+      if (allActiveEmps.length > 0) {
+        this.requests.forEach((req) => {
+          if (!req || req.status === 'archived' || req.status === 'reconciled') return;
+          if (String(req.job_number || '').trim().toUpperCase() !== 'SHOP-PACKED-DELIVERY') return;
+          const curEmps = Array.isArray(req.crew_employees) ? req.crew_employees : [];
+          const hasRealEmployees = curEmps.length > 1 || (curEmps.length === 1 && !/^(packed|ready)\s+for\s+delivery$/i.test(String(curEmps[0] || '').trim()));
+          if (!hasRealEmployees) {
+            req.crew_employees = allActiveEmps;
+            this.sbRequest(`/rest/v1/sa_audit_requests?id=eq.${encodeURIComponent(req.id)}`, {
+              method: 'PATCH',
+              body: { crew_employees: allActiveEmps }
+            }).catch(() => {});
+          }
+        });
+      }
+
       this.updateSidebarBadge();
     } catch (err) {
       const msg = String(err.message || '');
@@ -390,15 +411,19 @@ class EquipmentAuditsEngine {
     const adminEmail = getEmpEmail(adminEmp);
     const tables = (snap && snap.tables) || {};
 
+    const allActiveEmployees = this.getAllActiveEmployeeNames();
+
     this.SHOP_STATUS_POOLS.forEach((pool) => {
       let itemCount = 0;
       this.CATEGORIES.forEach((cat) => {
+        if (cat.fieldOnly) return;
         const rows = (tables[cat.key] && Array.isArray(tables[cat.key].rows)) ? tables[cat.key].rows : [];
         rows.forEach((r) => {
           if (this.isRowInShopPool(r, pool)) itemCount++;
         });
       });
 
+      const isPackedPool = pool.jobNumber === 'SHOP-PACKED-DELIVERY';
       leaders.push({
         foreman: pool.name,
         role: 'SHOP',
@@ -410,13 +435,33 @@ class EquipmentAuditsEngine {
         location: pool.location,
         status: 'Shop Pool',
         shopItemCount: itemCount,
-        employees: [pool.canonicalAssignedTo],
+        employees: (isPackedPool && allActiveEmployees.length > 0) ? allActiveEmployees : [pool.canonicalAssignedTo],
         phone: adminPhone,
         email: adminEmail
       });
     });
 
     return leaders;
+  }
+
+  getAllActiveEmployeeNames() {
+    const snap = this.db ? this.db.getSnapshot() : null;
+    const empRows = (snap && snap.tables && snap.tables.employees && snap.tables.employees.rows) || [];
+    const seen = new Set();
+    const out = [];
+    empRows.forEach((r) => {
+      const st = String(r['Status'] || '').trim().toLowerCase();
+      const loc = String(r['Location'] || '').trim().toLowerCase();
+      if (st.includes('previous') || st.includes('terminated') || st.includes('inactive')) return;
+      if (loc.includes('previous employee')) return;
+      const nm = String(r['Employee Name'] || r['Name'] || '').trim();
+      if (nm && !seen.has(nm.toLowerCase())) {
+        seen.add(nm.toLowerCase());
+        out.push(nm);
+      }
+    });
+    out.sort((a, b) => a.localeCompare(b));
+    return out;
   }
 
   isRowInShopPool(row, pool) {
@@ -1523,22 +1568,106 @@ END $$;`;
     return s;
   }
 
+  getEmployeeAliasMap() {
+    const snap = this.db ? this.db.getSnapshot() : null;
+    const emps = (snap && snap.tables && snap.tables.employees && snap.tables.employees.rows) || [];
+    const map = new Map();
+    const normRaw = (s) => String(s || '').trim().replace(/\s*\([^)]*\)/g, '').replace(/\s+/g, ' ').toLowerCase();
+
+    emps.forEach((r) => {
+      const canonical = String(r['Employee Name'] || r['Name'] || '').trim();
+      const canonicalNorm = normRaw(canonical);
+      if (!canonicalNorm) return;
+      map.set(canonicalNorm, canonicalNorm);
+
+      let altRaw = '';
+      for (const [k, v] of Object.entries(r)) {
+        if (/^(alt(ernat(e|ive))?(\s*names?)?(\s*\/\s*aliases?)?|also\s*known\s*as|aka|aliases?)$/i.test(String(k || '').trim())) {
+          const sv = String(v || '').trim();
+          if (sv) {
+            altRaw = altRaw ? `${altRaw},${sv}` : sv;
+          }
+        }
+      }
+      if (altRaw) {
+        altRaw.split(/[;,/]+/).forEach((alt) => {
+          const altNorm = normRaw(alt);
+          if (altNorm && !map.has(altNorm)) {
+            map.set(altNorm, canonicalNorm);
+          }
+        });
+      }
+    });
+    return map;
+  }
+
   normPerson(val) {
-    const clean = String(val || '').trim().replace(/\s*\([^)]*\)/g, '').replace(/\s+/g, ' ').toLowerCase();
-    if (window.employeeResolver && typeof window.employeeResolver.resolveName === 'function') {
+    const raw = String(val || '').trim();
+    if (!raw) return '';
+    const clean = raw.replace(/\s*\([^)]*\)/g, '').replace(/\s+/g, ' ').trim();
+    const cleanLower = clean.toLowerCase();
+
+    // 1. Primary: use EmployeeNameResolver (handles Alternate Names / Aliases, nicknames like Chris<->Christian, initials, hyphenated names)
+    if (typeof window !== 'undefined' && window.employeeResolver) {
       try {
-        const resolved = window.employeeResolver.resolveName(val);
-        if (resolved) return String(resolved).trim().replace(/\s*\([^)]*\)/g, '').toLowerCase();
+        if (typeof window.employeeResolver.resolve === 'function') {
+          const res = window.employeeResolver.resolve(clean);
+          if (res && res.match && !res.isStatus && res.canonicalName) {
+            return String(res.canonicalName).trim().replace(/\s*\([^)]*\)/g, '').replace(/\s+/g, ' ').toLowerCase();
+          }
+        } else if (typeof window.employeeResolver.getCanonicalName === 'function') {
+          const resolved = window.employeeResolver.getCanonicalName(clean);
+          if (resolved) return String(resolved).trim().replace(/\s*\([^)]*\)/g, '').replace(/\s+/g, ' ').toLowerCase();
+        }
       } catch { /* ignore */ }
     }
-    return clean;
+
+    // 2. Fallback: direct Alternate Names / Aliases lookup from Employees table
+    const aliasMap = this._cachedAliasMap || this.getEmployeeAliasMap();
+    if (aliasMap && aliasMap.has(cleanLower)) {
+      return aliasMap.get(cleanLower);
+    }
+
+    return cleanLower;
+  }
+
+  normVehicleId(val) {
+    const raw = String(val || '').trim();
+    if (!raw) return '';
+    // Strip leading Unit / Truck / Veh / Rig / Shack / # prefix for unit numbers (e.g., "Unit 2108" -> "2108", "Unit X104" -> "x104")
+    const m = raw.match(/^(?:unit|truck|veh(?:icle)?|equip(?:ment)?|rig|shack|job\s*shack|trailer|t-)?\s*#?\s*(x?\d+[a-z]?)$/i);
+    if (m) return m[1].toLowerCase();
+    return raw.replace(/^#/, '').replace(/\s+/g, '').toLowerCase();
+  }
+
+  formatCanonicalVehicleId(rawVal, jobNumber = '') {
+    const raw = String(rawVal || '').trim();
+    if (!raw || /^job\s*shack$/i.test(raw)) {
+      return jobNumber ? `Job Shack (${jobNumber})` : 'Job Shack';
+    }
+    const m = raw.match(/^(?:unit|truck|veh(?:icle)?|equip(?:ment)?|rig|shack|job\s*shack|trailer|t-)?\s*#?\s*(x?\d+[a-z]?)$/i);
+    if (m) return m[1].toUpperCase();
+    return raw;
+  }
+
+  isVehicleReplacementFlagged(catKey, reported) {
+    if (!reported) return false;
+    if (catKey === 'fire_extinguishers') {
+      const cond = String(reported.condition || 'In Service').trim().toLowerCase();
+      return reported.needsReplacement === true || cond !== 'in service' || this.isMissingDateValue(reported.testDate);
+    }
+    if (catKey === 'first_aid_kits') {
+      const cond = String(reported.condition || 'Stocked / OK').trim().toLowerCase();
+      return reported.needsReplacement === true || (cond !== 'stocked / ok' && cond !== 'ok' && cond !== 'good');
+    }
+    return false;
   }
 
   getRowPrimaryId(catKey, row, headers) {
     const firstH = (headers && headers[0]) || '';
     const candidates = [
       firstH ? row[firstH] : '',
-      row['Item #'], row['Glove'], row['Sleeve'], row['Blanket'], row['MACK'],
+      row['Vehicle / Equipment #'], row['Item #'], row['Glove'], row['Sleeve'], row['Blanket'], row['MACK'],
       row['HVT #'], row['HV Tester'], row['Phasing Set'], row['PS #'],
       row['AED'], row['AED #'], row['Serial #'], row['Ground #'], row['Hot Stick']
     ];
@@ -1581,8 +1710,284 @@ END $$;`;
     return set;
   }
 
+  isPackedForDeliveryPool(shopPool) {
+    return Boolean(shopPool && shopPool.jobNumber === 'SHOP-PACKED-DELIVERY');
+  }
+
+  getSwapTableKeyForCategory(catKey) {
+    const map = {
+      gloves: 'glove_swaps',
+      sleeves: 'sleeve_swaps',
+      blankets: 'blanket_swaps',
+      macks: 'mack_swaps',
+      hv_testers: 'hv_tester_swaps',
+      phasing_sets: 'phasing_set_swaps',
+      aed: 'aed_swaps',
+      grounds: 'ground_swaps',
+      hot_sticks: 'hot_stick_swaps'
+    };
+    return map[catKey] || null;
+  }
+
+  getSwapSheetLabel(catKey) {
+    const map = {
+      gloves: 'Glove Swaps',
+      sleeves: 'Sleeve Swaps',
+      blankets: 'Blanket Swaps',
+      macks: 'MACK Swaps',
+      hv_testers: 'HV Tester Swaps',
+      phasing_sets: 'Phasing Set Swaps',
+      aed: 'AED Swaps',
+      grounds: 'Ground Swaps',
+      hot_sticks: 'Hot Stick Swaps'
+    };
+    return map[catKey] || 'Swaps';
+  }
+
+  extractPickedForName(rawVal) {
+    const raw = String(rawVal || '').trim();
+    if (!raw) return '';
+    const lower = raw.toLowerCase();
+    if (lower.includes('reclaim') || lower === 'packed for testing' || lower === 'ready for test') return '';
+    return raw
+      .replace(/\s+picked\s+on\s+.*$/i, '')
+      .replace(/\s*\([^)]*\)\s*$/, '')
+      .trim();
+  }
+
+  getReportedPackedFor(catKey, reported) {
+    if (!reported) return '';
+    const ignore = new Set([
+      'packed for delivery', 'ready for delivery', 'on shelf',
+      'in testing', 'packed for testing', 'ready for test'
+    ]);
+    const pf = String(reported.packedFor || '').trim();
+    if (pf && !ignore.has(pf.toLowerCase())) return pf;
+    if (catKey === 'gloves' || catKey === 'sleeves') {
+      const emp = String(reported.employeeName || '').trim();
+      if (emp && !ignore.has(emp.toLowerCase())) return emp;
+    }
+    return '';
+  }
+
+  resolveCanonicalEmployeeName(rawName) {
+    const clean = String(rawName || '').trim();
+    if (!clean) return '';
+    if (typeof window !== 'undefined' && window.employeeResolver) {
+      try {
+        if (typeof window.employeeResolver.resolve === 'function') {
+          const res = window.employeeResolver.resolve(clean);
+          if (res && res.match && !res.isStatus && res.canonicalName) {
+            return String(res.canonicalName).trim();
+          }
+        }
+      } catch { /* ignore */ }
+    }
+    const targetNorm = this.normPerson(clean);
+    const snap = this.db ? this.db.getSnapshot() : null;
+    const emps = (snap && snap.tables && snap.tables.employees && snap.tables.employees.rows) || [];
+    for (const r of emps) {
+      const nm = String(r['Employee Name'] || r['Name'] || '').trim();
+      if (nm && this.normPerson(nm) === targetNorm) return nm;
+    }
+    return clean;
+  }
+
+  getSwapRowMeta(swapRow) {
+    if (!swapRow || typeof swapRow !== 'object') return null;
+    const empName = String(swapRow['Employee'] || swapRow['Crew Lead / Employee'] || '').trim();
+    const currentItemNum = String(
+      swapRow['Current Glove #'] || swapRow['Current Sleeve #'] || swapRow['Current Blanket #'] ||
+      swapRow['Current MACK #'] || swapRow['Current HV Tester #'] || swapRow['Current Phasing Set #'] ||
+      swapRow['Current AED #'] || swapRow['Current Item #'] || swapRow['Serial #'] || ''
+    ).trim();
+    const pickListNum = String(
+      swapRow['Pick List Item #'] || swapRow['Pick List Glove #'] || swapRow['Pick List Sleeve #'] ||
+      swapRow['Pick List Blanket #'] || swapRow['Pick List MACK #'] || swapRow['Pick List HV Tester #'] ||
+      swapRow['Pick List Phasing Set #'] || swapRow['Pick List AED #'] || swapRow['Pick List Serial #'] ||
+      swapRow['Pick List'] || ''
+    ).trim();
+    const status = String(swapRow['Status'] || '').trim();
+    const statusLower = status.toLowerCase();
+    const picked = swapRow['Picked'] === true || String(swapRow['Picked'] || '').trim().toUpperCase() === 'TRUE';
+    const dateChanged = String(swapRow['Date Changed'] || '').trim();
+    const daysLeft = String(swapRow['Days Left'] || '').trim().toUpperCase();
+    const isDelivered = Boolean(dateChanged) || statusLower.includes('delivered');
+    const isReclaimOrRetest = (
+      statusLower.includes('return to shelf') ||
+      statusLower.includes('needs retest') ||
+      statusLower.includes('locate') ||
+      daysLeft.includes('PREV EMP') ||
+      daysLeft.includes('LOST') ||
+      String(swapRow._location || '').toUpperCase() === 'PREVIOUS EMPLOYEE'
+    );
+    const isReadyForDelivery = !isDelivered && !isReclaimOrRetest && (picked || statusLower.includes('ready for delivery'));
+    const hasValidPick = Boolean(pickListNum && pickListNum !== '—' && pickListNum !== '-');
+    const itemClassRaw = String(swapRow['Class'] || '').replace(/class\s*/i, '').trim();
+    return {
+      empName,
+      currentItemNum,
+      pickListNum: hasValidPick ? pickListNum : '',
+      status,
+      picked,
+      dateChanged,
+      isDelivered,
+      isReclaimOrRetest,
+      isReadyForDelivery,
+      hasValidPick,
+      itemClass: itemClassRaw
+    };
+  }
+
+  getSwapTableAndRows(catKey, tables = null) {
+    const swapKey = this.getSwapTableKeyForCategory(catKey);
+    if (!swapKey) return { swapKey: null, swapTable: null, rows: [] };
+    const swapTable = (tables && tables[swapKey]) || (this.db && typeof this.db.getTable === 'function' ? this.db.getTable(swapKey) : null) || null;
+    if (!swapTable) return { swapKey, swapTable: null, rows: [] };
+    if ((!Array.isArray(swapTable.rows) || swapTable.rows.length === 0) && Array.isArray(swapTable.rawGrid) && swapTable.rawGrid.length > 1) {
+      if (this.db && typeof this.db.reconstructSwapRowsFromRawGrid === 'function') {
+        this.db.reconstructSwapRowsFromRawGrid(swapTable, swapKey);
+      }
+    }
+    const skipNames = new Set([
+      'employee', 'crew lead / employee', 'on shelf', 'in testing', 'packed for delivery',
+      'packed for testing', 'ready for delivery', 'ready for test', 'lost', 'destroyed', ''
+    ]);
+    const rows = (Array.isArray(swapTable.rows) ? swapTable.rows : []).filter((r) => {
+      const m = this.getSwapRowMeta(r);
+      if (!m || !m.empName) return false;
+      const lower = m.empName.toLowerCase();
+      if (skipNames.has(lower) || lower.includes('class ') || lower.includes('stage ') || m.empName.includes('📍') || m.empName.includes('👤') || m.empName.includes('👷')) {
+        return false;
+      }
+      return true;
+    });
+    return { swapKey, swapTable, rows };
+  }
+
+  checkPackedItemAgainstSwaps(catKey, itemIds, packedFor, swapCtx, invRow = null, reported = null, invRows = []) {
+    const swapSheetLabel = this.getSwapSheetLabel(catKey);
+    const swapKey = swapCtx ? swapCtx.swapKey : this.getSwapTableKeyForCategory(catKey);
+    const rows = (swapCtx && Array.isArray(swapCtx.rows)) ? swapCtx.rows : [];
+    const targetIds = new Set((Array.isArray(itemIds) ? itemIds : [itemIds]).map((x) => this.normId(x)).filter(Boolean));
+    const targetEmpNorm = this.normPerson(packedFor);
+
+    const parseClassNum = (v) => {
+      if (v === undefined || v === null || String(v).trim() === '') return null;
+      const m = String(v).match(/\d+/);
+      return m ? parseInt(m[0], 10) : null;
+    };
+    const targetClass = (catKey === 'gloves' || catKey === 'sleeves')
+      ? parseClassNum(reported?.itemClass !== undefined && String(reported.itemClass).trim() !== '' ? reported.itemClass : invRow?.['Class'])
+      : null;
+
+    const getSwapRowClass = (meta) => {
+      if (catKey !== 'gloves' && catKey !== 'sleeves') return null;
+      if (meta.itemClass !== '') return parseClassNum(meta.itemClass);
+      if (meta.currentItemNum && Array.isArray(invRows)) {
+        const curNorm = this.normId(meta.currentItemNum);
+        const foundCur = invRows.find((r) => this.normId(r['Item #'] || r['Glove'] || r['Sleeve'] || r['ESL ID']) === curNorm);
+        if (foundCur) return parseClassNum(foundCur['Class']);
+      }
+      return null;
+    };
+
+    const activeRows = rows
+      .map((sr) => ({ sr, meta: this.getSwapRowMeta(sr) }))
+      .filter(({ meta }) => meta && !meta.isDelivered && !meta.isReclaimOrRetest);
+
+    // 1. Check if this exact item # is already in any active Swap row's Pick List
+    const byPick = activeRows.filter(({ meta }) => meta.hasValidPick && targetIds.has(this.normId(meta.pickListNum)));
+    if (byPick.length > 0) {
+      const sameEmp = byPick.find(({ meta }) => targetEmpNorm && this.normPerson(meta.empName) === targetEmpNorm);
+      if (sameEmp) {
+        if (sameEmp.meta.isReadyForDelivery) {
+          return {
+            ok: true,
+            status: 'confirmed',
+            swapKey,
+            swapSheetLabel,
+            swapRow: sameEmp.sr,
+            swapMeta: sameEmp.meta,
+            summary: `${swapSheetLabel} confirmed (Ready For Delivery for ${sameEmp.meta.empName})`
+          };
+        }
+        return {
+          ok: false,
+          status: 'unpicked',
+          swapKey,
+          swapSheetLabel,
+          swapRow: sameEmp.sr,
+          swapMeta: sameEmp.meta,
+          summary: `Listed on ${swapSheetLabel} for ${sameEmp.meta.empName}, but Picked / Ready For Delivery is NOT checked yet (${sameEmp.meta.status || 'In Stock'})`
+        };
+      }
+
+      // Item is on the Swaps page, but assigned to a DIFFERENT employee!
+      const wrong = byPick[0];
+      const targetEmpOpenRow = targetEmpNorm ? activeRows.find(({ meta }) => {
+        if (this.normPerson(meta.empName) !== targetEmpNorm) return false;
+        if (targetClass !== null) {
+          const sc = getSwapRowClass(meta);
+          if (sc !== null && sc !== targetClass) return false;
+        }
+        return !meta.isReadyForDelivery || !meta.hasValidPick;
+      }) : null;
+      return {
+        ok: false,
+        status: 'wrong_employee',
+        swapKey,
+        swapSheetLabel,
+        swapRow: wrong.sr,
+        swapMeta: wrong.meta,
+        targetEmpSwapRow: targetEmpOpenRow ? targetEmpOpenRow.sr : null,
+        targetEmpSwapMeta: targetEmpOpenRow ? targetEmpOpenRow.meta : null,
+        summary: `${swapSheetLabel} shows #${wrong.meta.pickListNum} ${wrong.meta.isReadyForDelivery ? 'picked' : 'listed'} for ${wrong.meta.empName} instead of ${packedFor}`
+      };
+    }
+
+    // 2. Check if the packedFor employee has an open compatible Swap row with a different (or blank) Pick List item
+    if (targetEmpNorm) {
+      const empCandidates = activeRows.filter(({ meta }) => {
+        if (this.normPerson(meta.empName) !== targetEmpNorm) return false;
+        if (targetClass !== null) {
+          const sc = getSwapRowClass(meta);
+          if (sc !== null && sc !== targetClass) return false;
+        }
+        return true;
+      });
+      // Prefer an unpicked row or row with blank/different pick list
+      const openRow = empCandidates.find(({ meta }) => !meta.isReadyForDelivery) || empCandidates[0] || null;
+      if (openRow) {
+        const pickDisplay = openRow.meta.hasValidPick ? `#${openRow.meta.pickListNum}` : '(none / Need to Purchase)';
+        const curDisplay = openRow.meta.currentItemNum ? ` (Current #${openRow.meta.currentItemNum})` : '';
+        return {
+          ok: false,
+          status: 'different_pick_item',
+          swapKey,
+          swapSheetLabel,
+          swapRow: openRow.sr,
+          swapMeta: openRow.meta,
+          summary: `${openRow.meta.empName} has an open row on ${swapSheetLabel}${curDisplay}, but Pick List shows ${pickDisplay} instead of #${reported?.itemNum || ''}`
+        };
+      }
+    }
+
+    // 3. Not listed on the Swaps page at all
+    return {
+      ok: false,
+      status: 'not_on_swaps',
+      swapKey,
+      swapSheetLabel,
+      swapRow: null,
+      swapMeta: null,
+      summary: `Not listed on ${swapSheetLabel} for ${packedFor || 'this employee'}`
+    };
+  }
+
   compareItemFields(catKey, reported, appRow, options = {}) {
     const isShopPool = Boolean(options && options.isShopPool);
+    const isPackedForDelivery = Boolean(options && options.isPackedForDelivery);
     const diffs = [];
     const check = (label, colName, repVal, appVal, normalizer, sheetValFormatter) => {
       const rStr = (repVal === null || repVal === undefined) ? '' : String(repVal).trim();
@@ -1600,6 +2005,25 @@ END $$;`;
         });
       }
     };
+
+    if (isPackedForDelivery) {
+      const repPackedFor = this.getReportedPackedFor(catKey, reported);
+      if (repPackedFor) {
+        const canonicalPacked = this.resolveCanonicalEmployeeName(repPackedFor);
+        const appPickedRaw = String(appRow['Picked For'] || '').trim();
+        const appPickedName = this.extractPickedForName(appPickedRaw);
+        if (this.normPerson(canonicalPacked) !== this.normPerson(appPickedName)) {
+          diffs.push({
+            label: 'Picked For',
+            colName: 'Picked For',
+            appValue: appPickedName || (appPickedRaw || '(blank)'),
+            reportedValue: `${canonicalPacked} Picked On ${this.getLocalTodayIso()}`,
+            displayReportedValue: canonicalPacked,
+            rawReported: canonicalPacked
+          });
+        }
+      }
+    }
 
     if (catKey === 'gloves' || catKey === 'sleeves') {
       if (!isShopPool) {
@@ -1638,14 +2062,24 @@ END $$;`;
       check('Type', 'Type', reported.type, appRow['Type']);
       check('Length', 'Length', reported.length, appRow['Length'], (v) => this.normLength(v));
       check('Test Date', 'Test Date', reported.testDate, appRow['Test Date'], (v) => this.normDate(v), (v) => this.toSheetDate(v));
+    } else if (catKey === 'fire_extinguishers') {
+      check('Size', 'Size', reported.size, appRow['Size']);
+      check('Status', 'Status', reported.condition || 'In Service', appRow['Status']);
+      if (reported.condition !== 'Missing') {
+        check('Test Date', 'Test Date', reported.testDate, appRow['Test Date'], (v) => this.normDate(v), (v) => this.toSheetDate(v));
+      }
+    } else if (catKey === 'first_aid_kits') {
+      check('Status', 'Status', reported.condition || 'Stocked / OK', appRow['Status']);
     }
     return diffs;
   }
 
   reconcileAudit(req, sub) {
+    this._cachedAliasMap = this.getEmployeeAliasMap();
     const payload = (sub && (sub.submitted_payload || sub.draft_payload)) || {};
     const itemsByCat = (payload && payload.items) || {};
     const shopPool = this.getShopAuditPoolConfig(req);
+    const isPackedForDelivery = this.isPackedForDeliveryPool(shopPool);
     const crewNames = shopPool ? new Set() : this.getCrewMatchNamesSet(req);
     const isRowInScope = (row) => (shopPool ? this.isRowInShopPool(row, shopPool) : this.isRowActiveOnCrew(row, crewNames));
     const snap = this.db ? this.db.getSnapshot() : null;
@@ -1655,11 +2089,16 @@ END $$;`;
     const counts = { matched: 0, discrepancy: 0, wrong_crew: 0, missing: 0, new_item: 0, totalReported: 0 };
 
     this.CATEGORIES.forEach((cat) => {
-      const table = tables[cat.key] || { headers: [], rows: [], name: cat.sheetName };
+      // Field-only categories (Fire Extinguishers, First Aid Kits) are skipped on Shop Stock audits
+      if (shopPool && cat.fieldOnly) return;
+
+      const table = tables[cat.key] || (this.db && typeof this.db.getTable === 'function' ? this.db.getTable(cat.key) : null) || { headers: [], rows: [], name: cat.sheetName };
       const rows = Array.isArray(table.rows) ? table.rows : [];
       const headers = Array.isArray(table.headers) ? table.headers : [];
+      const swapCtx = isPackedForDelivery ? this.getSwapTableAndRows(cat.key, tables) : null;
 
       // Index regular numbered app rows by primary ID, ESL ID, and Serial #.
+      // Vehicle-based categories normalize Unit/Truck/Shack # (e.g. "Unit 2108" -> "2108", "X104").
       // Unnumbered placeholder rows (NA-001, NA1, etc.) are tracked separately ONLY within
       // this crew / shop pool so one crew's NA1 can NEVER cross-match another crew's NA1.
       const byPrimary = new Map();
@@ -1667,31 +2106,38 @@ END $$;`;
       const inScopeUnnumbered = [];
       rows.forEach((r, idx) => {
         const rawPid = this.getRowPrimaryId(cat.key, r, headers);
-        const pid = this.normId(rawPid);
-        if (this.isUnnumberedPlaceholderId(rawPid)) {
+        const pid = cat.isVehicleBased ? this.normVehicleId(rawPid) : this.normId(rawPid);
+        if (!cat.isVehicleBased && this.isUnnumberedPlaceholderId(rawPid)) {
           if (isRowInScope(r)) {
             inScopeUnnumbered.push({ row: r, idx, rawPid, normPid: pid });
           }
           return;
         }
         if (pid && !byPrimary.has(pid)) byPrimary.set(pid, { row: r, idx });
-        const esl = this.normId(r['ESL ID']);
-        if (esl && !this.isUnnumberedPlaceholderId(r['ESL ID']) && !byAlt.has(esl)) byAlt.set(esl, { row: r, idx });
-        const ser = this.normId(r['Serial #']);
-        if (ser && !this.isUnnumberedPlaceholderId(r['Serial #']) && !byAlt.has(ser)) byAlt.set(ser, { row: r, idx });
+        if (!cat.isVehicleBased) {
+          const esl = this.normId(r['ESL ID']);
+          if (esl && !this.isUnnumberedPlaceholderId(r['ESL ID']) && !byAlt.has(esl)) byAlt.set(esl, { row: r, idx });
+          const ser = this.normId(r['Serial #']);
+          if (ser && !this.isUnnumberedPlaceholderId(r['Serial #']) && !byAlt.has(ser)) byAlt.set(ser, { row: r, idx });
+        }
       });
 
       const matchedAppIndices = new Set();
       const reservedUnnumbered = new Set();
+      const reportedNormIds = new Set();
       const reportedList = Array.isArray(itemsByCat[cat.key]) ? itemsByCat[cat.key] : [];
 
       reportedList.forEach((rep) => {
         counts.totalReported++;
-        const repId = this.normId(rep.itemNum);
+        const repId = cat.isVehicleBased ? this.normVehicleId(rep.itemNum) : this.normId(rep.itemNum);
         const repEsl = this.normId(rep.eslId);
         const repSer = this.normId(rep.serialNum);
-        const isUnnumbered = this.isUnnumberedPlaceholderId(rep.itemNum);
+        if (repId) reportedNormIds.add(repId);
+        if (repEsl) reportedNormIds.add(repEsl);
+        const isUnnumbered = !cat.isVehicleBased && this.isUnnumberedPlaceholderId(rep.itemNum);
         const needsChangeoutNoDate = this.isMissingDateValue(rep.testDate) || this.isMissingDateValue(rep.calibrationDate);
+        const needsSafetyNeedPush = Boolean(cat.isVehicleBased && this.isVehicleReplacementFlagged(cat.key, rep));
+        const packedFor = isPackedForDelivery ? this.getReportedPackedFor(cat.key, rep) : '';
 
         let found = null;
         if (isUnnumbered) {
@@ -1699,9 +2145,11 @@ END $$;`;
           // 1) Exact same ID on this crew (e.g. NA-001), 2) exact spec + date match, 3) physical spec match.
           const available = inScopeUnnumbered.filter((u) => !matchedAppIndices.has(u.idx));
           found = available.find((u) => repId && u.normPid === repId) ||
-                  available.find((u) => this.compareItemFields(cat.key, rep, u.row, { isShopPool: Boolean(shopPool) }).length === 0) ||
+                  available.find((u) => this.compareItemFields(cat.key, rep, u.row, { isShopPool: Boolean(shopPool), isPackedForDelivery }).length === 0) ||
                   available.find((u) => this.matchesUnnumberedPhysicalSpecs(cat.key, rep, u.row, Boolean(shopPool))) ||
                   null;
+        } else if (cat.isVehicleBased) {
+          found = (repId && byPrimary.get(repId)) || null;
         } else {
           found = (repId && byPrimary.get(repId)) ||
                   (repEsl && byAlt.get(repEsl)) ||
@@ -1711,6 +2159,21 @@ END $$;`;
         }
 
         const keyId = `${cat.key}:${rep.id || repId}`;
+        const foundPid = found ? this.getRowPrimaryId(cat.key, found.row, headers) : '';
+        if (foundPid) reportedNormIds.add(this.normId(foundPid));
+        if (found && found.row['ESL ID']) reportedNormIds.add(this.normId(found.row['ESL ID']));
+
+        const swapCheck = (isPackedForDelivery && packedFor)
+          ? this.checkPackedItemAgainstSwaps(
+            cat.key,
+            [foundPid, rep.itemNum, rep.eslId, found?.row?.['ESL ID']].filter(Boolean),
+            packedFor,
+            swapCtx,
+            found ? found.row : null,
+            rep,
+            rows
+          )
+          : null;
 
         if (!found) {
           counts.new_item++;
@@ -1725,10 +2188,14 @@ END $$;`;
             catKey: cat.key,
             catLabel: cat.label,
             catIcon: cat.icon,
-            itemNum: rep.itemNum,
+            isVehicleBased: Boolean(cat.isVehicleBased),
+            itemNum: cat.isVehicleBased ? this.formatCanonicalVehicleId(rep.itemNum, req.job_number) : rep.itemNum,
             isUnnumbered,
             suggestedItemNum,
             needsChangeoutNoDate,
+            needsSafetyNeedPush,
+            packedFor,
+            swapCheck,
             reported: rep,
             appRow: null,
             diffs: []
@@ -1739,7 +2206,8 @@ END $$;`;
         matchedAppIndices.add(found.idx);
         const appRow = found.row;
         const inScope = isRowInScope(appRow);
-        const diffs = this.compareItemFields(cat.key, rep, appRow, { isShopPool: Boolean(shopPool) });
+        const diffs = this.compareItemFields(cat.key, rep, appRow, { isShopPool: Boolean(shopPool), isPackedForDelivery });
+        const hasSwapIssue = Boolean(swapCheck && !swapCheck.ok);
 
         if (!inScope) {
           counts.wrong_crew++;
@@ -1749,15 +2217,19 @@ END $$;`;
             catKey: cat.key,
             catLabel: cat.label,
             catIcon: cat.icon,
-            itemNum: this.getRowPrimaryId(cat.key, appRow, headers) || rep.itemNum,
+            isVehicleBased: Boolean(cat.isVehicleBased),
+            itemNum: foundPid || rep.itemNum,
             isUnnumbered,
             needsChangeoutNoDate,
+            needsSafetyNeedPush,
+            packedFor,
+            swapCheck,
             reported: rep,
             appRow,
             appRowIdx: appRow._rowIdx || (found.idx + 2),
             diffs
           });
-        } else if (diffs.length > 0) {
+        } else if (diffs.length > 0 || needsSafetyNeedPush || hasSwapIssue) {
           counts.discrepancy++;
           results.push({
             key: keyId,
@@ -1765,9 +2237,13 @@ END $$;`;
             catKey: cat.key,
             catLabel: cat.label,
             catIcon: cat.icon,
-            itemNum: this.getRowPrimaryId(cat.key, appRow, headers) || rep.itemNum,
+            isVehicleBased: Boolean(cat.isVehicleBased),
+            itemNum: foundPid || rep.itemNum,
             isUnnumbered,
             needsChangeoutNoDate,
+            needsSafetyNeedPush,
+            packedFor,
+            swapCheck,
             reported: rep,
             appRow,
             appRowIdx: appRow._rowIdx || (found.idx + 2),
@@ -1781,9 +2257,13 @@ END $$;`;
             catKey: cat.key,
             catLabel: cat.label,
             catIcon: cat.icon,
-            itemNum: this.getRowPrimaryId(cat.key, appRow, headers) || rep.itemNum,
+            isVehicleBased: Boolean(cat.isVehicleBased),
+            itemNum: foundPid || rep.itemNum,
             isUnnumbered,
             needsChangeoutNoDate,
+            needsSafetyNeedPush: false,
+            packedFor,
+            swapCheck,
             reported: rep,
             appRow,
             appRowIdx: appRow._rowIdx || (found.idx + 2),
@@ -1792,28 +2272,86 @@ END $$;`;
         }
       });
 
-      // Anything currently in this crew / shop status in the App that was NOT reported
+      // Anything currently in this crew / shop status in the App that was NOT reported.
+      // SKIP vehicle-based categories (Fire Extinguishers & First Aid Kits) so rotating trucks
+      // or crews whose 1st Aid Kits are all up to date NEVER clutter the Missing bucket!
+      if (cat.isVehicleBased) return;
+
+      const missingInvNormIds = new Set();
       rows.forEach((appRow, idx) => {
         if (matchedAppIndices.has(idx)) return;
         if (!isRowInScope(appRow)) return;
         const pid = this.getRowPrimaryId(cat.key, appRow, headers);
         if (!pid) return;
+        const pidNorm = this.normId(pid);
+        missingInvNormIds.add(pidNorm);
+        if (appRow['ESL ID']) missingInvNormIds.add(this.normId(appRow['ESL ID']));
+
+        let swapMissingRow = null;
+        let swapMissingMeta = null;
+        if (isPackedForDelivery && swapCtx && swapCtx.rows.length > 0) {
+          const hit = swapCtx.rows.find((sr) => {
+            const m = this.getSwapRowMeta(sr);
+            return m && m.isReadyForDelivery && m.hasValidPick && (this.normId(m.pickListNum) === pidNorm || (appRow['ESL ID'] && this.normId(m.pickListNum) === this.normId(appRow['ESL ID'])));
+          });
+          if (hit) {
+            swapMissingRow = hit;
+            swapMissingMeta = this.getSwapRowMeta(hit);
+          }
+        }
+
         counts.missing++;
         results.push({
-          key: `${cat.key}:missing:${this.normId(pid)}:${idx}`,
+          key: `${cat.key}:missing:${pidNorm}:${idx}`,
           bucket: 'missing',
           catKey: cat.key,
           catLabel: cat.label,
           catIcon: cat.icon,
           itemNum: pid,
+          packedFor: isPackedForDelivery ? (this.extractPickedForName(appRow['Picked For']) || swapMissingMeta?.empName || '') : '',
+          swapMissingRow,
+          swapMissingMeta,
+          swapSheetLabel: isPackedForDelivery ? this.getSwapSheetLabel(cat.key) : '',
           reported: null,
           appRow,
           appRowIdx: appRow._rowIdx || (idx + 2),
           diffs: []
         });
       });
+
+      // Reverse Swaps Page check for Packed For Delivery:
+      // Catch any active "Ready For Delivery / Picked" row on the Swaps page whose item was NOT physically found
+      // AND wasn't already caught via Inventory missing rows above.
+      if (isPackedForDelivery && swapCtx && swapCtx.rows.length > 0) {
+        swapCtx.rows.forEach((sr, sIdx) => {
+          const m = this.getSwapRowMeta(sr);
+          if (!m || !m.isReadyForDelivery || !m.hasValidPick) return;
+          const pickNorm = this.normId(m.pickListNum);
+          if (!pickNorm || reportedNormIds.has(pickNorm) || missingInvNormIds.has(pickNorm)) return;
+          missingInvNormIds.add(pickNorm);
+          counts.missing++;
+          results.push({
+            key: `${cat.key}:swap_missing:${pickNorm}:${sIdx}`,
+            bucket: 'missing',
+            catKey: cat.key,
+            catLabel: cat.label,
+            catIcon: cat.icon,
+            itemNum: m.pickListNum,
+            packedFor: m.empName,
+            swapOnlyMissing: true,
+            swapMissingRow: sr,
+            swapMissingMeta: m,
+            swapSheetLabel: this.getSwapSheetLabel(cat.key),
+            reported: null,
+            appRow: (byPrimary.get(pickNorm) || byAlt.get(pickNorm) || {}).row || null,
+            appRowIdx: (byPrimary.get(pickNorm) || byAlt.get(pickNorm) || {}).row?._rowIdx || null,
+            diffs: []
+          });
+        });
+      }
     });
 
+    this._cachedAliasMap = null;
     return { results, counts, shopPool };
   }
 
@@ -1902,8 +2440,8 @@ END $$;`;
             ${pillBtn('all', 'All', results.length, '#cbd5e1')}
           </div>
           <select class="sheet-search" style="font-size: 12px;" onchange="window.equipmentAuditsEngine.setReviewCategory(this.value)">
-            <option value="all" ${this.reviewCategoryFilter === 'all' ? 'selected' : ''}>All 9 Categories</option>
-            ${this.CATEGORIES.map((c) => `<option value="${c.key}" ${this.reviewCategoryFilter === c.key ? 'selected' : ''}>${c.icon} ${c.label}</option>`).join('')}
+            <option value="all" ${this.reviewCategoryFilter === 'all' ? 'selected' : ''}>All Categories</option>
+            ${this.CATEGORIES.filter((c) => !(this.getShopAuditPoolConfig(activeReq) && c.fieldOnly)).map((c) => `<option value="${c.key}" ${this.reviewCategoryFilter === c.key ? 'selected' : ''}>${c.icon} ${c.label}</option>`).join('')}
           </select>
         </div>
 
@@ -1923,12 +2461,30 @@ END $$;`;
 
   renderReconcileItemCard(item, appliedAction, req) {
     const shopPool = this.getShopAuditPoolConfig(req);
+    const isPackedForDelivery = this.isPackedForDeliveryPool(shopPool);
+    const swapCheck = item.swapCheck || null;
+    const hasSwapIssue = Boolean(swapCheck && !swapCheck.ok);
+
     const meta = {
-      matched: { border: 'rgba(16,185,129,0.35)', bg: 'rgba(16,185,129,0.08)', badge: '🟢 Matched', color: '#34d399' },
-      discrepancy: { border: 'rgba(234,179,8,0.45)', bg: 'rgba(234,179,8,0.09)', badge: '🟡 Field Discrepancy', color: '#fde047' },
-      wrong_crew: { border: 'rgba(249,115,22,0.45)', bg: 'rgba(249,115,22,0.09)', badge: shopPool ? '🟠 Wrong Status / Location' : '🟠 Wrong Crew / Status', color: '#fdba74' },
-      missing: { border: 'rgba(239,68,68,0.45)', bg: 'rgba(239,68,68,0.09)', badge: shopPool ? `🔴 Missing from ${shopPool.name}` : '🔴 Missing from Field', color: '#fca5a5' },
-      new_item: { border: 'rgba(59,130,246,0.45)', bg: 'rgba(59,130,246,0.09)', badge: '🔵 Unlogged / New Item', color: '#93c5fd' }
+      matched: { border: 'rgba(16,185,129,0.35)', bg: 'rgba(16,185,129,0.08)', badge: isPackedForDelivery && swapCheck?.ok ? '🟢 Inventory & Swaps Confirmed' : '🟢 Matched', color: '#34d399' },
+      discrepancy: {
+        border: 'rgba(234,179,8,0.45)',
+        bg: 'rgba(234,179,8,0.09)',
+        badge: item.needsSafetyNeedPush
+          ? '🚨 Replacement / Update Needed'
+          : (hasSwapIssue && item.diffs.length === 0 ? '🔄 Swaps Page Mismatch' : '🟡 Field Discrepancy'),
+        color: item.needsSafetyNeedPush ? '#fca5a5' : '#fde047'
+      },
+      wrong_crew: { border: 'rgba(249,115,22,0.45)', bg: 'rgba(249,115,22,0.09)', badge: item.isVehicleBased ? '🚚 Vehicle Moved Crews' : (shopPool ? '🟠 Wrong Status / Location' : '🟠 Wrong Crew / Status'), color: '#fdba74' },
+      missing: {
+        border: 'rgba(239,68,68,0.45)',
+        bg: 'rgba(239,68,68,0.09)',
+        badge: item.swapOnlyMissing
+          ? `🔄 Swaps Page Only (Not in ${shopPool ? shopPool.name : 'Pile'})`
+          : (shopPool ? `🔴 Missing from ${shopPool.name}` : '🔴 Missing from Field'),
+        color: '#fca5a5'
+      },
+      new_item: { border: 'rgba(59,130,246,0.45)', bg: 'rgba(59,130,246,0.09)', badge: item.needsSafetyNeedPush ? '🚨 New Vehicle — Replacement Needed' : '🔵 Unlogged / New Item', color: item.needsSafetyNeedPush ? '#fca5a5' : '#93c5fd' }
     }[item.bucket];
 
     let detailsHtml = '';
@@ -1937,37 +2493,57 @@ END $$;`;
         <div style="margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px;">
           ${item.diffs.map((d) => `
             <span style="font-size: 11.5px; padding: 3px 8px; border-radius: 6px; background: rgba(15,23,42,0.75); border: 1px solid rgba(234,179,8,0.35); color: #fef08a;">
-              <strong>${this.escapeHtml(d.label)}:</strong> <span style="text-decoration:line-through;color:#94a3b8;">${this.escapeHtml(d.appValue)}</span> → <strong>${this.escapeHtml(d.reportedValue)}</strong>
+              <strong>${this.escapeHtml(d.label)}:</strong> <span style="text-decoration:line-through;color:#94a3b8;">${this.escapeHtml(d.appValue)}</span> → <strong>${this.escapeHtml(d.displayReportedValue || d.reportedValue)}</strong>
             </span>
           `).join('')}
+          ${item.needsSafetyNeedPush && item.diffs.length === 0 ? `<span style="font-size:11.5px;padding:3px 8px;border-radius:6px;background:rgba(127,29,29,0.55);border:1px solid rgba(248,113,113,0.45);color:#fecaca;">Foreman requested replacement (${this.escapeHtml(item.reported?.condition || 'Needs Replacement')}${item.reported?.reason ? `: ${this.escapeHtml(item.reported.reason)}` : ''})</span>` : ''}
         </div>
       `;
     } else if (item.bucket === 'wrong_crew') {
       const curAssigned = item.appRow['Assigned To'] || '(blank)';
       const curStatus = item.appRow['Status'] || '(blank)';
       const curLoc = item.appRow['Location'] || '(blank)';
-      const targetLabel = shopPool ? `${shopPool.name} (${shopPool.canonicalStatus})` : `${item.reported.employeeName || req.foreman_name} (${req.location || req.job_number})`;
+      const targetLabel = shopPool
+        ? `${shopPool.name} (${shopPool.canonicalStatus}${item.packedFor ? ` • For: ${item.packedFor}` : ''})`
+        : `${item.reported.employeeName || req.foreman_name} (${req.location || req.job_number})`;
       detailsHtml = `
         <div style="margin-top: 5px; font-size: 12px; color: #fed7aa;">
           Currently logged in app as: <strong>${this.escapeHtml(curAssigned)}</strong> (${this.escapeHtml(curStatus)} • ${this.escapeHtml(curLoc)}) → Audit found in <strong>${this.escapeHtml(targetLabel)}</strong>.
         </div>
-        ${item.diffs.length > 0 ? `<div style="margin-top:4px;font-size:11.5px;color:#fde68a;">Also differs: ${item.diffs.map((d) => `${d.label}: ${d.appValue} → ${d.reportedValue}`).join(' | ')}</div>` : ''}
+        ${item.diffs.length > 0 ? `<div style="margin-top:4px;font-size:11.5px;color:#fde68a;">Also differs: ${item.diffs.map((d) => `${d.label}: ${d.appValue} → ${d.displayReportedValue || d.reportedValue}`).join(' | ')}</div>` : ''}
       `;
     } else if (item.bucket === 'missing') {
-      const curAssigned = item.appRow['Assigned To'] || req.foreman_name;
-      const curStatus = item.appRow['Status'] || '';
-      const curDate = item.appRow['Test Date'] || item.appRow['Calibration Date'] || item.appRow['Pad Expiration'] || '';
-      detailsHtml = `
-        <div style="margin-top: 5px; font-size: 12px; color: #fecaca;">
-          App shows <strong>${this.escapeHtml(curAssigned)}</strong>${curStatus ? ` (${this.escapeHtml(curStatus)})` : ''}${curDate ? ` • Date: ${this.escapeHtml(curDate)}` : ''}, but it was <strong>not reported</strong> on this audit.
-        </div>
-      `;
+      if (item.swapOnlyMissing) {
+        const sm = item.swapMissingMeta || {};
+        const invHint = item.appRow
+          ? ` (Inventory currently shows <strong>${this.escapeHtml(item.appRow['Status'] || 'Unknown')}</strong> / ${this.escapeHtml(item.appRow['Assigned To'] || 'Unknown')})`
+          : '';
+        detailsHtml = `
+          <div style="margin-top: 5px; font-size: 12px; color: #fecaca;">
+            <strong>${this.escapeHtml(item.swapSheetLabel || 'Swaps Page')}</strong> marks #${this.escapeHtml(item.itemNum)} as <strong>Ready For Delivery / Picked</strong> for <strong>${this.escapeHtml(sm.empName || item.packedFor || 'Unknown')}</strong>${sm.currentItemNum ? ` (replacing #${this.escapeHtml(sm.currentItemNum)})` : ''}, but it was <strong>not found</strong> in the physical Packed For Delivery audit.${invHint}
+          </div>
+        `;
+      } else {
+        const curAssigned = item.appRow['Assigned To'] || req.foreman_name;
+        const curStatus = item.appRow['Status'] || '';
+        const curDate = item.appRow['Test Date'] || item.appRow['Calibration Date'] || item.appRow['Pad Expiration'] || '';
+        const pfDisplay = item.packedFor ? ` • Picked For: ${this.escapeHtml(item.packedFor)}` : '';
+        const swapAlsoHint = item.swapMissingMeta
+          ? `<div style="margin-top:4px;font-size:11.5px;color:#fde68a;">🔄 Also marked Picked / Ready For Delivery on <strong>${this.escapeHtml(item.swapSheetLabel || 'Swaps Page')}</strong> for <strong>${this.escapeHtml(item.swapMissingMeta.empName)}</strong>.</div>`
+          : '';
+        detailsHtml = `
+          <div style="margin-top: 5px; font-size: 12px; color: #fecaca;">
+            App shows <strong>${this.escapeHtml(curAssigned)}</strong>${curStatus ? ` (${this.escapeHtml(curStatus)})` : ''}${pfDisplay}${curDate ? ` • Date: ${this.escapeHtml(curDate)}` : ''}, but it was <strong>not reported</strong> on this audit.
+          </div>
+          ${swapAlsoHint}
+        `;
+      }
     } else if (item.bucket === 'new_item') {
       const r = item.reported;
       const fmtClass = (r.itemClass !== undefined && r.itemClass !== null && String(r.itemClass).trim() !== '') ? `Class ${r.itemClass}` : '';
       const fmtTest = r.testDate ? (this.isMissingDateValue(r.testDate) ? 'Test Date: None (OVERDUE)' : `Tested ${this.toSheetDate(r.testDate)}`) : '';
       const fmtCal = r.calibrationDate ? (this.isMissingDateValue(r.calibrationDate) ? 'Cal Date: None (OVERDUE)' : `Cal ${this.toSheetDate(r.calibrationDate)}`) : '';
-      const specs = [shopPool ? '' : r.employeeName, r.type, r.model, r.size, fmtClass, r.kv, r.length, r.serialNum ? `S/N ${r.serialNum}` : '', r.eslId ? `ESL ${r.eslId}` : '', fmtTest, fmtCal, r.padExpiration ? `Pads Exp ${this.toSheetDate(r.padExpiration)}` : '', r.batteryExpiration ? `Battery Exp ${this.toSheetDate(r.batteryExpiration)}` : ''].filter(Boolean);
+      const specs = [isPackedForDelivery ? (item.packedFor ? `Packed For: ${item.packedFor}` : '') : (shopPool ? '' : r.employeeName), r.type, r.model, r.size, fmtClass, r.kv, r.length, r.condition, r.reason ? `Reason: ${r.reason}` : '', r.serialNum ? `S/N ${r.serialNum}` : '', r.eslId ? `ESL ${r.eslId}` : '', r.condition !== 'Missing' ? fmtTest : '', fmtCal, r.padExpiration ? `Pads Exp ${this.toSheetDate(r.padExpiration)}` : '', r.batteryExpiration ? `Battery Exp ${this.toSheetDate(r.batteryExpiration)}` : ''].filter(Boolean);
       detailsHtml = `
         <div style="margin-top: 5px; font-size: 12px; color: #bfdbfe;">
           Not found in ${this.escapeHtml(item.catLabel)} inventory. Reported specs: <strong>${this.escapeHtml(specs.join(' • ') || 'Basic entry')}</strong>
@@ -1975,48 +2551,95 @@ END $$;`;
         </div>
       `;
     } else {
-      const who = shopPool ? shopPool.name : (item.reported?.employeeName || item.appRow?.['Assigned To'] || req.foreman_name);
-      detailsHtml = `<div style="margin-top: 3px; font-size: 11.5px; color: #a7f3d0;">Verified in ${this.escapeHtml(who)} — all dates and specs match.</div>`;
+      const who = isPackedForDelivery && item.packedFor
+        ? `Packed For Delivery → ${item.packedFor}`
+        : (shopPool ? shopPool.name : (item.reported?.employeeName || item.appRow?.['Assigned To'] || req.foreman_name));
+      detailsHtml = `<div style="margin-top: 3px; font-size: 11.5px; color: #a7f3d0;">Verified in ${this.escapeHtml(who)} — ${swapCheck?.ok ? 'Inventory page and Swaps page both confirm this audit.' : 'all dates and specs match.'}</div>`;
     }
+
+    // Swaps Page cross-check banner for Packed For Delivery items
+    const swapBannerHtml = (isPackedForDelivery && swapCheck && item.bucket !== 'missing')
+      ? (swapCheck.ok
+        ? `<div style="margin-top:5px;font-size:11.5px;color:#6ee7b7;background:rgba(16,185,129,0.12);border:1px solid rgba(16,185,129,0.35);border-radius:6px;padding:4px 8px;display:inline-block;">✅ <strong>Swaps Page:</strong> ${this.escapeHtml(swapCheck.summary)}</div>`
+        : `<div style="margin-top:5px;font-size:11.5px;color:#fde68a;background:rgba(217,119,6,0.18);border:1px solid rgba(245,158,11,0.45);border-radius:6px;padding:5px 9px;">🔄 <strong>Swaps Page Check:</strong> ${this.escapeHtml(swapCheck.summary)}</div>`)
+      : '';
 
     const escKey = this.escapeJs(item.key);
     let actionsHtml = '';
     if (appliedAction) {
       actionsHtml = `<span style="font-size:11.5px;font-weight:700;color:#6ee7b7;background:rgba(16,185,129,0.16);border:1px solid rgba(16,185,129,0.4);padding:4px 10px;border-radius:999px;">✓ ${this.escapeHtml(appliedAction.label || 'Resolved')}</span>`;
     } else if (item.bucket === 'discrepancy') {
+      let updLabel = '✅ Update App Fields';
+      let updBg = '#ca8a04';
+      if (item.needsSafetyNeedPush) {
+        updLabel = '🚨 Update & Send to Safety Needs';
+        updBg = '#dc2626';
+      } else if (hasSwapIssue && item.diffs.length === 0) {
+        updLabel = '🔄 Confirm on Swaps Page';
+        updBg = '#0284c7';
+      } else if (hasSwapIssue) {
+        updLabel = '✅ Update Inventory & Swaps';
+        updBg = '#ca8a04';
+      }
       actionsHtml = `
-        <button class="btn btn-primary admin-only-control" style="font-size:11.5px;padding:5px 10px;background:#ca8a04;border:none;" onclick="window.equipmentAuditsEngine.applyDiscrepancyUpdate('${escKey}')">✅ Update App Fields</button>
+        <button class="btn btn-primary admin-only-control" style="font-size:11.5px;padding:5px 10px;background:${updBg};border:none;" onclick="window.equipmentAuditsEngine.applyDiscrepancyUpdate('${escKey}')">${this.escapeHtml(updLabel)}</button>
         <button class="btn btn-secondary" style="font-size:11.5px;padding:5px 9px;" onclick="window.equipmentAuditsEngine.dismissItem('${escKey}')">Dismiss</button>
       `;
     } else if (item.bucket === 'wrong_crew') {
-      const reassignLabel = shopPool ? `🔄 Move to ${shopPool.name}` : '🔄 Reassign to Crew';
+      const reassignLabel = item.needsSafetyNeedPush
+        ? '🚨 Move Vehicle & Send to Safety Needs'
+        : (item.isVehicleBased
+          ? '🚚 Update Vehicle Crew'
+          : (isPackedForDelivery
+            ? (hasSwapIssue ? '🚚 Move to Packed & Sync Swaps' : '🚚 Move to Packed For Delivery')
+            : (shopPool ? `🔄 Move to ${shopPool.name}` : '🔄 Reassign to Crew')));
       actionsHtml = `
-        <button class="btn btn-primary admin-only-control" style="font-size:11.5px;padding:5px 10px;background:#ea580c;border:none;" onclick="window.equipmentAuditsEngine.applyReassignToCrew('${escKey}')">${this.escapeHtml(reassignLabel)}</button>
+        <button class="btn btn-primary admin-only-control" style="font-size:11.5px;padding:5px 10px;background:${item.needsSafetyNeedPush ? '#dc2626' : '#ea580c'};border:none;" onclick="window.equipmentAuditsEngine.applyReassignToCrew('${escKey}')">${this.escapeHtml(reassignLabel)}</button>
         <button class="btn btn-secondary" style="font-size:11.5px;padding:5px 9px;" onclick="window.equipmentAuditsEngine.dismissItem('${escKey}')">Dismiss</button>
       `;
     } else if (item.bucket === 'new_item') {
-      const addLabel = item.isUnnumbered && item.suggestedItemNum
-        ? (shopPool ? `➕ Add as #${item.suggestedItemNum} (${shopPool.name})` : `➕ Add as #${item.suggestedItemNum}`)
-        : (shopPool ? `➕ Add to ${shopPool.name}` : '➕ Add to Inventory');
+      const addLabel = item.needsSafetyNeedPush
+        ? '🚨 Add & Send to Safety Needs'
+        : (item.isUnnumbered && item.suggestedItemNum
+          ? (shopPool ? `➕ Add as #${item.suggestedItemNum} (${shopPool.name})` : `➕ Add as #${item.suggestedItemNum}`)
+          : (isPackedForDelivery
+            ? '➕ Add to Packed & Sync Swaps'
+            : (shopPool ? `➕ Add to ${shopPool.name}` : '➕ Add to Inventory')));
       actionsHtml = `
-        <button class="btn btn-primary admin-only-control" style="font-size:11.5px;padding:5px 10px;background:#2563eb;border:none;" onclick="window.equipmentAuditsEngine.applyAddNewItem('${escKey}')">${this.escapeHtml(addLabel)}</button>
+        <button class="btn btn-primary admin-only-control" style="font-size:11.5px;padding:5px 10px;background:${item.needsSafetyNeedPush ? '#dc2626' : '#2563eb'};border:none;" onclick="window.equipmentAuditsEngine.applyAddNewItem('${escKey}')">${this.escapeHtml(addLabel)}</button>
         <button class="btn btn-secondary" style="font-size:11.5px;padding:5px 9px;" onclick="window.equipmentAuditsEngine.dismissItem('${escKey}')">Dismiss</button>
       `;
     } else if (item.bucket === 'missing') {
-      const showReturnShelf = !shopPool || shopPool.jobNumber !== 'SHOP-ON-SHELF';
-      actionsHtml = `
-        <button class="btn btn-secondary admin-only-control" style="font-size:11.5px;padding:5px 9px;border-color:#ef4444;color:#fca5a5;" onclick="window.equipmentAuditsEngine.applyMarkMissingLost('${escKey}')">⚠️ Flag Lost / Locate</button>
-        ${showReturnShelf ? `<button class="btn btn-secondary admin-only-control" style="font-size:11.5px;padding:5px 9px;color:#93c5fd;" onclick="window.equipmentAuditsEngine.applyReturnToShelf('${escKey}')">📦 Return On Shelf</button>` : ''}
-        <button class="btn btn-secondary" style="font-size:11.5px;padding:5px 9px;" onclick="window.equipmentAuditsEngine.dismissItem('${escKey}')">Keep As-Is</button>
-      `;
+      if (item.swapOnlyMissing) {
+        actionsHtml = `
+          <button class="btn btn-primary admin-only-control" style="font-size:11.5px;padding:5px 10px;background:#d97706;border:none;" onclick="window.equipmentAuditsEngine.applyUnpickFromSwaps('${escKey}')">🔓 Unpick on Swaps Page</button>
+          <button class="btn btn-secondary" style="font-size:11.5px;padding:5px 9px;" onclick="window.equipmentAuditsEngine.dismissItem('${escKey}')">Keep As-Is</button>
+        `;
+      } else {
+        const showReturnShelf = !shopPool || shopPool.jobNumber !== 'SHOP-ON-SHELF';
+        actionsHtml = `
+          <button class="btn btn-secondary admin-only-control" style="font-size:11.5px;padding:5px 9px;border-color:#ef4444;color:#fca5a5;" onclick="window.equipmentAuditsEngine.applyMarkMissingLost('${escKey}')">⚠️ Flag Lost / Locate</button>
+          ${showReturnShelf ? `<button class="btn btn-secondary admin-only-control" style="font-size:11.5px;padding:5px 9px;color:#93c5fd;" onclick="window.equipmentAuditsEngine.applyReturnToShelf('${escKey}')">📦 Return On Shelf${item.swapMissingRow ? ' & Unpick Swap' : ''}</button>` : ''}
+          <button class="btn btn-secondary" style="font-size:11.5px;padding:5px 9px;" onclick="window.equipmentAuditsEngine.dismissItem('${escKey}')">Keep As-Is</button>
+        `;
+      }
     }
 
+    const packedForBadgeHtml = (isPackedForDelivery && item.packedFor)
+      ? `<span style="font-size:10.5px;font-weight:800;padding:2px 8px;border-radius:999px;background:rgba(56,189,248,0.18);border:1px solid rgba(56,189,248,0.45);color:#bae6fd;">🚚 Packed For: ${this.escapeHtml(item.packedFor)}</span>`
+      : '';
     const unnumberedBadgeHtml = item.isUnnumbered
       ? `<span style="font-size:10.5px;font-weight:700;padding:2px 7px;border-radius:999px;background:rgba(139,92,246,0.2);border:1px solid rgba(167,139,250,0.45);color:#ddd6fe;">🏷️ Unnumbered${item.suggestedItemNum && item.bucket === 'new_item' ? ` → #${this.escapeHtml(item.suggestedItemNum)}` : ''}</span>`
       : '';
     const noDateBadgeHtml = item.needsChangeoutNoDate
       ? `<span style="font-size:10.5px;font-weight:800;padding:2px 7px;border-radius:999px;background:rgba(220,38,38,0.22);border:1px solid rgba(248,113,113,0.55);color:#fecaca;">⚠️ No Test/Cal Sticker — Out of Date (Needs Changeout)</span>`
       : '';
+    const replacementBadgeHtml = item.needsSafetyNeedPush
+      ? `<span style="font-size:10.5px;font-weight:800;padding:2px 7px;border-radius:999px;background:rgba(220,38,38,0.26);border:1px solid rgba(248,113,113,0.6);color:#fecaca;">🚨 Replacement Request → Safety Equipment Needs</span>`
+      : '';
+    const itemDisplayId = item.isVehicleBased
+      ? (/^job\s*shack/i.test(String(item.itemNum || '')) ? `🏠 ${item.itemNum}` : `Unit ${item.itemNum}`)
+      : `#${item.itemNum}`;
 
     return `
       <div style="background:${meta.bg};border:1px solid ${meta.border};border-radius:10px;padding:11px 14px;display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:10px;">
@@ -2024,11 +2647,14 @@ END $$;`;
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
             <span style="font-size:11px;font-weight:800;color:${meta.color};">${meta.badge}</span>
             <span style="font-size:12px;font-weight:700;color:#cbd5e1;">${item.catIcon} ${this.escapeHtml(item.catLabel)}</span>
-            <span style="font-size:14px;font-weight:800;color:#ffffff;">#${this.escapeHtml(item.itemNum)}</span>
+            <span style="font-size:14px;font-weight:800;color:#ffffff;">${this.escapeHtml(itemDisplayId)}</span>
+            ${packedForBadgeHtml}
             ${unnumberedBadgeHtml}
             ${noDateBadgeHtml}
+            ${replacementBadgeHtml}
           </div>
           ${detailsHtml}
+          ${swapBannerHtml}
           ${item.reported?.notes ? `<div style="margin-top:4px;font-size:11px;color:#94a3b8;">Foreman note: ${this.escapeHtml(item.reported.notes)}</div>` : ''}
         </div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
@@ -2148,31 +2774,422 @@ END $$;`;
     return newChgOut;
   }
 
+  async pushReplacementToSafetyEquipmentNeeds(catKey, req, reported, canonicalVehNum) {
+    if (!this.db || !reported) return false;
+    const isFireExt = catKey === 'fire_extinguishers';
+    const equipType = isFireExt ? 'Fire Extinguisher' : 'First Aid Kit';
+    const vehClean = String(canonicalVehNum || reported.itemNum || '').trim();
+    const jobNum = String(req.job_number || '').trim();
+    const todayMdy = this.getLocalTodayMdy();
+
+    // Avoid inserting a duplicate open Safety Equipment Needs row for the same vehicle + equipment type + job
+    const needsTable = this.db.getTable('safety_equipment_needs');
+    const existingRows = (needsTable && Array.isArray(needsTable.rows)) ? needsTable.rows : [];
+    const vehNorm = this.normVehicleId(vehClean);
+    const alreadyOpen = existingRows.some((r) => {
+      const st = String(r['Status'] || '').trim().toLowerCase();
+      if (st.includes('complete') || st.includes('resolved') || st.includes('closed')) return false;
+      const rVeh = this.normVehicleId(r['Vehicle Number'] || r['Vehicle #'] || r['Truck'] || r['Unit'] || '');
+      const rType = String(r['Equipment Type'] || r['Item Type'] || '').trim().toLowerCase();
+      return vehNorm && rVeh === vehNorm && rType === equipType.toLowerCase();
+    });
+    if (alreadyOpen) return false;
+
+    const cond = reported.condition || (isFireExt ? 'Needs Replacement' : 'Needs Replacement');
+    const sizeTxt = (isFireExt && reported.size) ? ` (${reported.size})` : '';
+    const reasonParts = [];
+    if (reported.reason) reasonParts.push(reported.reason);
+    if (isFireExt && this.isMissingDateValue(reported.testDate) && cond !== 'Missing') {
+      reasonParts.push('No Test Sticker (OVERDUE)');
+    }
+    if (reported.notes) reasonParts.push(reported.notes);
+    const detailStr = reasonParts.join(' • ');
+    const issueDesc = `${cond}${sizeTxt}${detailStr ? ` — ${detailStr}` : ''}`;
+
+    const needRow = {
+      'Report Date': todayMdy,
+      'Received Date': todayMdy,
+      'Job Number': jobNum,
+      'Foreman': req.foreman_name || '',
+      'Location': req.location || 'Helena',
+      'Vehicle Number': vehClean,
+      'Equipment Type': equipType,
+      'Issue Description': issueDesc,
+      'Notes': `${issueDesc} (Equipment Audit: ${req.campaign_name || 'Crew Audit'})`,
+      'Status': 'Needs Attention',
+      'Report Type': 'Equipment Audit'
+    };
+
+    await this.db.addRow('safety_equipment_needs', needRow, `Equipment Audit (${req.foreman_name})`);
+    return true;
+  }
+
+  getDefaultSwapHeaders(catKey) {
+    const stageCols = [
+      'Stage 1 Pick Status', 'Stage 1 Pick Assigned', 'Stage 1 Pick Date',
+      'Stage 1 Old Status', 'Stage 1 Old Assigned', 'Stage 1 Old Date',
+      'Stage 2 Status', 'Stage 2 Assigned', 'Stage 2 Date', 'Stage 2 Picked For',
+      'Stage 3 Assigned', 'Stage 3 Date', 'Stage 3 Change Out Date'
+    ];
+    if (catKey === 'gloves') {
+      return ['Employee', 'Current Glove #', 'Size', 'Date Assigned', 'Change Out Date', 'Days Left', 'Pick List Item #', 'Status', 'Picked', 'Date Changed', ...stageCols];
+    }
+    if (catKey === 'sleeves') {
+      return ['Employee', 'Current Sleeve #', 'Size', 'Date Assigned', 'Change Out Date', 'Days Left', 'Pick List Item #', 'Status', 'Picked', 'Date Changed', ...stageCols];
+    }
+    if (catKey === 'blankets') {
+      return ['Employee', 'Current Blanket #', 'Type', 'Date Assigned', 'Change Out Date', 'Days Left', 'Pick List Item #', 'Status', 'Picked', 'Date Changed', ...stageCols];
+    }
+    if (catKey === 'macks') {
+      return ['Employee', 'Current MACK #', 'KV', 'Size', 'Length', 'Date Assigned', 'Change Out Date', 'Days Left', 'Pick List Item #', 'Status', 'Picked', 'Date Changed', ...stageCols];
+    }
+    if (catKey === 'hv_testers') {
+      return ['Crew Lead / Employee', 'Current HV Tester #', 'Model', 'KV', 'Serial #', 'Date Assigned', 'Change Out Date', 'Days Left', 'Pick List HV Tester #', 'Status', 'Picked', 'Date Changed'];
+    }
+    if (catKey === 'phasing_sets') {
+      return ['Crew Lead / Employee', 'Current Phasing Set #', 'Model', 'KV', 'Serial #', 'Date Assigned', 'Change Out Date', 'Days Left', 'Pick List Phasing Set #', 'Status', 'Picked', 'Date Changed'];
+    }
+    if (catKey === 'aed') {
+      return ['Crew Lead / Employee', 'Current AED #', 'Model', 'Pad Expiration', 'Days Left', 'Pick List AED #', 'Status', 'Picked', 'Date Changed'];
+    }
+    if (catKey === 'grounds') {
+      return ['Crew Lead / Employee', 'Serial #', 'Type', 'Size', 'KV', 'Length', 'Date Assigned', 'Change Out Date', 'Days Left', 'Pick List Serial #', 'Status', 'Picked', 'Date Changed'];
+    }
+    if (catKey === 'hot_sticks') {
+      return ['Crew Lead / Employee', 'Current Item #', 'Type', 'Length', 'Date Assigned', 'Change Out Date', 'Days Left', 'Pick List Item #', 'Status', 'Picked', 'Date Changed'];
+    }
+    return ['Employee', 'Current Item #', 'Size', 'Date Assigned', 'Change Out Date', 'Days Left', 'Pick List Item #', 'Status', 'Picked', 'Date Changed'];
+  }
+
+  _updateSwapRowInPlace(swapTable, swapRow, updates) {
+    if (!swapTable || !swapRow || !updates) return;
+    const headers = Array.isArray(swapTable.headers) ? swapTable.headers : [];
+    const pickHeader = headers.find((h) => /pick\s*list/i.test(String(h || ''))) || 'Pick List Item #';
+
+    if (updates.pickListNum !== undefined) {
+      swapRow[pickHeader] = updates.pickListNum;
+      if ('Pick List Item #' in swapRow || pickHeader === 'Pick List Item #') swapRow['Pick List Item #'] = updates.pickListNum;
+      ['Pick List Glove #', 'Pick List Sleeve #', 'Pick List Blanket #', 'Pick List MACK #', 'Pick List HV Tester #', 'Pick List Phasing Set #', 'Pick List AED #', 'Pick List Serial #'].forEach((k) => {
+        if (k in swapRow) swapRow[k] = updates.pickListNum;
+      });
+    }
+    if (updates.status !== undefined) swapRow['Status'] = updates.status;
+    if (updates.picked !== undefined) swapRow['Picked'] = updates.picked;
+    if (updates.stage2Status !== undefined) swapRow['Stage 2 Status'] = updates.stage2Status;
+    if (updates.stage2Assigned !== undefined) swapRow['Stage 2 Assigned'] = updates.stage2Assigned;
+    if (updates.stage2Date !== undefined) swapRow['Stage 2 Date'] = updates.stage2Date;
+    if (updates.stage2PickedFor !== undefined) swapRow['Stage 2 Picked For'] = updates.stage2PickedFor;
+    if (updates.isManualPick !== undefined) {
+      swapRow._manualPick = updates.isManualPick;
+      swapRow.isManualPick = updates.isManualPick;
+    }
+
+    if (Array.isArray(swapTable.rawGrid) && swapTable.rawGrid.length > 0) {
+      const grid = swapTable.rawGrid;
+      let gRow = (swapRow._rowIdx && grid[swapRow._rowIdx - 1] && Array.isArray(grid[swapRow._rowIdx - 1]))
+        ? grid[swapRow._rowIdx - 1]
+        : null;
+      if (!gRow) {
+        const meta = this.getSwapRowMeta(swapRow);
+        const targetEmp = (meta?.empName || '').toLowerCase();
+        const targetCur = (meta?.currentItemNum || '').toLowerCase();
+        gRow = grid.find((r, idx) => idx > 0 && Array.isArray(r) && String(r[0] || '').trim().toLowerCase() === targetEmp && (!targetCur || String(r[1] || '').trim().toLowerCase() === targetCur)) || null;
+      }
+      if (gRow) {
+        const pickIdx = headers.findIndex((h) => /pick\s*list/i.test(String(h || '')));
+        const statIdx = headers.findIndex((h) => /^status$/i.test(String(h || '').trim()));
+        const pkIdx = headers.findIndex((h) => /^picked$/i.test(String(h || '').trim()));
+        const s2StatIdx = headers.findIndex((h) => /stage\s*2\s*status/i.test(String(h || '')));
+        const s2AsgIdx = headers.findIndex((h) => /stage\s*2\s*assigned/i.test(String(h || '')));
+        const s2DateIdx = headers.findIndex((h) => /stage\s*2\s*date/i.test(String(h || '')));
+        const s2PfIdx = headers.findIndex((h) => /stage\s*2\s*picked\s*for/i.test(String(h || '')));
+        while (gRow.length < headers.length) gRow.push('');
+        if (updates.pickListNum !== undefined && pickIdx !== -1) gRow[pickIdx] = updates.pickListNum;
+        if (updates.status !== undefined && statIdx !== -1) gRow[statIdx] = updates.status;
+        if (updates.picked !== undefined && pkIdx !== -1) gRow[pkIdx] = updates.picked;
+        if (updates.stage2Status !== undefined && s2StatIdx !== -1) gRow[s2StatIdx] = updates.stage2Status;
+        if (updates.stage2Assigned !== undefined && s2AsgIdx !== -1) gRow[s2AsgIdx] = updates.stage2Assigned;
+        if (updates.stage2Date !== undefined && s2DateIdx !== -1) gRow[s2DateIdx] = updates.stage2Date;
+        if (updates.stage2PickedFor !== undefined && s2PfIdx !== -1) gRow[s2PfIdx] = updates.stage2PickedFor;
+      }
+    }
+  }
+
+  async _appendStagedRowToSwapTable(catKey, swapKey, empName, itemNum, invRow = null, reported = null) {
+    if (!this.db || !swapKey) return false;
+    const canonicalEmp = this.resolveCanonicalEmployeeName(empName);
+    const todayIso = this.getLocalTodayIso();
+    const todayMdy = this.getLocalTodayMdy();
+    const pickedForStamp = `${canonicalEmp} Picked On ${todayIso}`;
+
+    // For gloves & sleeves, prefer swapEngine.upsertNewAssignmentSwapRow when loaded so the row
+    // is slotted cleanly under the right Class -> Location -> Foreman section!
+    if ((swapKey === 'glove_swaps' || swapKey === 'sleeve_swaps') && typeof window !== 'undefined' && window.swapEngine && typeof window.swapEngine.upsertNewAssignmentSwapRow === 'function') {
+      const ok = await window.swapEngine.upsertNewAssignmentSwapRow(swapKey, {
+        empName: canonicalEmp,
+        itemNum,
+        itemClass: (reported && reported.itemClass !== undefined && String(reported.itemClass).trim() !== '') ? reported.itemClass : (invRow ? invRow['Class'] : null),
+        size: (reported && reported.size) || (invRow && invRow['Size']) || '',
+        invItemData: invRow
+      });
+      if (ok) return true;
+    }
+
+    let swapTable = this.db.getTable(swapKey);
+    const defaultHeaders = this.getDefaultSwapHeaders(catKey);
+    if (!swapTable) {
+      swapTable = {
+        name: this.getSwapSheetLabel(catKey),
+        headers: [...defaultHeaders],
+        rawGrid: [[this.getSwapSheetLabel(catKey), ...new Array(defaultHeaders.length - 1).fill('')], [...defaultHeaders]],
+        rows: []
+      };
+    }
+    const headers = (Array.isArray(swapTable.headers) && swapTable.headers.length > 0) ? swapTable.headers : [...defaultHeaders];
+    const rawGrid = Array.isArray(swapTable.rawGrid) ? [...swapTable.rawGrid] : [];
+    const rows = Array.isArray(swapTable.rows) ? [...swapTable.rows] : [];
+
+    if (rawGrid.length === 0) {
+      rawGrid.push([this.getSwapSheetLabel(catKey), ...new Array(headers.length - 1).fill('')]);
+      rawGrid.push([...headers]);
+    }
+
+    const rowObj = {};
+    const gridArr = headers.map((h) => {
+      const hl = String(h || '').trim().toLowerCase();
+      let v = '';
+      if (hl === 'employee' || hl === 'crew lead / employee') v = canonicalEmp;
+      else if (hl.includes('pick list')) v = itemNum;
+      else if (hl === 'status') v = 'Ready For Delivery 🚚';
+      else if (hl === 'picked') v = true;
+      else if (hl === 'size') v = String((reported && reported.size) || (invRow && invRow['Size']) || '');
+      else if (hl === 'type') v = String((reported && reported.type) || (invRow && invRow['Type']) || '');
+      else if (hl === 'kv') v = String((reported && reported.kv) || (invRow && invRow['KV']) || '');
+      else if (hl === 'length') v = String((reported && reported.length) || (invRow && invRow['Length']) || '');
+      else if (hl === 'model') v = String((reported && reported.model) || (invRow && invRow['Model']) || '');
+      else if (hl === 'stage 2 status') v = 'Ready For Delivery';
+      else if (hl === 'stage 2 assigned') v = 'Packed For Delivery';
+      else if (hl === 'stage 2 date') v = todayMdy;
+      else if (hl === 'stage 2 picked for') v = pickedForStamp;
+      rowObj[h] = v;
+      return v;
+    });
+
+    rawGrid.push(gridArr);
+    rowObj._rowIdx = rawGrid.length;
+    rowObj._manualPick = true;
+    rowObj.isManualPick = true;
+    if ((catKey === 'gloves' || catKey === 'sleeves') && !rowObj['Class']) {
+      rowObj['Class'] = String((reported && reported.itemClass !== undefined && String(reported.itemClass).trim() !== '') ? reported.itemClass : (invRow && invRow['Class']) || '2');
+    }
+    rows.push(rowObj);
+
+    if (typeof this.db.saveManualPick === 'function') {
+      this.db.saveManualPick(swapKey, canonicalEmp, '', itemNum, 'Ready For Delivery 🚚', true);
+    }
+    if (typeof this.db.replaceSwapTable === 'function') {
+      await this.db.replaceSwapTable(swapKey, rawGrid, headers, rows);
+    } else {
+      swapTable.headers = headers;
+      swapTable.rawGrid = rawGrid;
+      swapTable.rows = rows;
+    }
+    return true;
+  }
+
+  async syncPackedItemToSwaps(catKey, itemNum, packedFor, invRow = null, swapCheck = null, reported = null) {
+    const swapKey = this.getSwapTableKeyForCategory(catKey);
+    if (!this.db || !swapKey || !itemNum || !packedFor) return false;
+    if (swapCheck && swapCheck.ok) return false;
+
+    const canonicalEmp = this.resolveCanonicalEmployeeName(packedFor);
+    const todayIso = this.getLocalTodayIso();
+    const todayMdy = this.getLocalTodayMdy();
+    const pickedForStamp = `${canonicalEmp} Picked On ${todayIso}`;
+
+    const swapCtx = this.getSwapTableAndRows(catKey);
+    const swapTable = swapCtx.swapTable;
+    const status = swapCheck ? swapCheck.status : 'not_on_swaps';
+
+    if ((status === 'unpicked' || status === 'different_pick_item') && swapTable && swapCheck.swapRow) {
+      const meta = this.getSwapRowMeta(swapCheck.swapRow);
+      this._updateSwapRowInPlace(swapTable, swapCheck.swapRow, {
+        pickListNum: itemNum,
+        status: 'Ready For Delivery 🚚',
+        picked: true,
+        stage2Status: 'Ready For Delivery',
+        stage2Assigned: 'Packed For Delivery',
+        stage2Date: todayMdy,
+        stage2PickedFor: pickedForStamp,
+        isManualPick: true
+      });
+      if (typeof this.db.saveManualPick === 'function') {
+        this.db.saveManualPick(swapKey, meta?.empName || canonicalEmp, meta?.currentItemNum || '', itemNum, 'Ready For Delivery 🚚', true);
+      }
+      if (typeof this.db.replaceSwapTable === 'function') {
+        await this.db.replaceSwapTable(swapKey, swapTable.rawGrid || [], swapTable.headers || this.getDefaultSwapHeaders(catKey), swapTable.rows || []);
+      }
+      if (typeof window !== 'undefined' && window.tripPlanner && typeof window.tripPlanner.renderPickedSwapsList === 'function') {
+        window.tripPlanner.renderPickedSwapsList();
+      }
+      return true;
+    }
+
+    if (status === 'wrong_employee' && swapTable && swapCheck.swapRow) {
+      // 1. Clear/unpick the wrong employee's row
+      const wrongMeta = this.getSwapRowMeta(swapCheck.swapRow);
+      this._updateSwapRowInPlace(swapTable, swapCheck.swapRow, {
+        pickListNum: '—',
+        status: wrongMeta?.currentItemNum ? 'Need to Purchase ❌' : 'Needs Equipment',
+        picked: false,
+        stage2Status: '',
+        stage2Assigned: '',
+        stage2Date: '',
+        stage2PickedFor: '',
+        isManualPick: false
+      });
+      if (typeof this.db.clearManualPick === 'function' && wrongMeta?.empName) {
+        this.db.clearManualPick(swapKey, wrongMeta.empName, wrongMeta.currentItemNum || '');
+      }
+
+      // 2. Attach item to target employee's open swap row if one exists, otherwise append a new staged row
+      if (swapCheck.targetEmpSwapRow) {
+        const tgtMeta = this.getSwapRowMeta(swapCheck.targetEmpSwapRow);
+        this._updateSwapRowInPlace(swapTable, swapCheck.targetEmpSwapRow, {
+          pickListNum: itemNum,
+          status: 'Ready For Delivery 🚚',
+          picked: true,
+          stage2Status: 'Ready For Delivery',
+          stage2Assigned: 'Packed For Delivery',
+          stage2Date: todayMdy,
+          stage2PickedFor: pickedForStamp,
+          isManualPick: true
+        });
+        if (typeof this.db.saveManualPick === 'function') {
+          this.db.saveManualPick(swapKey, tgtMeta?.empName || canonicalEmp, tgtMeta?.currentItemNum || '', itemNum, 'Ready For Delivery 🚚', true);
+        }
+        if (typeof this.db.replaceSwapTable === 'function') {
+          await this.db.replaceSwapTable(swapKey, swapTable.rawGrid || [], swapTable.headers || this.getDefaultSwapHeaders(catKey), swapTable.rows || []);
+        }
+      } else {
+        if (typeof this.db.replaceSwapTable === 'function') {
+          await this.db.replaceSwapTable(swapKey, swapTable.rawGrid || [], swapTable.headers || this.getDefaultSwapHeaders(catKey), swapTable.rows || []);
+        }
+        await this._appendStagedRowToSwapTable(catKey, swapKey, canonicalEmp, itemNum, invRow, reported);
+      }
+
+      if (typeof window !== 'undefined' && window.tripPlanner && typeof window.tripPlanner.renderPickedSwapsList === 'function') {
+        window.tripPlanner.renderPickedSwapsList();
+      }
+      return true;
+    }
+
+    // Default / 'not_on_swaps': insert a new staged Ready For Delivery row on the Swaps page
+    const appended = await this._appendStagedRowToSwapTable(catKey, swapKey, canonicalEmp, itemNum, invRow, reported);
+    if (appended && typeof window !== 'undefined' && window.tripPlanner && typeof window.tripPlanner.renderPickedSwapsList === 'function') {
+      window.tripPlanner.renderPickedSwapsList();
+    }
+    return appended;
+  }
+
+  async unpickItemOnSwaps(catKey, itemNum, swapRowOverride = null, options = {}) {
+    const swapKey = this.getSwapTableKeyForCategory(catKey);
+    if (!this.db || !swapKey || !itemNum) return false;
+    const swapCtx = this.getSwapTableAndRows(catKey);
+    const swapTable = swapCtx.swapTable;
+    if (!swapTable) return false;
+
+    const targetNorm = this.normId(itemNum);
+    const targetRows = swapRowOverride
+      ? [swapRowOverride]
+      : swapCtx.rows.filter((sr) => {
+        const m = this.getSwapRowMeta(sr);
+        return m && m.isReadyForDelivery && m.hasValidPick && this.normId(m.pickListNum) === targetNorm;
+      });
+
+    if (targetRows.length === 0) return false;
+
+    targetRows.forEach((sr) => {
+      const m = this.getSwapRowMeta(sr);
+      const clearPick = Boolean(options.clearPickNum);
+      const nextStatus = clearPick
+        ? (m?.currentItemNum ? 'Need to Purchase ❌' : 'Needs Equipment')
+        : (m?.currentItemNum ? 'In Stock ✅' : 'Needs Equipment');
+      this._updateSwapRowInPlace(swapTable, sr, {
+        ...(clearPick ? { pickListNum: '—' } : {}),
+        status: nextStatus,
+        picked: false,
+        stage2Status: '',
+        stage2Assigned: '',
+        stage2Date: '',
+        stage2PickedFor: '',
+        isManualPick: false
+      });
+      if (typeof this.db.clearManualPick === 'function' && m?.empName) {
+        this.db.clearManualPick(swapKey, m.empName, m.currentItemNum || '');
+      }
+    });
+
+    if (typeof this.db.replaceSwapTable === 'function') {
+      await this.db.replaceSwapTable(swapKey, swapTable.rawGrid || [], swapTable.headers || this.getDefaultSwapHeaders(catKey), swapTable.rows || []);
+    }
+    if (typeof window !== 'undefined' && window.tripPlanner && typeof window.tripPlanner.renderPickedSwapsList === 'function') {
+      window.tripPlanner.renderPickedSwapsList();
+    }
+    return true;
+  }
+
   async applyDiscrepancyUpdate(key) {
     const item = this.findReconcileItem(key);
+    const req = this._lastReconciliation?.req;
     if (!item || !item.appRow) return;
+    const shopPool = this.getShopAuditPoolConfig(req);
+    const isPackedForDelivery = this.isPackedForDeliveryPool(shopPool);
     const hasAssignedDiff = item.diffs.some((d) => d.colName === 'Assigned To');
     const hasDateOrLocDiff = hasAssignedDiff || item.diffs.some((d) =>
-      ['Test Date', 'Calibration Date', 'Pad Expiration', 'Battery Expiration', 'Location'].includes(d.colName)
+      ['Test Date', 'Calibration Date', 'Pad Expiration', 'Battery Expiration', 'Location', 'Status'].includes(d.colName)
     );
     const todayMdy = this.getLocalTodayMdy();
     if (hasAssignedDiff) {
       await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Date Assigned', todayMdy, { skipHistory: true });
     }
+    if (item.isVehicleBased) {
+      await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Date Verified', todayMdy, { skipHistory: true });
+      if (req && req.job_number) {
+        await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Job #', req.job_number, { skipHistory: true });
+      }
+      if (item.reported && (item.reported.reason || item.reported.notes)) {
+        const noteStr = [item.reported.reason, item.reported.notes].filter(Boolean).join(' — ');
+        await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Notes', noteStr, { skipHistory: true });
+      }
+    }
     for (const d of item.diffs) {
       await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, d.colName, d.reportedValue, { skipHistory: true });
     }
-    if (hasDateOrLocDiff) {
+    if (hasDateOrLocDiff && item.catKey !== 'first_aid_kits') {
       await this.recalculateRowChangeOutDate(item.catKey, item.appRow, item.appRowIdx);
     }
-    if (hasAssignedDiff && typeof this.db.recordItemHistoryEvent === 'function') {
+    if (hasAssignedDiff && typeof this.db.recordItemHistoryEvent === 'function' && !item.isVehicleBased) {
       const table = this.db.getTable(item.catKey);
       if (table) {
         await this.db.recordItemHistoryEvent(table.name, item.appRow, 'Reassigned via Equipment Audit');
       }
     }
-    this.toast(`✅ Updated ${item.diffs.length} field(s) on ${item.catLabel} #${item.itemNum}`, 'success');
-    await this.recordAppliedAction(key, `Updated ${item.diffs.map((d) => d.label).join(', ')}`);
+    let syncedSwap = false;
+    if (isPackedForDelivery && item.packedFor && item.swapCheck && !item.swapCheck.ok) {
+      syncedSwap = await this.syncPackedItemToSwaps(item.catKey, item.itemNum, item.packedFor, item.appRow, item.swapCheck, item.reported);
+    }
+    let pushedNeed = false;
+    if (item.needsSafetyNeedPush && req) {
+      pushedNeed = await this.pushReplacementToSafetyEquipmentNeeds(item.catKey, req, item.reported, item.itemNum);
+    }
+    const labelParts = [];
+    if (item.diffs.length > 0) labelParts.push(`Updated ${item.diffs.map((d) => d.label).join(', ')}`);
+    if (syncedSwap) labelParts.push('Confirmed on Swaps Page');
+    if (pushedNeed) labelParts.push('Sent to Safety Needs');
+    const actionLabel = labelParts.join(' + ') || 'Verified';
+    this.toast(`✅ ${actionLabel} (${item.catLabel} ${item.isVehicleBased ? `Unit ${item.itemNum}` : `#${item.itemNum}`})`, 'success');
+    await this.recordAppliedAction(key, actionLabel);
   }
 
   async applyReassignToCrew(key) {
@@ -2180,44 +3197,75 @@ END $$;`;
     const req = this._lastReconciliation?.req;
     if (!item || !item.appRow || !req) return;
     const shopPool = this.getShopAuditPoolConfig(req);
-    const targetStatus = shopPool ? shopPool.canonicalStatus : 'Assigned';
+    const isPackedForDelivery = this.isPackedForDeliveryPool(shopPool);
+    const targetStatus = item.isVehicleBased
+      ? (item.reported?.condition || (item.catKey === 'first_aid_kits' ? 'Stocked / OK' : 'In Service'))
+      : (shopPool ? shopPool.canonicalStatus : 'Assigned');
     const assignee = shopPool ? shopPool.canonicalAssignedTo : (item.reported?.employeeName || req.foreman_name);
     const targetLoc = shopPool ? shopPool.location : (req.location || '');
     const todayMdy = this.getLocalTodayMdy();
+    const todayIso = this.getLocalTodayIso();
 
-    // 1. Update Date Assigned FIRST (with skipHistory: true) so history event gets today's date, never the old date
-    await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Date Assigned', todayMdy, { skipHistory: true });
+    // 1. Update Date Assigned / Date Verified FIRST (with skipHistory: true)
+    await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, item.isVehicleBased ? 'Date Verified' : 'Date Assigned', todayMdy, { skipHistory: true });
+    if (item.isVehicleBased && req.job_number) {
+      await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Job #', req.job_number, { skipHistory: true });
+    }
 
-    // 2. Apply any changed spec/date fields (e.g. Test Date, Calibration Date) with skipHistory: true
+    // 2. Apply any changed spec/date fields (e.g. Test Date, Calibration Date, Size) with skipHistory: true
     for (const d of item.diffs) {
-      if (d.colName !== 'Assigned To') {
+      if (d.colName !== 'Assigned To' && d.colName !== 'Status' && d.colName !== 'Picked For') {
         await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, d.colName, d.reportedValue, { skipHistory: true });
       }
     }
 
-    // 3. Apply Location, Status, and Assigned To atomically (skipHistory: true on each intermediate cell)
+    // 3. Apply Location, Status, Assigned To, and Picked For (for Packed For Delivery) atomically
     if (targetLoc) {
       await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Location', targetLoc, { skipHistory: true });
     }
     await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Status', targetStatus, { skipHistory: true });
     await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Assigned To', assignee, { skipHistory: true });
+    if (isPackedForDelivery && item.packedFor) {
+      const canonicalPacked = this.resolveCanonicalEmployeeName(item.packedFor);
+      await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Picked For', `${canonicalPacked} Picked On ${todayIso}`, { skipHistory: true });
+    }
+    if (item.isVehicleBased && item.reported && (item.reported.reason || item.reported.notes)) {
+      const noteStr = [item.reported.reason, item.reported.notes].filter(Boolean).join(' — ');
+      await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Notes', noteStr, { skipHistory: true });
+    }
 
     // 4. Recalculate Change Out Date based on updated assignment, location, and test/calibration date (handles None -> OVERDUE)
-    await this.recalculateRowChangeOutDate(item.catKey, item.appRow, item.appRowIdx);
+    if (item.catKey !== 'first_aid_kits') {
+      await this.recalculateRowChangeOutDate(item.catKey, item.appRow, item.appRowIdx);
+    }
 
-    // 5. Record ONE clean history transition now that Date Assigned, Location, Status, and Assigned To are all final
-    if (typeof this.db.recordItemHistoryEvent === 'function') {
+    // 5. Record ONE clean history transition (for tracked serialized PPE/equipment)
+    if (!item.isVehicleBased && typeof this.db.recordItemHistoryEvent === 'function') {
       const table = this.db.getTable(item.catKey);
       if (table) {
-        const histReason = shopPool
-          ? `Found in ${shopPool.name} (Equipment Audit)`
-          : `Reassigned via Equipment Audit (${req.foreman_name})`;
+        const histReason = isPackedForDelivery && item.packedFor
+          ? `Packed For Delivery (${this.resolveCanonicalEmployeeName(item.packedFor)} — Equipment Audit)`
+          : (shopPool
+            ? `Found in ${shopPool.name} (Equipment Audit)`
+            : `Reassigned via Equipment Audit (${req.foreman_name})`);
         await this.db.recordItemHistoryEvent(table.name, item.appRow, histReason);
       }
     }
 
-    const actionText = shopPool ? `Moved to ${shopPool.name}` : `Reassigned to ${assignee}`;
-    this.toast(`🔄 ${actionText} (${item.catLabel} #${item.itemNum})`, 'success');
+    let syncedSwap = false;
+    if (isPackedForDelivery && item.packedFor && (!item.swapCheck || !item.swapCheck.ok)) {
+      syncedSwap = await this.syncPackedItemToSwaps(item.catKey, item.itemNum, item.packedFor, item.appRow, item.swapCheck, item.reported);
+    }
+
+    let pushedNeed = false;
+    if (item.needsSafetyNeedPush) {
+      pushedNeed = await this.pushReplacementToSafetyEquipmentNeeds(item.catKey, req, item.reported, item.itemNum);
+    }
+
+    const actionText = (shopPool ? `Moved to ${shopPool.name}` : `Reassigned to ${assignee}`)
+      + (syncedSwap ? ' + Synced Swaps' : '')
+      + (pushedNeed ? ' + Sent to Safety Needs' : '');
+    this.toast(`🔄 ${actionText} (${item.catLabel} ${item.isVehicleBased ? `Unit ${item.itemNum}` : `#${item.itemNum}`})`, 'success');
     await this.recordAppliedAction(key, actionText);
   }
 
@@ -2226,16 +3274,23 @@ END $$;`;
     const req = this._lastReconciliation?.req;
     if (!item || !item.reported || !req) return;
     const shopPool = this.getShopAuditPoolConfig(req);
+    const isPackedForDelivery = this.isPackedForDeliveryPool(shopPool);
     const r = item.reported;
-    const targetStatus = shopPool ? shopPool.canonicalStatus : 'Assigned';
+    const isVehicleBased = Boolean(item.isVehicleBased);
+    const targetStatus = isVehicleBased
+      ? (r.condition || (item.catKey === 'first_aid_kits' ? 'Stocked / OK' : 'In Service'))
+      : (shopPool ? shopPool.canonicalStatus : 'Assigned');
     const assignee = shopPool ? shopPool.canonicalAssignedTo : (r.employeeName || req.foreman_name);
     const loc = shopPool ? shopPool.location : (req.location || 'Helena');
     const todayIso = this.getLocalTodayIso();
     const todayMdy = this.getLocalTodayMdy();
+    const canonicalPacked = (isPackedForDelivery && item.packedFor) ? this.resolveCanonicalEmployeeName(item.packedFor) : '';
 
-    // Auto-assign sequential NA-001, NA-002, NA-003... for unnumbered placeholders
-    const wasUnnumbered = this.isUnnumberedPlaceholderId(r.itemNum);
-    const finalItemNum = wasUnnumbered ? this.getNextSequentialUnnumberedId(item.catKey) : r.itemNum;
+    // Auto-assign sequential NA-001, NA-002, NA-003... for unnumbered placeholders (non-vehicle items)
+    const wasUnnumbered = !isVehicleBased && this.isUnnumberedPlaceholderId(r.itemNum);
+    const finalItemNum = isVehicleBased
+      ? this.formatCanonicalVehicleId(r.itemNum, req.job_number)
+      : (wasUnnumbered ? this.getNextSequentialUnnumberedId(item.catKey) : r.itemNum);
 
     const testDateMdy = this.toSheetDate(r.testDate);
     const calDateMdy = this.toSheetDate(r.calibrationDate);
@@ -2243,7 +3298,7 @@ END $$;`;
     const batExpMdy = this.toSheetDate(r.batteryExpiration);
     const isMissingStickerDate = this.isMissingDateValue(r.testDate) || this.isMissingDateValue(r.calibrationDate);
 
-    let changeOutDate = (window.inventoryManager && typeof window.inventoryManager.calculateChangeOutDate === 'function')
+    let changeOutDate = (item.catKey !== 'first_aid_kits' && window.inventoryManager && typeof window.inventoryManager.calculateChangeOutDate === 'function')
       ? window.inventoryManager.calculateChangeOutDate(todayIso, loc, assignee, item.catKey, {
         testDate: r.testDate,
         calibrationDate: r.calibrationDate,
@@ -2251,25 +3306,51 @@ END $$;`;
         batteryExpiration: r.batteryExpiration
       })
       : '';
-    if (isMissingStickerDate && changeOutDate !== 'N/A') {
+    if (item.catKey !== 'first_aid_kits' && (isMissingStickerDate || (item.catKey === 'fire_extinguishers' && targetStatus !== 'In Service')) && changeOutDate !== 'N/A') {
       changeOutDate = 'OVERDUE';
     }
 
-    const baseNote = r.notes || `Added via Equipment Audit (${req.campaign_name})`;
+    const baseNote = [r.reason, r.notes].filter(Boolean).join(' — ') || `Added via Equipment Audit (${req.campaign_name})`;
     const finalNotes = wasUnnumbered
       ? `${baseNote}${baseNote ? ' | ' : ''}Unnumbered (Audit: ${r.itemNum})`
       : baseNote;
 
-    const newRow = {
-      'Item #': finalItemNum,
-      'Date Assigned': todayMdy,
-      'Location': loc,
-      'Status': targetStatus,
-      'Assigned To': assignee,
-      'Change Out Date': changeOutDate,
-      'Picked For': '',
-      'Notes': finalNotes
-    };
+    let newRow = {};
+    if (item.catKey === 'fire_extinguishers') {
+      newRow = {
+        'Vehicle / Equipment #': finalItemNum,
+        'Size': r.size || '10 lb ABC',
+        'Test Date': r.condition === 'Missing' ? 'None' : testDateMdy,
+        'Date Verified': todayMdy,
+        'Location': loc,
+        'Status': targetStatus,
+        'Assigned To': assignee,
+        'Job #': req.job_number || '',
+        'Change Out Date': changeOutDate,
+        'Notes': finalNotes
+      };
+    } else if (item.catKey === 'first_aid_kits') {
+      newRow = {
+        'Vehicle / Equipment #': finalItemNum,
+        'Status': targetStatus,
+        'Date Verified': todayMdy,
+        'Location': loc,
+        'Assigned To': assignee,
+        'Job #': req.job_number || '',
+        'Notes': finalNotes
+      };
+    } else {
+      newRow = {
+        'Item #': finalItemNum,
+        'Date Assigned': todayMdy,
+        'Location': loc,
+        'Status': targetStatus,
+        'Assigned To': assignee,
+        'Change Out Date': changeOutDate,
+        'Picked For': canonicalPacked ? `${canonicalPacked} Picked On ${todayIso}` : '',
+        'Notes': finalNotes
+      };
+    }
 
     if (item.catKey === 'gloves' || item.catKey === 'sleeves') {
       newRow[item.catKey === 'gloves' ? 'Glove' : 'Sleeve'] = finalItemNum;
@@ -2315,42 +3396,75 @@ END $$;`;
     }
 
     await this.db.addRow(item.catKey, newRow, `Equipment Audit (${req.foreman_name})`);
-    const msgSuffix = `${wasUnnumbered ? ` (from ${r.itemNum})` : ''}${changeOutDate === 'OVERDUE' ? ' — flagged OVERDUE (no date)' : ''}`;
-    this.toast(`➕ Added ${item.catLabel} #${finalItemNum}${msgSuffix}!`, 'success');
-    await this.recordAppliedAction(key, `Added #${finalItemNum} to ${item.catLabel} (${assignee})`);
+    let syncedSwap = false;
+    if (isPackedForDelivery && canonicalPacked && (!item.swapCheck || !item.swapCheck.ok)) {
+      syncedSwap = await this.syncPackedItemToSwaps(item.catKey, finalItemNum, canonicalPacked, newRow, item.swapCheck, r);
+    }
+    let pushedNeed = false;
+    if (item.needsSafetyNeedPush) {
+      pushedNeed = await this.pushReplacementToSafetyEquipmentNeeds(item.catKey, req, r, finalItemNum);
+    }
+    const msgSuffix = `${wasUnnumbered ? ` (from ${r.itemNum})` : ''}${changeOutDate === 'OVERDUE' ? ' — flagged OVERDUE' : ''}${syncedSwap ? ' + synced to Swaps Page!' : ''}${pushedNeed ? ' + sent to Safety Equipment Needs!' : ''}`;
+    this.toast(`➕ Added ${item.catLabel} ${isVehicleBased ? `Unit ${finalItemNum}` : `#${finalItemNum}`}${msgSuffix}`, 'success');
+    await this.recordAppliedAction(key, `Added ${isVehicleBased ? `Unit ${finalItemNum}` : `#${finalItemNum}`} to ${item.catLabel}${syncedSwap ? ' + Synced Swaps' : (pushedNeed ? ' + Sent to Safety Needs' : ` (${assignee})`)}`);
   }
 
   async applyMarkMissingLost(key) {
     const item = this.findReconcileItem(key);
     const req = this._lastReconciliation?.req;
     if (!item || !item.appRow || !req) return;
+    const shopPool = this.getShopAuditPoolConfig(req);
+    const isPackedForDelivery = this.isPackedForDeliveryPool(shopPool);
     const todayMdy = this.getLocalTodayMdy();
     const noteText = `LOST-LOCATE (Missing on ${req.foreman_name} audit ${todayMdy})`;
     await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Date Assigned', todayMdy, { skipHistory: true });
     await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Status', 'Lost', { skipHistory: true });
+    if (isPackedForDelivery) {
+      await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Picked For', '', { skipHistory: true });
+    }
     await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Notes', noteText, { skipHistory: true });
     if (typeof this.db.recordItemHistoryEvent === 'function') {
       const table = this.db.getTable(item.catKey);
       if (table) await this.db.recordItemHistoryEvent(table.name, item.appRow, noteText);
     }
-    this.toast(`⚠️ Flagged ${item.catLabel} #${item.itemNum} as Lost / Locate`, 'warning');
-    await this.recordAppliedAction(key, 'Flagged Lost / Locate');
+    let unpicked = false;
+    if (isPackedForDelivery) {
+      unpicked = await this.unpickItemOnSwaps(item.catKey, item.itemNum, item.swapMissingRow, { clearPickNum: true });
+    }
+    this.toast(`⚠️ Flagged ${item.catLabel} #${item.itemNum} as Lost / Locate${unpicked ? ' & cleared from Swaps' : ''}`, 'warning');
+    await this.recordAppliedAction(key, `Flagged Lost / Locate${unpicked ? ' + Cleared Swaps' : ''}`);
   }
 
   async applyReturnToShelf(key) {
     const item = this.findReconcileItem(key);
+    const req = this._lastReconciliation?.req;
     if (!item || !item.appRow) return;
+    const shopPool = this.getShopAuditPoolConfig(req);
+    const isPackedForDelivery = this.isPackedForDeliveryPool(shopPool);
     const todayMdy = this.getLocalTodayMdy();
     await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Date Assigned', todayMdy, { skipHistory: true });
     await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Location', 'Helena', { skipHistory: true });
     await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Status', 'On Shelf', { skipHistory: true });
     await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Assigned To', 'On Shelf', { skipHistory: true });
+    await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Picked For', '', { skipHistory: true });
     if (typeof this.db.recordItemHistoryEvent === 'function') {
       const table = this.db.getTable(item.catKey);
       if (table) await this.db.recordItemHistoryEvent(table.name, item.appRow, 'Returned to On Shelf (Equipment Audit)');
     }
-    this.toast(`📦 Returned ${item.catLabel} #${item.itemNum} to On Shelf`, 'success');
-    await this.recordAppliedAction(key, 'Returned to On Shelf');
+    let unpicked = false;
+    if (isPackedForDelivery) {
+      unpicked = await this.unpickItemOnSwaps(item.catKey, item.itemNum, item.swapMissingRow, { clearPickNum: false });
+    }
+    this.toast(`📦 Returned ${item.catLabel} #${item.itemNum} to On Shelf${unpicked ? ' & unpicked on Swaps Page' : ''}`, 'success');
+    await this.recordAppliedAction(key, `Returned to On Shelf${unpicked ? ' + Unpicked Swap' : ''}`);
+  }
+
+  async applyUnpickFromSwaps(key) {
+    const item = this.findReconcileItem(key);
+    if (!item) return;
+    const unpicked = await this.unpickItemOnSwaps(item.catKey, item.itemNum, item.swapMissingRow, { clearPickNum: false });
+    this.toast(`🔓 Unpicked ${item.catLabel} #${item.itemNum} on ${item.swapSheetLabel || 'Swaps Page'}`, 'success');
+    await this.recordAppliedAction(key, unpicked ? `Unpicked on ${item.swapSheetLabel || 'Swaps Page'}` : 'Cleared');
   }
 
   async dismissItem(key) {
@@ -2371,6 +3485,8 @@ END $$;`;
         catKey: r.catKey,
         catLabel: r.catLabel,
         itemNum: r.itemNum,
+        packedFor: r.packedFor || '',
+        swapStatus: r.swapCheck ? r.swapCheck.status : '',
         diffs: r.diffs,
         reported: r.reported,
         appAssignedTo: r.appRow ? (r.appRow['Assigned To'] || '') : ''

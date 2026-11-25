@@ -1430,6 +1430,27 @@ class LocalDatabase {
         }
       }
     }
+    if (!table) {
+      const defaultSchemas = {
+        fire_extinguishers: {
+          name: 'Fire Extinguishers',
+          headers: ['Vehicle / Equipment #', 'Size', 'Test Date', 'Date Verified', 'Location', 'Status', 'Assigned To', 'Job #', 'Change Out Date', 'Notes']
+        },
+        fire_extinguisher_swaps: {
+          name: 'Fire Extinguisher Swaps',
+          headers: ['Crew Lead / Foreman', 'Vehicle / Equipment #', 'Size', 'Location', 'Test Date', 'Change Out Date', 'Days Left', 'Status', 'Notes']
+        },
+        first_aid_kits: {
+          name: 'First Aid Kits',
+          headers: ['Vehicle / Equipment #', 'Status', 'Date Verified', 'Location', 'Assigned To', 'Job #', 'Notes']
+        }
+      };
+      if (defaultSchemas[tableKey]) {
+        const def = defaultSchemas[tableKey];
+        table = { name: def.name, headers: [...def.headers], rows: [], rawGrid: [[...def.headers]], rowCount: 0, _normalized: true };
+        this.snapshot.tables[tableKey] = table;
+      }
+    }
     table = table || { headers: [], rows: [] };
     return this.normalizeTableData(table, tableKey);
   }
@@ -2563,6 +2584,12 @@ class LocalDatabase {
       'grounds': 'grounds',
       'hot sticks': 'hot_sticks',
       'hot_sticks': 'hot_sticks',
+      'fire extinguishers': 'fire_extinguishers',
+      'fire_extinguishers': 'fire_extinguishers',
+      'fire extinguisher swaps': 'fire_extinguisher_swaps',
+      'fire_extinguisher_swaps': 'fire_extinguisher_swaps',
+      'first aid kits': 'first_aid_kits',
+      'first_aid_kits': 'first_aid_kits',
       'employees': 'employees',
       'job tracking': 'job_tracking',
       'job_tracking': 'job_tracking',
@@ -2616,6 +2643,10 @@ class LocalDatabase {
       'grounds': 'Grounds',
       'hot_sticks': 'Hot Sticks',
       'hot sticks': 'Hot Sticks',
+      'fire_extinguishers': 'Fire Extinguishers',
+      'fire extinguishers': 'Fire Extinguishers',
+      'first_aid_kits': 'First Aid Kits',
+      'first aid kits': 'First Aid Kits',
       'glove_swaps': 'Glove Swaps',
       'sleeve_swaps': 'Sleeve Swaps',
       'blanket_swaps': 'Blanket Swaps',
@@ -2625,6 +2656,7 @@ class LocalDatabase {
       'aed_swaps': 'AED Swaps',
       'ground_swaps': 'Ground Swaps',
       'hot_stick_swaps': 'Hot Stick Swaps',
+      'fire_extinguisher_swaps': 'Fire Extinguisher Swaps',
       'employees': 'Employees',
       'job_tracking': 'Job Tracking',
       'safety_compliance': 'Safety Compliance',
@@ -2705,12 +2737,12 @@ class LocalDatabase {
     }
 
     // Uniqueness enforcement for inventory equipment: prevent inserting duplicate items
-    const isInv = ['gloves', 'sleeves', 'blankets', 'macks', 'hv_testers', 'phasing_sets', 'aed', 'grounds', 'hot_sticks'].includes(tableKey);
+    const isInv = ['gloves', 'sleeves', 'blankets', 'macks', 'hv_testers', 'phasing_sets', 'aed', 'grounds', 'hot_sticks', 'fire_extinguishers', 'first_aid_kits'].includes(tableKey);
     if (isInv && table.rows && table.rows.length > 0) {
-      const itemNum = String(rowObj['Item #'] || rowObj['Glove'] || rowObj['Sleeve'] || rowObj['Blanket'] || rowObj['MACK'] || rowObj['HVT #'] || rowObj['Phasing Set #'] || rowObj['AED #'] || rowObj['Ground #'] || rowObj['Hot Stick #'] || rowObj['Serial #'] || Object.values(rowObj)[0] || '').trim();
+      const itemNum = String(rowObj['Vehicle / Equipment #'] || rowObj['Item #'] || rowObj['Glove'] || rowObj['Sleeve'] || rowObj['Blanket'] || rowObj['MACK'] || rowObj['HVT #'] || rowObj['Phasing Set #'] || rowObj['AED #'] || rowObj['Ground #'] || rowObj['Hot Stick #'] || rowObj['Serial #'] || Object.values(rowObj)[0] || '').trim();
       if (itemNum) {
         const existing = table.rows.find(r => {
-          const rNum = String(r['Item #'] || r['Glove'] || r['Sleeve'] || r['Blanket'] || r['MACK'] || r['HVT #'] || r['Phasing Set #'] || r['AED #'] || r['Ground #'] || r['Hot Stick #'] || r['Serial #'] || Object.values(r)[0] || '').trim();
+          const rNum = String(r['Vehicle / Equipment #'] || r['Item #'] || r['Glove'] || r['Sleeve'] || r['Blanket'] || r['MACK'] || r['HVT #'] || r['Phasing Set #'] || r['AED #'] || r['Ground #'] || r['Hot Stick #'] || r['Serial #'] || Object.values(r)[0] || '').trim();
           return rNum.toLowerCase() === itemNum.toLowerCase();
         });
         if (existing) {
@@ -2724,7 +2756,7 @@ class LocalDatabase {
     if (table.headers && table.headers.length > 0) {
       const firstH = table.headers[0];
       if (rowObj[firstH] === undefined || rowObj[firstH] === '') {
-        const itemVal = rowObj['Location'] || rowObj['Item #'] || rowObj['Serial #'] || rowObj['HV Tester'] || rowObj['HVT #'] || rowObj['Phasing Set'] || rowObj['PS #'] || rowObj['AED'] || rowObj['AED #'] || rowObj['Glove'] || rowObj['Sleeve'] || rowObj['Blanket'] || rowObj['MACK'] || rowObj['Ground #'] || rowObj['Hot Stick #'] || '';
+        const itemVal = rowObj['Location'] || rowObj['Vehicle / Equipment #'] || rowObj['Item #'] || rowObj['Serial #'] || rowObj['HV Tester'] || rowObj['HVT #'] || rowObj['Phasing Set'] || rowObj['PS #'] || rowObj['AED'] || rowObj['AED #'] || rowObj['Glove'] || rowObj['Sleeve'] || rowObj['Blanket'] || rowObj['MACK'] || rowObj['Ground #'] || rowObj['Hot Stick #'] || '';
         if (itemVal && (tableKey === 'locations' || !rowObj['Location'])) {
           rowObj[firstH] = itemVal;
         }
@@ -2738,8 +2770,8 @@ class LocalDatabase {
       if (rowObj[h] !== undefined) return rowObj[h];
       const hLower = String(h || '').trim().toLowerCase();
       if (rowKeysLower[hLower] !== undefined) return rowKeysLower[hLower];
-      if (['item #', 'item', 'glove', 'sleeve', 'blanket', 'mack', 'hv tester', 'phasing set', 'aed', 'serial #', 'serial', 'item number', 'hvt #', 'hvt', 'ps #', 'aed #', 'ground', 'ground #', 'hot stick', 'hot stick #'].includes(hLower)) {
-        return rowObj['Item #'] || rowObj['HV Tester'] || rowObj['HVT #'] || rowObj['Phasing Set'] || rowObj['PS #'] || rowObj['AED'] || rowObj['AED #'] || rowObj['Glove'] || rowObj['Sleeve'] || rowObj['Blanket'] || rowObj['MACK'] || rowObj['Ground #'] || rowObj['Hot Stick #'] || rowObj['Serial #'] || '';
+      if (['vehicle / equipment #', 'vehicle #', 'item #', 'item', 'glove', 'sleeve', 'blanket', 'mack', 'hv tester', 'phasing set', 'aed', 'serial #', 'serial', 'item number', 'hvt #', 'hvt', 'ps #', 'aed #', 'ground', 'ground #', 'hot stick', 'hot stick #'].includes(hLower)) {
+        return rowObj['Vehicle / Equipment #'] || rowObj['Item #'] || rowObj['HV Tester'] || rowObj['HVT #'] || rowObj['Phasing Set'] || rowObj['PS #'] || rowObj['AED'] || rowObj['AED #'] || rowObj['Glove'] || rowObj['Sleeve'] || rowObj['Blanket'] || rowObj['MACK'] || rowObj['Ground #'] || rowObj['Hot Stick #'] || rowObj['Serial #'] || '';
       }
       return '';
     });

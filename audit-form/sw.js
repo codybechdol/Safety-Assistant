@@ -3,7 +3,7 @@
  * Caches static form shell so foremen can open the link once while online
  * and continue entering equipment offline in low/no-reception areas.
  */
-const AUDIT_CACHE_NAME = 'crew-equipment-audit-v3';
+const AUDIT_CACHE_NAME = 'crew-equipment-audit-v5';
 const STATIC_ASSETS = [
   './',
   './index.html',

@@ -199,20 +199,28 @@ class InventoryManager {
       return formatDateStr(d);
     }
 
-    // 4. Blankets, MACKs, Grounds (+12 months from Test Date)
+    // 4. Blankets, MACKs, Grounds, Fire Extinguishers (+12 months from Test Date)
     if (
       sType === 'blankets' ||
       sType === 'blanket' ||
       sType === 'macks' ||
       sType === 'mack' ||
       sType === 'grounds' ||
-      sType === 'ground'
+      sType === 'ground' ||
+      sType === 'fire_extinguishers' ||
+      sType === 'fire extinguishers' ||
+      sType === 'fire extinguisher'
     ) {
       const tDate = parseToDate(extra.testDate || dateAssigned);
       if (!tDate) return '';
       const d = new Date(tDate);
       d.setMonth(d.getMonth() + 12);
       return formatDateStr(d);
+    }
+
+    // 4b. First Aid Kits (no annual test cycle)
+    if (sType === 'first_aid_kits' || sType === 'first aid kits' || sType === 'first aid kit') {
+      return '';
     }
 
     // 5. Sleeves (+12 months)
@@ -283,6 +291,8 @@ class InventoryManager {
                 <option value="aed">🏥 AED (Automated External Defibrillator)</option>
                 <option value="grounds">⚡ Grounds (Overhead / Underground Grounds)</option>
                 <option value="hot_sticks">🔴 Hot Sticks (Live-Line Tools)</option>
+                <option value="fire_extinguishers">🧯 Fire Extinguishers (Truck / Job Shack)</option>
+                <option value="first_aid_kits">🩹 First Aid Kits (Truck / Job Shack)</option>
               </select>
             </div>
 
@@ -873,6 +883,108 @@ class InventoryManager {
           <input type="text" id="f-notes" class="form-control" placeholder="Optional notes...">
         </div>
       `;
+    } else if (cat === 'fire_extinguishers') {
+      iconEl.textContent = '🧯';
+      titleEl.textContent = 'Add Fire Extinguisher (Vehicle / Job Shack)';
+      fieldsHtml = `
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
+          <div>
+            <label style="display: block; font-size: 11.5px; font-weight: 700; margin-bottom: 4px;">VEHICLE / EQUIPMENT # *</label>
+            <input type="text" id="f-item-num" class="form-control" placeholder="e.g., 2108, X104" required oninput="window.inventoryManager.onItemNumChanged()">
+            <div id="f-item-num-feedback" style="font-size: 11px; margin-top: 3px; min-height: 14px;"></div>
+          </div>
+          <div>
+            <label style="display: block; font-size: 11.5px; font-weight: 700; margin-bottom: 4px;">SIZE *</label>
+            <select id="f-size" class="form-control">
+              <option value="5 lb ABC">5 lb ABC</option>
+              <option value="10 lb ABC" selected>10 lb ABC</option>
+              <option value="20 lb ABC">20 lb ABC</option>
+            </select>
+          </div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
+          <div>
+            <label style="display: block; font-size: 11.5px; font-weight: 700; margin-bottom: 4px;">TEST DATE * (1-YR CYCLE)</label>
+            <input type="date" id="f-test-date" class="form-control" value="${todayIso}" onchange="window.inventoryManager.updatePreview()">
+            <label style="display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600; color: #fca5a5; margin-top: 4px; cursor: pointer;">
+              <input type="checkbox" id="f-date-none" onchange="window.inventoryManager.onNoDateToggled('f-test-date')"> None (No Sticker — Overdue)
+            </label>
+          </div>
+          <div>
+            <label style="display: block; font-size: 11.5px; font-weight: 700; margin-bottom: 4px;">DATE VERIFIED</label>
+            <input type="date" id="f-date-assigned" class="form-control" value="${todayIso}" onchange="window.inventoryManager.updatePreview()">
+          </div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
+          <div>
+            <label style="display: block; font-size: 11.5px; font-weight: 700; margin-bottom: 4px;">STATUS</label>
+            <select id="f-status" class="form-control" onchange="window.inventoryManager.onStatusChanged()">
+              <option value="In Service" selected>In Service (Good)</option>
+              <option value="Needs Replacement">Needs Replacement</option>
+              <option value="Missing">Missing</option>
+              <option value="On Shelf">On Shelf (Helena Stock)</option>
+            </select>
+          </div>
+          <div>
+            <label style="display: block; font-size: 11.5px; font-weight: 700; margin-bottom: 4px;">LOCATION</label>
+            <input type="text" id="f-location" class="form-control" value="Helena" oninput="window.inventoryManager.updatePreview()">
+          </div>
+        </div>
+
+        <div style="margin-bottom: 12px;">
+          <label style="display: block; font-size: 11.5px; font-weight: 700; margin-bottom: 4px;">ASSIGNED TO / LAST REPORTED FOREMAN</label>
+          <input type="text" id="f-assigned-to" list="new-item-employees-datalist" class="form-control" value="" placeholder="Foreman name or On Shelf" oninput="window.inventoryManager.onAssignedToChanged()">
+        </div>
+
+        <div style="margin-bottom: 12px;">
+          <label style="display: block; font-size: 11.5px; font-weight: 700; margin-bottom: 4px;">NOTES</label>
+          <input type="text" id="f-notes" class="form-control" placeholder="Optional notes...">
+        </div>
+      `;
+    } else if (cat === 'first_aid_kits') {
+      iconEl.textContent = '🩹';
+      titleEl.textContent = 'Add First Aid Kit (Vehicle / Job Shack)';
+      fieldsHtml = `
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
+          <div>
+            <label style="display: block; font-size: 11.5px; font-weight: 700; margin-bottom: 4px;">VEHICLE / EQUIPMENT # *</label>
+            <input type="text" id="f-item-num" class="form-control" placeholder="e.g., 2108, X104" required oninput="window.inventoryManager.onItemNumChanged()">
+            <div id="f-item-num-feedback" style="font-size: 11px; margin-top: 3px; min-height: 14px;"></div>
+          </div>
+          <div>
+            <label style="display: block; font-size: 11.5px; font-weight: 700; margin-bottom: 4px;">STATUS</label>
+            <select id="f-status" class="form-control">
+              <option value="Stocked / OK" selected>Stocked / OK</option>
+              <option value="Needs Restock">Needs Restock</option>
+              <option value="Needs Replacement">Needs Replacement</option>
+              <option value="Missing">Missing</option>
+            </select>
+          </div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
+          <div>
+            <label style="display: block; font-size: 11.5px; font-weight: 700; margin-bottom: 4px;">DATE VERIFIED</label>
+            <input type="date" id="f-date-assigned" class="form-control" value="${todayIso}">
+          </div>
+          <div>
+            <label style="display: block; font-size: 11.5px; font-weight: 700; margin-bottom: 4px;">LOCATION</label>
+            <input type="text" id="f-location" class="form-control" value="Helena">
+          </div>
+        </div>
+
+        <div style="margin-bottom: 12px;">
+          <label style="display: block; font-size: 11.5px; font-weight: 700; margin-bottom: 4px;">ASSIGNED TO / LAST REPORTED FOREMAN</label>
+          <input type="text" id="f-assigned-to" list="new-item-employees-datalist" class="form-control" value="" placeholder="Foreman name" oninput="window.inventoryManager.onAssignedToChanged()">
+        </div>
+
+        <div style="margin-bottom: 12px;">
+          <label style="display: block; font-size: 11.5px; font-weight: 700; margin-bottom: 4px;">NOTES</label>
+          <input type="text" id="f-notes" class="form-control" placeholder="Optional notes...">
+        </div>
+      `;
     }
 
     container.innerHTML = fieldsHtml + empDatalistHtml;
@@ -901,7 +1013,7 @@ class InventoryManager {
 
     for (const r of table.rows) {
       if (excludeRowIdx && r._rowIdx === excludeRowIdx) continue;
-      const rNumRaw = r[firstHeader] || r['Item #'] || r['HV Tester'] || r['HVT #'] || r['HVT'] || r['Phasing Set'] || r['PS #'] || r['AED'] || r['AED #'] || r['Glove'] || r['Sleeve'] || r['Blanket'] || r['MACK'] || r['Serial #'] || r['Hot Stick'] || r['Ground #'] || '';
+      const rNumRaw = r[firstHeader] || r['Vehicle / Equipment #'] || r['Item #'] || r['HV Tester'] || r['HVT #'] || r['HVT'] || r['Phasing Set'] || r['PS #'] || r['AED'] || r['AED #'] || r['Glove'] || r['Sleeve'] || r['Blanket'] || r['MACK'] || r['Serial #'] || r['Hot Stick'] || r['Ground #'] || '';
       const normRNum = this.normalizeEquipmentIdentifier(rNumRaw);
       const rEsl = String(r['ESL ID'] || '').trim();
 
@@ -1374,6 +1486,32 @@ class InventoryManager {
         'Picked For': '',
         'Notes': notes
       };
+    } else if (cat === 'fire_extinguishers') {
+      const fSize = document.getElementById('f-size') ? document.getElementById('f-size').value : '10 lb ABC';
+      newRow = {
+        'Vehicle / Equipment #': itemNum,
+        'Item #': itemNum,
+        'Size': fSize,
+        'Test Date': testDate,
+        'Date Verified': dateAssigned || testDate,
+        'Location': location,
+        'Status': status,
+        'Assigned To': assignedTo,
+        'Job #': '',
+        'Change Out Date': changeOutDate,
+        'Notes': notes
+      };
+    } else if (cat === 'first_aid_kits') {
+      newRow = {
+        'Vehicle / Equipment #': itemNum,
+        'Item #': itemNum,
+        'Status': status || 'Stocked / OK',
+        'Date Verified': dateAssigned,
+        'Location': location,
+        'Assigned To': assignedTo,
+        'Job #': '',
+        'Notes': notes
+      };
     }
 
     // Ensure table.headers[0] is explicitly populated on newRow so column 0 is never blank in rawGrid or view
@@ -1462,7 +1600,7 @@ class InventoryManager {
    * Recalculates all Change Out Dates in the specified equipment table
    */
   async recalculateAllChangeOutDates(tableKey = null) {
-    const targetKeys = tableKey ? [tableKey] : ['gloves', 'sleeves', 'blankets', 'macks', 'hv_testers', 'phasing_sets', 'grounds', 'hot_sticks'];
+    const targetKeys = tableKey ? [tableKey] : ['gloves', 'sleeves', 'blankets', 'macks', 'hv_testers', 'phasing_sets', 'grounds', 'hot_sticks', 'fire_extinguishers'];
     let fixedCount = 0;
 
     targetKeys.forEach(tKey => {

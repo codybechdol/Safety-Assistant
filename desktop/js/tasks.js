@@ -435,15 +435,16 @@ class TaskManagerApp {
       { key: 'phasing_set_swaps', name: 'Phasing Set Swap', cat: 'Equipment' },
       { key: 'aed_swaps', name: 'AED Swap', cat: 'Equipment' },
       { key: 'ground_swaps', name: 'Ground Swap', cat: 'Equipment' },
-      { key: 'hot_stick_swaps', name: 'Hot Stick Swap', cat: 'Equipment' }
+      { key: 'hot_stick_swaps', name: 'Hot Stick Swap', cat: 'Equipment' },
+      { key: 'fire_extinguisher_swaps', name: 'Fire Extinguisher Swap', cat: 'Equipment' }
     ];
 
     swapSheets.forEach(sw => {
       const swTable = this.db.getTable(sw.key);
       if (swTable && swTable.rows) {
         swTable.rows.forEach((r, idx) => {
-          const emp = String(r['Assigned To'] || r['Employee'] || r['Name'] || '').trim();
-          const itemNum = String(r['Item #'] || r['Item#'] || r['Serial #'] || r['Serial#'] || r['ESL ID'] || r['Current Glove #'] || r['Current Sleeve #'] || r['Current Item #'] || '').trim();
+          const emp = String(r['Assigned To'] || r['Employee'] || r['Crew Lead / Foreman'] || r['Crew Lead / Employee'] || r['Name'] || '').trim();
+          const itemNum = String(r['Vehicle / Equipment #'] || r['Item #'] || r['Item#'] || r['Serial #'] || r['Serial#'] || r['ESL ID'] || r['Current Glove #'] || r['Current Sleeve #'] || r['Current Item #'] || '').trim();
           const specs = String(r['Size'] || r['Model'] || r['KV'] || r['Type'] || r['Class'] || '').trim();
           const changeOut = String(r['Change Out Date'] || r['Due Date'] || r['Expiration'] || 'N/A').trim();
           const stage = String(r['Status'] || r['Stage'] || 'Unassigned').trim();
@@ -1567,7 +1568,9 @@ class TaskManagerApp {
         'ground swap': 'ground_swaps',
         'ground swaps': 'ground_swaps',
         'hot stick swap': 'hot_stick_swaps',
-        'hot stick swaps': 'hot_stick_swaps'
+        'hot stick swaps': 'hot_stick_swaps',
+        'fire extinguisher swap': 'fire_extinguisher_swaps',
+        'fire extinguisher swaps': 'fire_extinguisher_swaps'
       };
       const swKey = invMap[task.sourceSheet.toLowerCase()] || task.sourceSheet;
       const swTable = this.db.getTable(swKey);

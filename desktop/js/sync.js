@@ -182,8 +182,8 @@ class SyncEngine {
     const isSwapSheet = sheet.toLowerCase().includes('swap') || tableKey.includes('swap');
 
     const isEquipmentSheet = [
-      'gloves', 'sleeves', 'blankets', 'macks', 'hv_testers', 'phasing_sets', 'aed', 'grounds', 'hot_sticks',
-      'glove_swaps', 'sleeve_swaps', 'blanket_swaps', 'mack_swaps', 'hv_tester_swaps', 'phasing_set_swaps', 'aed_swaps', 'ground_swaps', 'hot_stick_swaps',
+      'gloves', 'sleeves', 'blankets', 'macks', 'hv_testers', 'phasing_sets', 'aed', 'grounds', 'hot_sticks', 'fire_extinguishers', 'first_aid_kits',
+      'glove_swaps', 'sleeve_swaps', 'blanket_swaps', 'mack_swaps', 'hv_tester_swaps', 'phasing_set_swaps', 'aed_swaps', 'ground_swaps', 'hot_stick_swaps', 'fire_extinguisher_swaps',
       'gloves_history', 'sleeves_history', 'blankets_history', 'macks_history', 'hv_testers_history', 'phasing_sets_history', 'aed_history', 'grounds_history', 'hot_sticks_history'
     ].some(k => tableKey.includes(k) || sheet.toLowerCase().replace(/\s+/g, '_').includes(k));
 
@@ -1282,8 +1282,8 @@ class SyncEngine {
       let rowObj = (table && table.rows && conf.row) ? (table.rows.find(r => r._rowIdx === conf.row) || table.rows[conf.row - 2] || table.rows[conf.row - 1] || {}) : {};
 
       const isEquipmentSheet = [
-        'gloves', 'sleeves', 'blankets', 'macks', 'hv_testers', 'phasing_sets', 'aed', 'grounds', 'hot_sticks',
-        'glove_swaps', 'sleeve_swaps', 'blanket_swaps', 'mack_swaps', 'hv_tester_swaps', 'phasing_set_swaps', 'aed_swaps', 'ground_swaps', 'hot_stick_swaps',
+        'gloves', 'sleeves', 'blankets', 'macks', 'hv_testers', 'phasing_sets', 'aed', 'grounds', 'hot_sticks', 'fire_extinguishers', 'first_aid_kits',
+        'glove_swaps', 'sleeve_swaps', 'blanket_swaps', 'mack_swaps', 'hv_tester_swaps', 'phasing_set_swaps', 'aed_swaps', 'ground_swaps', 'hot_stick_swaps', 'fire_extinguisher_swaps',
         'gloves_history', 'sleeves_history', 'blankets_history', 'macks_history', 'hv_testers_history', 'phasing_sets_history', 'aed_history', 'grounds_history', 'hot_sticks_history'
       ].some(k => tableKey.includes(k) || sheetName.toLowerCase().replace(/\s+/g, '_').includes(k));
 
@@ -1963,6 +1963,7 @@ class SyncEngine {
     // 3. Companion sheets
     const tablesToPush = [
       'gloves', 'sleeves', 'blankets', 'macks', 'hv_testers', 'phasing_sets', 'aed', 'grounds', 'hot_sticks',
+      'fire_extinguishers', 'first_aid_kits',
       'employees', 'job_tracking', 'expiring_certs'
     ];
 

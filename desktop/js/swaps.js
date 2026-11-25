@@ -433,6 +433,10 @@ class SwapGenerationEngine {
     stats.hot_sticks = hotStickRes.swapCount;
     stats.totalPicked += hotStickRes.pickedCount;
 
+    // 7b. Generate Fire Extinguisher Swaps (annual test cycle & Needs Replacement / Missing)
+    const fireExtRes = await this.generateFireExtinguisherSwaps();
+    stats.fire_extinguishers = fireExtRes.swapCount;
+
     // 8. Run Upgrade Pick List pass
     await this.upgradePickListItems();
 
@@ -2987,6 +2991,71 @@ class SwapGenerationEngine {
 
     await this.db.replaceSwapTable(swapKey, rawGrid, headers, swapRows);
     return { swapCount: swapRows.length, pickedCount: pickedCount };
+  }
+
+  /**
+   * Generates Fire Extinguisher Swaps (1-year annual test cycle + Needs Replacement / Missing)
+   */
+  async generateFireExtinguisherSwaps() {
+    const swapKey = 'fire_extinguisher_swaps';
+    const invTable = this.db.getTable('fire_extinguishers');
+    if (!invTable || !invTable.rows) return { swapCount: 0, pickedCount: 0 };
+
+    const today = new Date();
+    const headers = [
+      'Crew Lead / Foreman', 'Vehicle / Equipment #', 'Size', 'Location', 'Test Date', 'Change Out Date', 'Days Left', 'Status', 'Notes'
+    ];
+
+    const rawGrid = [];
+    const swapRows = [];
+    const needingSwap = [];
+
+    invTable.rows.forEach(r => {
+      const vehNum = String(r['Vehicle / Equipment #'] || r['Item #'] || Object.entries(r).find(([k]) => k !== '_rowIdx')?.[1] || '').trim();
+      if (!vehNum) return;
+      const status = String(r['Status'] || '').trim();
+      const statusLower = status.toLowerCase();
+      if (['on shelf', 'in stock', 'available', 'destroyed', 'retired', 'not repairable'].includes(statusLower)) return;
+
+      const chgOut = this.parseDate(r['Change Out Date']);
+      const isNoDateOverdue = this.isNoDateOverdueRow(r);
+      const isFlaggedReplace = statusLower.includes('needs replacement') || statusLower === 'missing';
+      const assignedTo = String(r['Assigned To'] || 'Unassigned Crew').trim();
+
+      if (chgOut || isNoDateOverdue || isFlaggedReplace) {
+        const daysLeft = (isNoDateOverdue || isFlaggedReplace) ? -9999 : this.getDaysDifference(chgOut, today);
+        if (daysLeft < 32) {
+          needingSwap.push({
+            vehNum,
+            size: r['Size'] || '10 lb ABC',
+            location: r['Location'] || 'Helena',
+            testDate: this.isMissingDateValue(r['Test Date']) ? 'None' : (this.formatDate(r['Test Date']) || String(r['Test Date'] || '')),
+            changeOutDate: isNoDateOverdue ? 'OVERDUE (No Test Date)' : (chgOut ? this.formatDate(chgOut) : (isFlaggedReplace ? 'OVERDUE' : '')),
+            daysLeft: daysLeft < 0 ? 'OVERDUE' : daysLeft,
+            daysDiff: daysLeft,
+            assignedTo,
+            status: isFlaggedReplace ? status : (daysLeft < 0 ? 'OVERDUE — Annual Retest' : 'Due for Annual Retest'),
+            notes: String(r['Notes'] || '').trim()
+          });
+        }
+      }
+    });
+
+    needingSwap.sort((a, b) => a.daysDiff - b.daysDiff);
+
+    rawGrid.push(['Fire Extinguisher Swaps', '', '', '', '', '', '', '', '']);
+    rawGrid.push(headers);
+
+    needingSwap.forEach(it => {
+      const rowData = [
+        it.assignedTo, it.vehNum, it.size, it.location, it.testDate, it.changeOutDate, it.daysLeft, it.status, it.notes
+      ];
+      rawGrid.push(rowData);
+      swapRows.push(this.gridRowToObj(headers, rowData));
+    });
+
+    await this.db.replaceSwapTable(swapKey, rawGrid, headers, swapRows);
+    return { swapCount: swapRows.length, pickedCount: 0 };
   }
 
   /**

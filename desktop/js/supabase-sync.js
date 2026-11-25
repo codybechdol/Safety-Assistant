@@ -240,7 +240,8 @@ class SupabaseSyncEngine {
     const foremanEditPages = new Set(['tailgate-generator-view']);
     const foremanViewTabs = new Set([
       'employees', 'job_tracking', 'gloves', 'glove_swaps', 'sleeves', 'sleeve_swaps',
-      'blankets', 'blanket_swaps', 'macks', 'mack_swaps', 'grounds', 'ground_swaps', 'hot_sticks', 'hot_stick_swaps'
+      'blankets', 'blanket_swaps', 'macks', 'mack_swaps', 'grounds', 'ground_swaps', 'hot_sticks', 'hot_stick_swaps',
+      'fire_extinguishers', 'fire_extinguisher_swaps', 'first_aid_kits'
     ]);
 
     const ppeTechEditPages = new Set([
@@ -1061,7 +1062,7 @@ class SupabaseSyncEngine {
       // Swap sheets rely on rawGrid for location/foreman section headers; standard tables can rebuild rawGrid from headers + rows
       const keepRawGridTables = new Set([
         'glove_swaps', 'sleeve_swaps', 'blanket_swaps', 'mack_swaps',
-        'hv_tester_swaps', 'phasing_set_swaps', 'aed_swaps', 'ground_swaps', 'hot_stick_swaps',
+        'hv_tester_swaps', 'phasing_set_swaps', 'aed_swaps', 'ground_swaps', 'hot_stick_swaps', 'fire_extinguisher_swaps',
         'safety_compliance', 'training_tracking'
       ]);
 
@@ -1487,7 +1488,8 @@ class SupabaseSyncEngine {
         phasing_set_swaps: 'phasing_sets',
         aed_swaps: 'aed',
         ground_swaps: 'grounds',
-        hot_stick_swaps: 'hot_sticks'
+        hot_stick_swaps: 'hot_sticks',
+        fire_extinguisher_swaps: 'fire_extinguishers'
       };
       if (invMap[tableKey]) tablesToSync.add(invMap[tableKey]);
     }

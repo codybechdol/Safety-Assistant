@@ -1010,3 +1010,92 @@ html, body {
   color: #b91c1c;
   font-weight: 700;
 }
+
+.spec-pill.ok {
+  background: var(--success-soft);
+  border-color: #86efac;
+  color: var(--success-dark);
+  font-weight: 700;
+}
+
+.segmented-group.multi-wrap {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.seg-btn.warn-active.active {
+  background: #dc2626;
+  border-color: #dc2626;
+  color: #ffffff;
+}
+
+.seg-btn.amber-active.active {
+  background: #d97706;
+  border-color: #d97706;
+  color: #ffffff;
+}
+
+.seg-btn.ok-active.active {
+  background: #059669;
+  border-color: #059669;
+  color: #ffffff;
+}
+
+/* Searchable Employee Combobox (Packed For Delivery) */
+.packed-for-group {
+  background: #eff6ff;
+  border: 1.5px solid #bfdbfe;
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+}
+
+.emp-combobox-wrap {
+  position: relative;
+}
+
+.emp-suggest-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 40;
+  max-height: 240px;
+  overflow-y: auto;
+  background: #ffffff;
+  border: 1.5px solid var(--primary);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+  -webkit-overflow-scrolling: touch;
+}
+
+.emp-suggest-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
+  border: none;
+  border-bottom: 1px solid var(--border-light);
+  background: #ffffff;
+  color: var(--text-main);
+  font-size: 15px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.emp-suggest-item:last-child {
+  border-bottom: none;
+}
+
+.emp-suggest-item:hover,
+.emp-suggest-item.highlighted {
+  background: var(--primary-soft);
+  color: var(--primary-dark);
+}
+
+.emp-suggest-empty {
+  padding: 10px 12px;
+  font-size: 13px;
+  color: var(--text-muted);
+}

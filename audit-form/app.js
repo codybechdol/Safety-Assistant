@@ -98,6 +98,28 @@
       hasEmployee: false,
       idLabel: 'Stick # / Item #',
       idPlaceholder: 'e.g., HS-10'
+    },
+    {
+      key: 'fire_extinguishers',
+      label: 'Fire Extinguishers',
+      shortLabel: 'Fire Ext.',
+      icon: '🧯',
+      subtitle: 'Enter the fire extinguisher for each truck / piece of equipment or job shack (X###), its annual test date, and whether it needs replacement.',
+      hasEmployee: false,
+      fieldOnly: true,
+      idLabel: 'Vehicle / Equipment #',
+      idPlaceholder: 'e.g., 2108 or X104'
+    },
+    {
+      key: 'first_aid_kits',
+      label: '1st Aid Kits',
+      shortLabel: '1st Aid Kits',
+      icon: '🩹',
+      subtitle: 'Log any truck or job shack (X###) that needs a 1st Aid Kit replacement/restock — or confirm trucks are stocked.',
+      hasEmployee: false,
+      fieldOnly: true,
+      idLabel: 'Vehicle / Equipment #',
+      idPlaceholder: 'e.g., 2108 or X104'
     }
   ];
 
@@ -435,11 +457,12 @@
   function showSubmittedScreen(submittedAt, submittedBy, payloadObj) {
     const req = state.request || {};
     const parsed = normalizeDraft(payloadObj || state.draft);
-    const total = getTotalItemCount(parsed);
-    const breakdown = CATEGORIES.map((c) => {
+    const visibleCats = getVisibleCategories();
+    const total = visibleCats.reduce((sum, c) => sum + ((parsed.items[c.key] || []).length), 0);
+    const breakdown = visibleCats.map((c) => {
       const cnt = (parsed.items[c.key] || []).length;
       const isNone = parsed.noneConfirmed[c.key];
-      const badge = cnt > 0 ? `${cnt}` : (isNone ? 'None' : '0');
+      const badge = cnt > 0 ? `${cnt}` : (isNone ? (c.key === 'first_aid_kits' ? 'All Stocked ✓' : 'None') : '0');
       return `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #e2e8f0;">
         <span>${c.icon} ${c.label}</span>
         <strong>${badge}</strong>
@@ -586,10 +609,59 @@
     return out;
   }
 
+  function getVisibleCategories() {
+    return isShopStatusAudit() ? CATEGORIES.filter((c) => !c.fieldOnly) : CATEGORIES;
+  }
+
+  function getEnteredVehicleChips(currentCatKey) {
+    const seen = new Set();
+    const out = [];
+    // Prefer vehicles entered in the OTHER vehicle-based category first so foremen tap them effortlessly
+    const order = currentCatKey === 'first_aid_kits'
+      ? ['fire_extinguishers', 'first_aid_kits']
+      : ['first_aid_kits', 'fire_extinguishers'];
+    order.forEach((ck) => {
+      (state.draft.items[ck] || []).forEach((it) => {
+        const clean = String(it.itemNum || '').trim();
+        if (clean && !seen.has(clean.toLowerCase())) {
+          seen.add(clean.toLowerCase());
+          out.push(clean);
+        }
+      });
+    });
+    return out;
+  }
+
+  function normalizeVehicleEntry(rawInput, unitType) {
+    const raw = String(rawInput || '').trim();
+    const jobNum = String((state.request && state.request.job_number) || '').trim();
+
+    if (unitType === 'job_shack') {
+      if (!raw || /^job\s*shack$/i.test(raw)) {
+        return jobNum ? `Job Shack (${jobNum})` : 'Job Shack';
+      }
+      // X### shack numbers (e.g. X9, X104, Unit X104, Shack X104)
+      const xm = raw.match(/^(?:unit|shack|job\s*shack|trailer|#)?\s*#?\s*(x\d+[a-z]?)$/i);
+      if (xm) return xm[1].toUpperCase();
+      // If user typed a custom shack label without job #, attach job # so crews don't collide
+      if (jobNum && !raw.includes(jobNum)) return `${raw} (${jobNum})`;
+      return raw;
+    }
+
+    // Truck / Equipment: strip redundant "Unit" / "Truck" / "#" prefix if followed by unit number (e.g. "Unit 2108" -> "2108", "Unit X104" -> "X104")
+    const tm = raw.match(/^(?:unit|truck|veh(?:icle)?|equip(?:ment)?|rig|t-)?\s*#?\s*(x?\d+[a-z]?)$/i);
+    if (tm) return tm[1].toUpperCase();
+    return raw;
+  }
+
   function renderCategoryTabs() {
     const container = document.getElementById('category-tabs');
     if (!container) return;
-    container.innerHTML = CATEGORIES.map((c) => {
+    const visibleCats = getVisibleCategories();
+    if (!visibleCats.some((c) => c.key === state.activeCategory)) {
+      state.activeCategory = visibleCats[0].key;
+    }
+    container.innerHTML = visibleCats.map((c) => {
       const count = (state.draft.items[c.key] || []).length;
       const isNone = state.draft.noneConfirmed[c.key] && count === 0;
       const isActive = state.activeCategory === c.key;
@@ -599,7 +671,7 @@
         count > 0 ? 'has-items' : '',
         isNone ? 'is-none' : ''
       ].filter(Boolean).join(' ');
-      const badgeText = count > 0 ? String(count) : (isNone ? 'None ✓' : '0');
+      const badgeText = count > 0 ? String(count) : (isNone ? (c.key === 'first_aid_kits' ? 'All OK ✓' : 'None ✓') : '0');
       return `<button type="button" class="${cls}" data-cat="${c.key}">
         <span>${c.icon}</span>
         <span>${escapeHtml(c.shortLabel)}</span>
@@ -621,16 +693,36 @@
   }
 
   function renderActiveCategory(prefill = null) {
+    const visibleCats = getVisibleCategories();
+    if (!visibleCats.some((c) => c.key === state.activeCategory)) {
+      state.activeCategory = visibleCats[0].key;
+    }
     const cat = CATEGORY_MAP[state.activeCategory];
     if (!cat) return;
 
     renderCategoryTabs();
 
     document.getElementById('cat-title').textContent = `${cat.icon} ${cat.label}`;
-    document.getElementById('cat-subtitle').textContent = cat.subtitle;
+    let subtitleText = cat.subtitle;
+    if (isPackedForDeliveryAudit()) {
+      subtitleText = `Enter each ${cat.label.toLowerCase()} item physically packed for delivery and who it is packed for.`;
+    } else if (isShopStatusAudit() && (cat.key === 'gloves' || cat.key === 'sleeves')) {
+      subtitleText = `Enter each ${cat.label.toLowerCase()} pair currently in ${(state.request && state.request.foreman_name) || 'this shop pool'}.`;
+    }
+    document.getElementById('cat-subtitle').textContent = subtitleText;
 
     const noneCheckbox = document.getElementById('cat-none-checkbox');
     const noneWrap = document.getElementById('none-toggle-wrap');
+    const noneLabelSpan = noneWrap ? noneWrap.querySelector('span') : null;
+    if (noneLabelSpan) {
+      if (cat.key === 'first_aid_kits') {
+        noneLabelSpan.textContent = 'All Trucks & Shacks Stocked (None Needed)';
+      } else if (isShopStatusAudit()) {
+        noneLabelSpan.textContent = 'None in Pool';
+      } else {
+        noneLabelSpan.textContent = 'None on Crew';
+      }
+    }
     const items = state.draft.items[cat.key] || [];
     const isNone = Boolean(state.draft.noneConfirmed[cat.key]) && items.length === 0;
     noneCheckbox.checked = isNone;
@@ -664,11 +756,88 @@
     return jn.startsWith('SHOP-');
   }
 
+  function isPackedForDeliveryAudit() {
+    const jn = String((state.request && state.request.job_number) || '').trim().toUpperCase();
+    const fn = String((state.request && state.request.foreman_name) || '').trim().toLowerCase();
+    return jn === 'SHOP-PACKED-DELIVERY' || fn === 'packed for delivery';
+  }
+
+  function getPackedForEmployees() {
+    const ignore = new Set([
+      'packed for delivery', 'ready for delivery', 'on shelf',
+      'in testing', 'packed for testing', 'ready for test'
+    ]);
+    const seen = new Set();
+    const out = [];
+    const addName = (name) => {
+      const clean = String(name || '').trim();
+      if (!clean || ignore.has(clean.toLowerCase())) return;
+      if (!seen.has(clean.toLowerCase())) {
+        seen.add(clean.toLowerCase());
+        out.push(clean);
+      }
+    };
+    const reqList = (state.request && Array.isArray(state.request.crew_employees))
+      ? state.request.crew_employees
+      : [];
+    reqList.forEach(addName);
+    CATEGORIES.forEach((c) => {
+      (state.draft.items[c.key] || []).forEach((it) => {
+        if (it.packedFor) addName(it.packedFor);
+      });
+    });
+    out.sort((a, b) => a.localeCompare(b));
+    return out;
+  }
+
+  function getRecentPackedForChips() {
+    const seen = new Set();
+    const out = [];
+    // Prioritize current category first, then other categories
+    const order = [state.activeCategory, ...CATEGORIES.map((c) => c.key).filter((k) => k !== state.activeCategory)];
+    order.forEach((ck) => {
+      (state.draft.items[ck] || []).forEach((it) => {
+        const clean = String(it.packedFor || '').trim();
+        if (clean && !seen.has(clean.toLowerCase()) && out.length < 10) {
+          seen.add(clean.toLowerCase());
+          out.push(clean);
+        }
+      });
+    });
+    return out;
+  }
+
+  function renderPackedForField(currentVal) {
+    const cleanVal = String(currentVal || '').trim();
+    const recentChips = getRecentPackedForChips();
+    return `
+      <div class="field-group full-width packed-for-group">
+        <label class="field-label" for="f-packed-for">
+          <span>🚚 Packed For (Employee Name) <span class="field-req">*</span></span>
+          <span class="field-opt">Search or type employee</span>
+        </label>
+        <div class="emp-combobox-wrap">
+          <input type="text" id="f-packed-for" class="field-input"
+            placeholder="Start typing employee name..."
+            value="${escapeHtml(cleanVal)}"
+            autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false">
+          <div id="f-packed-for-list" class="emp-suggest-list hidden" role="listbox"></div>
+        </div>
+        ${recentChips.length > 0 ? `
+          <div class="chip-row" data-packed-chips="true" style="margin-top:6px;">
+            ${recentChips.map((n) => `<button type="button" class="quick-chip ${cleanVal.toLowerCase() === n.toLowerCase() ? 'selected' : ''}" data-packed-val="${escapeHtml(n)}">👤 ${escapeHtml(n)}</button>`).join('')}
+          </div>
+        ` : ''}
+      </div>
+    `;
+  }
+
   function buildDynamicFields(catKey, vals = {}) {
     const container = document.getElementById('dynamic-fields');
     if (!container) return;
 
     const isShop = isShopStatusAudit();
+    const isPacked = isPackedForDeliveryAudit();
     let html = '';
 
     if (catKey === 'gloves' || catKey === 'sleeves') {
@@ -688,9 +857,7 @@
       const curSize = vals.size || '';
       const isCustomSize = Boolean(!isGlove && curSize && !sizeOptions.includes(curSize));
 
-      const notesPlaceholder = (isShop && String(state.request?.job_number || '').toUpperCase() === 'SHOP-PACKED-DELIVERY')
-        ? 'Optional note (e.g., Picked for employee)'
-        : 'Optional note';
+      const notesPlaceholder = 'Optional note';
 
       html = `
         ${isShop ? '' : `
@@ -1080,6 +1247,144 @@
           <input type="text" id="f-notes" class="field-input" placeholder="Optional note" value="${escapeHtml(vals.notes || '')}">
         </div>
       `;
+    } else if (catKey === 'fire_extinguishers') {
+      const unitType = vals.unitType || (/^x\d+/i.test(String(vals.itemNum || '')) || /job\s*shack/i.test(String(vals.itemNum || '')) ? 'job_shack' : 'truck');
+      const cond = vals.condition || 'In Service';
+      const sizes = ['5 lb ABC', '10 lb ABC', '20 lb ABC'];
+      const curSize = vals.size || '10 lb ABC';
+      const isCustomSize = Boolean(curSize && !sizes.includes(curSize));
+      const vehChips = getEnteredVehicleChips('fire_extinguishers');
+      const showReason = cond !== 'In Service';
+      const isMissing = cond === 'Missing';
+      const jobNum = String((state.request && state.request.job_number) || '').trim();
+
+      html = `
+        <div class="field-group full-width">
+          <label class="field-label"><span>Equipment / Location Type <span class="field-req">*</span></span></label>
+          <input type="hidden" id="f-unit-type" value="${escapeHtml(unitType)}">
+          <div class="segmented-group" data-seg-target="f-unit-type">
+            <button type="button" class="seg-btn ${unitType === 'truck' ? 'active' : ''}" data-seg-val="truck">🚛 Truck / Equipment</button>
+            <button type="button" class="seg-btn ${unitType === 'job_shack' ? 'active' : ''}" data-seg-val="job_shack">🏠 Job Shack (X###)</button>
+          </div>
+        </div>
+
+        <div class="field-group">
+          <label class="field-label" for="f-item-num">
+            <span id="lbl-veh-num">${unitType === 'job_shack' ? 'Job Shack # (X###)' : 'Vehicle / Equipment #'} <span class="field-req">*</span></span>
+          </label>
+          <input type="text" id="f-item-num" class="field-input"
+            placeholder="${unitType === 'job_shack' ? `e.g., X104 (or leave blank for Job Shack${jobNum ? ' ' + jobNum : ''})` : 'e.g., 2108, 1905'}"
+            value="${escapeHtml(vals.itemNum || '')}" autocapitalize="characters">
+          <div class="field-hint" id="hint-veh-num">${unitType === 'job_shack' ? 'Enter shack # (e.g. X104) or leave blank to tag with your Job #' : '1 fire extinguisher per truck / piece of equipment'}</div>
+          ${vehChips.length > 0 ? `
+            <div class="chip-row" data-veh-chips="true" style="margin-top:6px;">
+              ${vehChips.map((v) => `<button type="button" class="quick-chip" data-veh-val="${escapeHtml(v)}">${escapeHtml(v)}</button>`).join('')}
+            </div>
+          ` : ''}
+        </div>
+
+        <div class="field-group">
+          <label class="field-label" for="f-size-select">
+            <span>Extinguisher Size <span class="field-req">*</span></span>
+          </label>
+          <select id="f-size-select" class="field-select">
+            ${sizes.map((s) => `<option value="${s}" ${curSize === s ? 'selected' : ''}>${s}</option>`).join('')}
+            <option value="__OTHER__" ${isCustomSize ? 'selected' : ''}>Other...</option>
+          </select>
+          <input type="text" id="f-size-custom" class="field-input ${isCustomSize ? '' : 'hidden'}"
+            placeholder="Enter extinguisher size/type" value="${isCustomSize ? escapeHtml(curSize) : ''}">
+        </div>
+
+        <div class="field-group full-width">
+          <label class="field-label"><span>Condition / Replacement Needed <span class="field-req">*</span></span></label>
+          <input type="hidden" id="f-condition" value="${escapeHtml(cond)}">
+          <div class="segmented-group" data-seg-target="f-condition">
+            <button type="button" class="seg-btn ok-active ${cond === 'In Service' ? 'active' : ''}" data-seg-val="In Service">✅ Good</button>
+            <button type="button" class="seg-btn amber-active ${cond === 'Needs Replacement' ? 'active' : ''}" data-seg-val="Needs Replacement">🔄 Needs Replacement</button>
+            <button type="button" class="seg-btn warn-active ${cond === 'Missing' ? 'active' : ''}" data-seg-val="Missing">❌ Missing</button>
+          </div>
+        </div>
+
+        <div class="field-group full-width ${showReason ? '' : 'hidden'}" id="grp-fe-reason">
+          <label class="field-label" for="f-reason">
+            <span>Reason / Details</span>
+            <span class="field-opt">Tap a reason or type below</span>
+          </label>
+          <input type="text" id="f-reason" class="field-input" placeholder="e.g., Expired, Discharged, Low pressure, Missing from truck"
+            value="${escapeHtml(vals.reason || '')}">
+          <div class="chip-row" data-chip-target="f-reason">
+            ${['Expired / Past Due', 'Discharged / Used', 'Low Pressure (Red)', 'Damaged / Pin Missing', 'No Inspection Tag', 'Missing from Truck'].map((v) => `<button type="button" class="quick-chip" data-chip-val="${escapeHtml(v)}">${escapeHtml(v)}</button>`).join('')}
+          </div>
+        </div>
+
+        <div class="${isMissing ? 'hidden' : ''}" id="grp-fe-test-date" style="display:contents;">
+          ${renderDateWithNoneField('f-test-date', 'Test / Inspection Date (Annual)', vals.testDate)}
+        </div>
+
+        <div class="field-group full-width">
+          <label class="field-label" for="f-notes">
+            <span>Notes</span>
+            <span class="field-opt">Optional</span>
+          </label>
+          <input type="text" id="f-notes" class="field-input" placeholder="Optional note" value="${escapeHtml(vals.notes || '')}">
+        </div>
+      `;
+    } else if (catKey === 'first_aid_kits') {
+      const unitType = vals.unitType || (/^x\d+/i.test(String(vals.itemNum || '')) || /job\s*shack/i.test(String(vals.itemNum || '')) ? 'job_shack' : 'truck');
+      const kitStatus = vals.condition || 'Needs Replacement';
+      const vehChips = getEnteredVehicleChips('first_aid_kits');
+      const jobNum = String((state.request && state.request.job_number) || '').trim();
+
+      html = `
+        <div class="field-group full-width">
+          <label class="field-label"><span>Equipment / Location Type <span class="field-req">*</span></span></label>
+          <input type="hidden" id="f-unit-type" value="${escapeHtml(unitType)}">
+          <div class="segmented-group" data-seg-target="f-unit-type">
+            <button type="button" class="seg-btn ${unitType === 'truck' ? 'active' : ''}" data-seg-val="truck">🚛 Truck / Equipment</button>
+            <button type="button" class="seg-btn ${unitType === 'job_shack' ? 'active' : ''}" data-seg-val="job_shack">🏠 Job Shack (X###)</button>
+          </div>
+        </div>
+
+        <div class="field-group full-width">
+          <label class="field-label" for="f-item-num">
+            <span id="lbl-veh-num">${unitType === 'job_shack' ? 'Job Shack # (X###)' : 'Vehicle / Equipment #'} <span class="field-req">*</span></span>
+          </label>
+          <input type="text" id="f-item-num" class="field-input"
+            placeholder="${unitType === 'job_shack' ? `e.g., X104 (or leave blank for Job Shack${jobNum ? ' ' + jobNum : ''})` : 'e.g., 2108, 1905'}"
+            value="${escapeHtml(vals.itemNum || '')}" autocapitalize="characters">
+          <div class="field-hint" id="hint-veh-num">${vehChips.length > 0 ? 'Tap a truck/shack # you already entered below, or type a new one:' : 'Enter the truck # or job shack # (X###) that has or needs a 1st Aid Kit'}</div>
+          ${vehChips.length > 0 ? `
+            <div class="chip-row" data-veh-chips="true" style="margin-top:6px;">
+              ${vehChips.map((v) => `<button type="button" class="quick-chip" data-veh-val="${escapeHtml(v)}">${escapeHtml(v)}</button>`).join('')}
+            </div>
+          ` : ''}
+        </div>
+
+        <div class="field-group full-width">
+          <label class="field-label"><span>1st Aid Kit Status <span class="field-req">*</span></span></label>
+          <input type="hidden" id="f-condition" value="${escapeHtml(kitStatus)}">
+          <div class="segmented-group multi-wrap" data-seg-target="f-condition">
+            <button type="button" class="seg-btn ok-active ${kitStatus === 'Stocked / OK' ? 'active' : ''}" data-seg-val="Stocked / OK">✅ Stocked / OK</button>
+            <button type="button" class="seg-btn amber-active ${kitStatus === 'Needs Restock' ? 'active' : ''}" data-seg-val="Needs Restock">🩹 Needs Restock</button>
+            <button type="button" class="seg-btn warn-active ${kitStatus === 'Needs Replacement' ? 'active' : ''}" data-seg-val="Needs Replacement">🔄 Needs Replacement</button>
+            <button type="button" class="seg-btn warn-active ${kitStatus === 'Missing' ? 'active' : ''}" data-seg-val="Missing">❌ Missing Kit</button>
+          </div>
+        </div>
+
+        <div class="field-group full-width">
+          <label class="field-label" for="f-notes">
+            <span>Notes</span>
+            <span class="field-opt">Optional (e.g., low bandages, broken latch)</span>
+          </label>
+          <input type="text" id="f-notes" class="field-input" placeholder="Optional details" value="${escapeHtml(vals.notes || '')}">
+        </div>
+      `;
+    }
+
+    if (isPacked) {
+      const existingPackedFor = vals.packedFor ||
+        (vals.employeeName && !/^(packed|ready)\s+for\s+delivery$/i.test(String(vals.employeeName).trim()) ? vals.employeeName : '');
+      html = renderPackedForField(existingPackedFor) + html;
     }
 
     container.innerHTML = html;
@@ -1087,6 +1392,94 @@
   }
 
   function wireDynamicFieldBehaviors(catKey) {
+    // Searchable "Packed For (Employee Name)" combobox for Packed For Delivery audits
+    const packedInput = document.getElementById('f-packed-for');
+    const packedList = document.getElementById('f-packed-for-list');
+    if (packedInput && packedList) {
+      let highlightedIdx = -1;
+      let currentMatches = [];
+
+      const closeSuggest = () => {
+        packedList.classList.add('hidden');
+        packedInput.setAttribute('aria-expanded', 'false');
+        highlightedIdx = -1;
+      };
+
+      const renderSuggest = (query) => {
+        const allEmps = getPackedForEmployees();
+        const q = String(query || '').trim().toLowerCase();
+        if (allEmps.length === 0) {
+          closeSuggest();
+          return;
+        }
+        const starts = [];
+        const contains = [];
+        allEmps.forEach((name) => {
+          const nl = name.toLowerCase();
+          if (!q || nl.startsWith(q)) starts.push(name);
+          else if (nl.includes(q)) contains.push(name);
+        });
+        currentMatches = [...starts, ...contains].slice(0, 25);
+        highlightedIdx = -1;
+
+        if (currentMatches.length === 0) {
+          packedList.innerHTML = `<div class="emp-suggest-empty">No directory match — press Add to use "${escapeHtml(query.trim())}"</div>`;
+        } else {
+          packedList.innerHTML = currentMatches.map((name, idx) =>
+            `<button type="button" class="emp-suggest-item" role="option" data-emp-idx="${idx}" data-emp-name="${escapeHtml(name)}">${escapeHtml(name)}</button>`
+          ).join('');
+          packedList.querySelectorAll('.emp-suggest-item').forEach((btn) => {
+            btn.addEventListener('mousedown', (e) => {
+              e.preventDefault();
+              packedInput.value = btn.dataset.empName || '';
+              closeSuggest();
+              document.querySelectorAll('[data-packed-chips="true"] .quick-chip').forEach((c) => {
+                c.classList.toggle('selected', (c.dataset.packedVal || '').toLowerCase() === packedInput.value.toLowerCase());
+              });
+            });
+          });
+        }
+        packedList.classList.remove('hidden');
+        packedInput.setAttribute('aria-expanded', 'true');
+      };
+
+      packedInput.addEventListener('focus', () => renderSuggest(packedInput.value));
+      packedInput.addEventListener('input', () => renderSuggest(packedInput.value));
+      packedInput.addEventListener('blur', () => {
+        setTimeout(closeSuggest, 140);
+      });
+      packedInput.addEventListener('keydown', (e) => {
+        if (packedList.classList.contains('hidden')) return;
+        const btns = packedList.querySelectorAll('.emp-suggest-item');
+        if (e.key === 'ArrowDown' && btns.length > 0) {
+          e.preventDefault();
+          highlightedIdx = (highlightedIdx + 1) % btns.length;
+          btns.forEach((b, i) => b.classList.toggle('highlighted', i === highlightedIdx));
+          btns[highlightedIdx].scrollIntoView({ block: 'nearest' });
+        } else if (e.key === 'ArrowUp' && btns.length > 0) {
+          e.preventDefault();
+          highlightedIdx = highlightedIdx <= 0 ? btns.length - 1 : highlightedIdx - 1;
+          btns.forEach((b, i) => b.classList.toggle('highlighted', i === highlightedIdx));
+          btns[highlightedIdx].scrollIntoView({ block: 'nearest' });
+        } else if (e.key === 'Enter' && highlightedIdx >= 0 && btns[highlightedIdx]) {
+          e.preventDefault();
+          packedInput.value = btns[highlightedIdx].dataset.empName || '';
+          closeSuggest();
+        } else if (e.key === 'Escape') {
+          closeSuggest();
+        }
+      });
+
+      document.querySelectorAll('[data-packed-chips="true"] .quick-chip').forEach((chip) => {
+        chip.addEventListener('click', () => {
+          packedInput.value = chip.dataset.packedVal || '';
+          closeSuggest();
+          document.querySelectorAll('[data-packed-chips="true"] .quick-chip').forEach((c) => c.classList.remove('selected'));
+          chip.classList.add('selected');
+        });
+      });
+    }
+
     // Custom "Other" toggles
     const togglePairs = [
       ['f-employee-select', 'f-employee-custom'],
@@ -1120,7 +1513,27 @@
       });
     });
 
-    // Segmented buttons (Blanket Regular/Split, Ground OH/UG)
+    // Cross-tab Vehicle / Job Shack quick chips
+    document.querySelectorAll('[data-veh-chips="true"] .quick-chip').forEach((chip) => {
+      chip.addEventListener('click', () => {
+        const vehVal = chip.dataset.vehVal || '';
+        const itemInput = document.getElementById('f-item-num');
+        if (itemInput) itemInput.value = vehVal;
+        const unitTypeHidden = document.getElementById('f-unit-type');
+        if (unitTypeHidden) {
+          const isShack = /^x\d+/i.test(vehVal) || /job\s*shack/i.test(vehVal);
+          const nextType = isShack ? 'job_shack' : 'truck';
+          unitTypeHidden.value = nextType;
+          document.querySelectorAll('[data-seg-target="f-unit-type"] .seg-btn').forEach((b) => {
+            b.classList.toggle('active', b.dataset.segVal === nextType);
+          });
+        }
+        document.querySelectorAll('[data-veh-chips="true"] .quick-chip').forEach((c) => c.classList.remove('selected'));
+        chip.classList.add('selected');
+      });
+    });
+
+    // Segmented buttons (Blanket Regular/Split, Ground OH/UG, Unit Type, Condition)
     document.querySelectorAll('.segmented-group').forEach((group) => {
       const targetId = group.dataset.segTarget;
       const hiddenInput = document.getElementById(targetId);
@@ -1140,9 +1553,42 @@
               lenInput.value = "6'";
             }
           }
+          if ((catKey === 'fire_extinguishers' || catKey === 'first_aid_kits') && targetId === 'f-unit-type') {
+            const lbl = document.getElementById('lbl-veh-num');
+            const inp = document.getElementById('f-item-num');
+            const jobNum = String((state.request && state.request.job_number) || '').trim();
+            if (lbl) lbl.innerHTML = `${val === 'job_shack' ? 'Job Shack # (X###)' : 'Vehicle / Equipment #'} <span class="field-req">*</span>`;
+            if (inp) inp.placeholder = val === 'job_shack' ? `e.g., X104 (or leave blank for Job Shack${jobNum ? ' ' + jobNum : ''})` : 'e.g., 2108, 1905';
+          }
+          if (catKey === 'fire_extinguishers' && targetId === 'f-condition') {
+            const reasonGrp = document.getElementById('grp-fe-reason');
+            const testDateGrp = document.getElementById('grp-fe-test-date');
+            if (reasonGrp) reasonGrp.classList.toggle('hidden', val === 'In Service');
+            if (testDateGrp) {
+              testDateGrp.classList.toggle('hidden', val === 'Missing');
+              testDateGrp.style.display = val === 'Missing' ? 'none' : 'contents';
+            }
+          }
         });
       });
     });
+
+    // Auto-switch Unit Type toggle when foreman types X### in Vehicle #
+    if (catKey === 'fire_extinguishers' || catKey === 'first_aid_kits') {
+      const itemInput = document.getElementById('f-item-num');
+      const unitTypeHidden = document.getElementById('f-unit-type');
+      if (itemInput && unitTypeHidden) {
+        itemInput.addEventListener('input', () => {
+          const v = itemInput.value.trim();
+          if (/^x\d+/i.test(v) || /^job\s*shack/i.test(v)) {
+            unitTypeHidden.value = 'job_shack';
+            document.querySelectorAll('[data-seg-target="f-unit-type"] .seg-btn').forEach((b) => {
+              b.classList.toggle('active', b.dataset.segVal === 'job_shack');
+            });
+          }
+        });
+      }
+    }
 
     // Date "None (No Sticker)" toggles
     document.querySelectorAll('.date-none-btn').forEach((btn) => {
@@ -1200,14 +1646,24 @@
       return val(id);
     };
 
+    const isVehicleBased = (catKey === 'fire_extinguishers' || catKey === 'first_aid_kits');
     let itemNum = val('f-item-num');
-    if (!itemNum) {
+    let unitType = isVehicleBased ? (val('f-unit-type') || 'truck') : '';
+    if (isVehicleBased) {
+      if (!itemNum && unitType === 'job_shack') {
+        itemNum = normalizeVehicleEntry('', 'job_shack');
+      } else if (!itemNum) {
+        return { error: 'Please enter the Truck / Equipment # (or select Job Shack).' };
+      } else {
+        itemNum = normalizeVehicleEntry(itemNum, unitType);
+      }
+    } else if (!itemNum) {
       return { error: `Please enter the ${CATEGORY_MAP[catKey].idLabel} (or type NA if unnumbered).` };
     }
 
     // Auto-number plain NA / N/A / na / n/a into NA1, NA2, NA3... if the foreman didn't add a digit
     let autoNumberedFrom = '';
-    if (isBareUnnumberedNA(itemNum)) {
+    if (!isVehicleBased && isBareUnnumberedNA(itemNum)) {
       autoNumberedFrom = itemNum;
       itemNum = getNextAutoNAId(catKey, state.editingId);
     }
@@ -1220,11 +1676,13 @@
       normKey(it.itemNum) === normKey(itemNum)
     );
     if (dup) {
-      const isNAEntry = extractUnnumberedNAIndex(itemNum) !== null;
+      const isNAEntry = !isVehicleBased && extractUnnumberedNAIndex(itemNum) !== null;
       return {
-        error: isNAEntry
-          ? `Item "${itemNum}" is already in your ${CATEGORY_MAP[catKey].label} list. Enter the next number or just type NA to auto-number.`
-          : `Item "${itemNum}" is already in your ${CATEGORY_MAP[catKey].label} list. Edit the existing entry instead.`
+        error: isVehicleBased
+          ? `Vehicle / Shack "${itemNum}" is already in your ${CATEGORY_MAP[catKey].label} list. Edit the existing entry instead.`
+          : (isNAEntry
+            ? `Item "${itemNum}" is already in your ${CATEGORY_MAP[catKey].label} list. Enter the next number or just type NA to auto-number.`
+            : `Item "${itemNum}" is already in your ${CATEGORY_MAP[catKey].label} list. Edit the existing entry instead.`)
       };
     }
 
@@ -1234,9 +1692,19 @@
       notes: val('f-notes')
     };
 
+    if (isPackedForDeliveryAudit()) {
+      const packedFor = val('f-packed-for');
+      if (!packedFor) {
+        return { error: 'Please enter who this item is packed for (Employee Name).' };
+      }
+      entry.packedFor = packedFor;
+    }
+
     if (catKey === 'gloves' || catKey === 'sleeves') {
       let employeeName = '';
-      if (isShopStatusAudit()) {
+      if (isPackedForDeliveryAudit()) {
+        employeeName = entry.packedFor;
+      } else if (isShopStatusAudit()) {
         employeeName = (state.request && state.request.foreman_name) || 'On Shelf';
       } else {
         const empSel = val('f-employee-select');
@@ -1317,6 +1785,30 @@
       entry.type = type;
       entry.length = length;
       entry.testDate = testDate;
+    } else if (catKey === 'fire_extinguishers') {
+      const sizeSel = val('f-size-select');
+      const size = sizeSel === '__OTHER__' ? val('f-size-custom') : sizeSel;
+      if (!size) return { error: 'Please select or enter the extinguisher size.' };
+      const condition = val('f-condition') || 'In Service';
+      const reason = val('f-reason');
+      let testDate = '';
+      if (condition !== 'Missing') {
+        testDate = readDateOrNone('f-test-date');
+        if (!testDate) return { error: 'Please enter the annual test date or tap "None (No Sticker)".' };
+      } else {
+        testDate = 'None';
+      }
+      entry.unitType = unitType;
+      entry.size = size;
+      entry.condition = condition;
+      entry.needsReplacement = (condition !== 'In Service');
+      entry.reason = condition !== 'In Service' ? (reason || (condition === 'Missing' ? 'Missing from vehicle' : 'Needs replacement')) : '';
+      entry.testDate = testDate;
+    } else if (catKey === 'first_aid_kits') {
+      const condition = val('f-condition') || 'Needs Replacement';
+      entry.unitType = unitType;
+      entry.condition = condition;
+      entry.needsReplacement = (condition !== 'Stocked / OK');
     }
 
     return { entry, autoNumberedFrom };
@@ -1364,6 +1856,7 @@
       nextPrefill.itemNum = '';
       if (nextPrefill.eslId) nextPrefill.eslId = '';
       if (nextPrefill.serialNum) nextPrefill.serialNum = '';
+      if (nextPrefill.reason) nextPrefill.reason = '';
       nextPrefill.notes = '';
     }
 
@@ -1387,6 +1880,8 @@
       }
     };
     const pushStd = (text) => pills.push({ text, warn: false });
+    const pushWarn = (text) => pills.push({ text, warn: true });
+    const pushOk = (text) => pills.push({ text, ok: true });
 
     if (catKey === 'gloves' || catKey === 'sleeves') {
       if (it.eslId) pushStd(`ESL: ${it.eslId}`);
@@ -1422,18 +1917,37 @@
       if (it.type) pushStd(it.type);
       if (it.length) pushStd(it.length);
       pushDatePill('Tested', it.testDate);
+    } else if (catKey === 'fire_extinguishers') {
+      if (it.unitType === 'job_shack') pushStd('🏠 Job Shack');
+      if (it.size) pushStd(it.size);
+      if (it.condition && it.condition !== 'In Service') {
+        pushWarn(`🚨 ${it.condition}${it.reason ? `: ${it.reason}` : ''}`);
+      } else {
+        pushOk('✅ Good');
+      }
+      if (it.condition !== 'Missing') pushDatePill('Tested', it.testDate);
+    } else if (catKey === 'first_aid_kits') {
+      if (it.unitType === 'job_shack') pushStd('🏠 Job Shack');
+      if (it.condition && it.condition !== 'Stocked / OK') {
+        pushWarn(`🚨 ${it.condition}`);
+      } else {
+        pushOk('✅ Stocked / OK');
+      }
     }
     return pills;
   }
 
   function renderItemCard(catKey, it) {
     const pills = buildItemSpecPills(catKey, it)
-      .map((p) => `<span class="spec-pill${p.warn ? ' warn' : ''}">${escapeHtml(p.text)}</span>`)
+      .map((p) => `<span class="spec-pill${p.warn ? ' warn' : (p.ok ? ' ok' : '')}">${escapeHtml(p.text)}</span>`)
       .join('');
+    const titlePrefix = (catKey === 'fire_extinguishers' || catKey === 'first_aid_kits')
+      ? (/^job\s*shack/i.test(String(it.itemNum || '')) ? '🏠 ' : '🚛 Unit ')
+      : '#';
     return `
       <div class="item-card" data-item-id="${escapeHtml(it.id)}">
         <div class="item-card-main">
-          <div class="item-card-title">#${escapeHtml(it.itemNum)}</div>
+          <div class="item-card-title">${titlePrefix}${escapeHtml(it.itemNum)}</div>
           <div class="item-card-specs">${pills}</div>
           ${it.notes ? `<div class="item-card-notes">Note: ${escapeHtml(it.notes)}</div>` : ''}
         </div>
@@ -1458,15 +1972,32 @@
 
     if (items.length === 0) {
       if (state.draft.noneConfirmed[catKey]) {
-        listEl.innerHTML = `<div class="empty-list confirmed-none">✓ Marked as "None on Crew" for ${escapeHtml(cat.label)}.</div>`;
+        const msg = catKey === 'first_aid_kits'
+          ? '✓ Marked as "All Trucks & Shacks Stocked (None Needed)".'
+          : `✓ Marked as "${isShopStatusAudit() ? 'None in Pool' : 'None on Crew'}" for ${escapeHtml(cat.label)}.`;
+        listEl.innerHTML = `<div class="empty-list confirmed-none">${msg}</div>`;
       } else {
-        listEl.innerHTML = `<div class="empty-list">No ${escapeHtml(cat.label.toLowerCase())} entered yet. Add items above or check "None on Crew".</div>`;
+        const emptyHint = catKey === 'first_aid_kits'
+          ? 'No 1st Aid Kit entries yet. Add any truck/shack needing a kit or check "All Trucks & Shacks Stocked" above.'
+          : `No ${escapeHtml(cat.label.toLowerCase())} entered yet. Add items above or check "${isShopStatusAudit() ? 'None in Pool' : 'None on Crew'}".`;
+        listEl.innerHTML = `<div class="empty-list">${emptyHint}</div>`;
       }
       return;
     }
 
     let html = '';
-    if (cat.hasEmployee && !isShopStatusAudit()) {
+    if (isPackedForDeliveryAudit()) {
+      const grouped = new Map();
+      items.forEach((it) => {
+        const emp = it.packedFor || it.employeeName || 'Unassigned';
+        if (!grouped.has(emp)) grouped.set(emp, []);
+        grouped.get(emp).push(it);
+      });
+      grouped.forEach((empItems, empName) => {
+        html += `<div class="emp-group-header">🚚 Packed For: ${escapeHtml(empName)} (${empItems.length})</div>`;
+        html += empItems.map((it) => renderItemCard(catKey, it)).join('');
+      });
+    } else if (cat.hasEmployee && !isShopStatusAudit()) {
       const grouped = new Map();
       items.forEach((it) => {
         const emp = it.employeeName || 'Unassigned';
@@ -1520,16 +2051,17 @@
     const body = document.getElementById('review-modal-body');
     if (!modal || !body) return;
 
-    const total = getTotalItemCount();
-    const uncheckedEmpty = CATEGORIES.filter((c) =>
+    const visibleCats = getVisibleCategories();
+    const total = visibleCats.reduce((sum, c) => sum + ((state.draft.items[c.key] || []).length), 0);
+    const uncheckedEmpty = visibleCats.filter((c) =>
       (state.draft.items[c.key] || []).length === 0 && !state.draft.noneConfirmed[c.key]
     );
 
-    const rowsHtml = CATEGORIES.map((c) => {
+    const rowsHtml = visibleCats.map((c) => {
       const cnt = (state.draft.items[c.key] || []).length;
       const isNone = state.draft.noneConfirmed[c.key] && cnt === 0;
       const badgeCls = cnt > 0 ? 'ok' : (isNone ? 'none' : 'empty');
-      const badgeTxt = cnt > 0 ? `${cnt} logged` : (isNone ? 'None ✓' : '0 logged');
+      const badgeTxt = cnt > 0 ? `${cnt} logged` : (isNone ? (c.key === 'first_aid_kits' ? 'All Stocked ✓' : 'None ✓') : '0 logged');
       return `
         <div class="review-row ${cnt === 0 && !isNone ? 'warn' : ''}">
           <span>${c.icon} ${escapeHtml(c.label)}</span>
