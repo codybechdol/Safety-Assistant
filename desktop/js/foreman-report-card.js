@@ -563,19 +563,38 @@ class ForemanReportCardEngine {
           empStatus.toLowerCase().includes('inactive') ||
           rawLoc.toLowerCase().includes('previous employee');
 
-        const primaryJob = this.getBaseJobNumber(r['Job Number'] || r['Job #'] || '');
-        const secondaryJob = this.getBaseJobNumber(r['Secondary Job Number'] || r['Secondary Job #'] || '');
+        const rawPrimaryJob = String(r['Job Number'] || r['Job #'] || '').trim();
+        const rawSecondaryJob = String(r['Secondary Job Number'] || r['Secondary Job #'] || '').trim();
+        const primaryJob = this.getBaseJobNumber(rawPrimaryJob);
+        const secondaryJob = this.getBaseJobNumber(rawSecondaryJob);
+        const parseDotRank = (s) => {
+          const m = String(s || '').match(/\.(\d+)/);
+          return m ? parseInt(m[1], 10) : 99;
+        };
+        const primaryJobRank = parseDotRank(rawPrimaryJob);
+        const secondaryJobRank = parseDotRank(rawSecondaryJob);
         const classification = String(r['Job Classification'] || r['Classification'] || r['Role'] || '').trim();
         const isCrewLead = /^(yes|true|y|1)$/i.test(String(r['Crew Lead'] || '').trim());
+
+        const statusAndLocLow = `${empStatus} ${rawLoc}`.toLowerCase();
+        let conditionTag = '';
+        if (statusAndLocLow.includes('vacation')) conditionTag = '🏖️ Vacation';
+        else if (statusAndLocLow.includes('light duty')) conditionTag = '🩺 Light Duty';
+        else if (statusAndLocLow.includes('medical') || statusAndLocLow.includes("worker's comp")) conditionTag = '🏥 Medical';
+        else if (statusAndLocLow.includes('leave')) conditionTag = '🌴 Leave';
+        else if (statusAndLocLow.includes('weeds')) conditionTag = '🌿 Weeds';
 
         const info = {
           name: canonical,
           location: STATUS_LOCS.has(cleanLoc.toLowerCase()) ? '' : cleanLoc,
           rawLocation: rawLoc,
           status: empStatus,
+          conditionTag,
           isActive: !isPrev,
           primaryJob,
           secondaryJob,
+          primaryJobRank,
+          secondaryJobRank,
           classification,
           classRank: CLASS_RANK[classification.toUpperCase()] || 50,
           isCrewLead
@@ -605,7 +624,25 @@ class ForemanReportCardEngine {
         if (!baseJob || this.isExcludedJob(baseJob)) return;
         const status = this.normalizeJobStatus(r['Status']);
         const foremanRaw = String(r['Foreman'] || r['Crew Lead'] || '').trim();
-        const foreman = this.resolveCanonicalName(foremanRaw, aliasMap);
+        let foreman = this.resolveCanonicalName(foremanRaw, aliasMap);
+        // If Job Tracking.Foreman is blank on an Active/On Hold job, infer from active Employees on that job
+        if (!foreman && (status === 'Active' || status === 'On Hold')) {
+          const crewSet = activeEmployeesByJob.get(baseJob);
+          if (crewSet && crewSet.size > 0) {
+            const candidates = Array.from(crewSet)
+              .map(n => empByCanonical.get(n))
+              .filter(Boolean)
+              .sort((a, b) => {
+                const rankA = a.primaryJob === baseJob ? a.primaryJobRank : a.secondaryJobRank;
+                const rankB = b.primaryJob === baseJob ? b.primaryJobRank : b.secondaryJobRank;
+                if (rankA !== rankB) return rankA - rankB;
+                if (a.isCrewLead !== b.isCrewLead) return a.isCrewLead ? -1 : 1;
+                if (a.classRank !== b.classRank) return a.classRank - b.classRank;
+                return a.name.localeCompare(b.name);
+              });
+            if (candidates.length > 0) foreman = candidates[0].name;
+          }
+        }
         const rawLoc = String(r['Location'] || '').trim();
         const cleanLoc = rawLoc.replace(/\s*\([^)]*\)\s*/g, '').trim();
         const loc = STATUS_LOCS.has(cleanLoc.toLowerCase()) ? '' : cleanLoc;
@@ -1118,32 +1155,57 @@ class ForemanReportCardEngine {
     // foremanMap: canonicalForeman -> Map(baseJob -> jobAccumulator)
     const foremanJobsMap = new Map();
 
+    const findFySuccessor = (baseJob) => {
+      if (!baseJob) return null;
+      // 1. Explicit FY_TRANSITION_ALIAS_MAP entry
+      const mapped = fyAliasMap[baseJob] ? this.getBaseJobNumber(fyAliasMap[baseJob]) : '';
+      if (mapped && mapped !== baseJob && jtByBaseJob.has(mapped)) {
+        return jtByBaseJob.get(mapped);
+      }
+      // 2. Same job prefix with next FY suffix (e.g. 021-26 -> 021-27) when old job was migrated in-place
+      const m = String(baseJob).match(/^(\d+)-(\d{2})$/);
+      if (m) {
+        const nextFy = String(parseInt(m[2], 10) + 1).padStart(2, '0');
+        const candidate = `${m[1]}-${nextFy}`;
+        if (jtByBaseJob.has(candidate)) {
+          return jtByBaseJob.get(candidate);
+        }
+      }
+      return null;
+    };
+
     const ensureForemanJob = (foreman, baseJob) => {
       if (!foreman || foreman === 'Unassigned' || !baseJob || this.isExcludedJob(baseJob)) return null;
       if (!foremanJobsMap.has(foreman)) foremanJobsMap.set(foreman, new Map());
       const jMap = foremanJobsMap.get(foreman);
       if (!jMap.has(baseJob)) {
         const jt = jtByBaseJob.get(baseJob);
+        const fySuccessor = !jt ? findFySuccessor(baseJob) : null;
+        const isFyTransition = Boolean(!jt && fySuccessor);
         const isHandedOff = Boolean(
           jt && jt.foreman && jt.foreman !== foreman &&
           (jt.status === 'Active' || jt.status === 'On Hold')
         );
-        const effectiveStatus = isHandedOff ? 'Handed Off' : (jt ? jt.status : 'Completed');
+        const effectiveStatus = isFyTransition
+          ? 'FY Transition'
+          : (isHandedOff ? 'Handed Off' : (jt ? jt.status : 'Completed'));
         jMap.set(baseJob, {
           foreman,
           jobNumber: baseJob,
-          jobName: jt ? jt.jobName : '',
-          location: jt ? jt.location : '',
+          jobName: jt ? jt.jobName : (fySuccessor ? fySuccessor.jobName : ''),
+          location: jt ? jt.location : (fySuccessor ? fySuccessor.location : ''),
           status: effectiveStatus,
           isHandedOff,
-          currentOwnerForeman: jt ? jt.foreman : '',
-          globalJobStatus: jt ? jt.status : 'Completed',
+          isFyTransition,
+          transitionedToJob: fySuccessor ? fySuccessor.jobNumber : '',
+          currentOwnerForeman: jt ? jt.foreman : (fySuccessor ? fySuccessor.foreman : ''),
+          globalJobStatus: jt ? jt.status : (fySuccessor ? fySuccessor.status : 'Completed'),
           startDate: jt ? jt.startDate : null,
           putOnHoldDate: jt ? jt.putOnHoldDate : null,
           estimatedReturn: jt ? jt.estimatedReturn : null,
           actualEndDate: jt ? jt.actualEndDate : null,
-          workSchedule: jt ? jt.workSchedule : '',
-          crewType: jt ? jt.crewType : '',
+          workSchedule: jt ? jt.workSchedule : (fySuccessor ? fySuccessor.workSchedule : ''),
+          crewType: jt ? jt.crewType : (fySuccessor ? fySuccessor.crewType : ''),
           inJobTracking: Boolean(jt),
           jhaOnTime: 0,
           jhaLate: 0,
@@ -1425,7 +1487,7 @@ class ForemanReportCardEngine {
     // -----------------------------------------------------------------------
     // 9. Build Final Foreman Packets (Cover + Current State + Sorted Job Cards)
     // -----------------------------------------------------------------------
-    const STATUS_SORT = { 'Active': 1, 'On Hold': 2, 'Handed Off': 3, 'Completed': 4, 'Pending Start': 5 };
+    const STATUS_SORT = { 'Active': 1, 'On Hold': 2, 'Handed Off': 3, 'FY Transition': 4, 'Completed': 5, 'Pending Start': 6 };
     const foremen = [];
 
     foremanJobsMap.forEach((jMap, foremanName) => {
@@ -1477,6 +1539,7 @@ class ForemanReportCardEngine {
         activeJobsCount: 0,
         onHoldJobsCount: 0,
         handedOffJobsCount: 0,
+        fyTransitionJobsCount: 0,
         completedJobsCount: 0,
         jhaOnTime: 0, jhaLate: 0, jhaMissing: 0, jhaPending: 0,
         weeklyOnTime: 0, weeklyLate: 0, weeklyMissing: 0, weeklyPending: 0,
@@ -1491,6 +1554,7 @@ class ForemanReportCardEngine {
         if (j.status === 'Active') totals.activeJobsCount++;
         else if (j.status === 'On Hold') totals.onHoldJobsCount++;
         else if (j.status === 'Handed Off') totals.handedOffJobsCount++;
+        else if (j.status === 'FY Transition') totals.fyTransitionJobsCount++;
         else if (j.status === 'Completed') totals.completedJobsCount++;
 
         totals.jhaOnTime += j.jha.onTime;
@@ -1542,35 +1606,47 @@ class ForemanReportCardEngine {
       const ytdWeekly = this.computeMetricStats(totals.weeklyOnTime, totals.weeklyLate, totals.weeklyMissing, totals.weeklyPending);
       const ytdMonthly = this.computeMetricStats(totals.monthlyOnTime, totals.monthlyLate, totals.monthlyMissing, totals.monthlyPending, totals.monthlyExempt);
 
-      // Build Current State (ONLY if foreman currently has >= 1 Active job in Job Tracking)
+      // Build Current State:
+      // 1) Active-first: if foreman has >= 1 Active job, build Current State strictly from Active job(s)
+      //    (noting any On Hold jobs in the header only, so bounced/stale On Hold crews don't mix in).
+      // 2) On-Hold fallback: if foreman has 0 Active jobs and >= 1 On Hold job (e.g. vacation week),
+      //    fall back to On Hold job(s) so their crew's equipment and expiring certs still appear.
       const activeJobs = [];
+      const onHoldJobs = [];
       jtByBaseJob.forEach(jt => {
-        if (jt.status === 'Active' && jt.foreman === foremanName) {
-          activeJobs.push(jt);
-        }
+        if (jt.foreman !== foremanName) return;
+        if (jt.status === 'Active') activeJobs.push(jt);
+        else if (jt.status === 'On Hold') onHoldJobs.push(jt);
       });
-      // Sort active jobs: primary job (from Employees.Job Number) first
+
+      // Sort jobs: primary job (from Employees.Job Number) first
       const empPrimaryJob = empInfo ? empInfo.primaryJob : '';
-      activeJobs.sort((a, b) => {
+      const sortByPrimary = (a, b) => {
         if (a.jobNumber === empPrimaryJob && b.jobNumber !== empPrimaryJob) return -1;
         if (b.jobNumber === empPrimaryJob && a.jobNumber !== empPrimaryJob) return 1;
         return a.jobNumber.localeCompare(b.jobNumber, undefined, { numeric: true });
-      });
+      };
+      activeJobs.sort(sortByPrimary);
+      onHoldJobs.sort(sortByPrimary);
+      const onHoldJobNumbers = onHoldJobs.map(j => j.jobNumber);
+
+      const currentStateMode = activeJobs.length > 0 ? 'active' : (onHoldJobs.length > 0 ? 'on_hold' : null);
+      const stateJobs = currentStateMode === 'active' ? activeJobs : (currentStateMode === 'on_hold' ? onHoldJobs : []);
+      const secondaryOnHoldJobs = currentStateMode === 'active' ? onHoldJobs : [];
 
       let currentState = null;
-      if (activeJobs.length > 0) {
-        const activeJobSet = new Set(activeJobs.map(a => a.jobNumber));
-        const memberJobsMap = new Map(); // canonicalEmpName -> Set(activeJobNumbers)
+      if (stateJobs.length > 0) {
+        const memberJobsMap = new Map(); // canonicalEmpName -> Set(jobNumbers)
 
-        // Ensure foreman is included and linked to all their active jobs
-        memberJobsMap.set(foremanName, new Set(activeJobs.map(a => a.jobNumber)));
+        // Ensure foreman is included and linked to all current-state jobs
+        memberJobsMap.set(foremanName, new Set(stateJobs.map(a => a.jobNumber)));
 
-        activeJobs.forEach(aj => {
-          const crewSet = activeEmployeesByJob.get(aj.jobNumber);
+        stateJobs.forEach(sj => {
+          const crewSet = activeEmployeesByJob.get(sj.jobNumber);
           if (crewSet) {
             crewSet.forEach(mName => {
               if (!memberJobsMap.has(mName)) memberJobsMap.set(mName, new Set());
-              memberJobsMap.get(mName).add(aj.jobNumber);
+              memberJobsMap.get(mName).add(sj.jobNumber);
             });
           }
         });
@@ -1609,6 +1685,7 @@ class ForemanReportCardEngine {
             classification: mEmp ? mEmp.classification : (mName === foremanName ? 'F' : ''),
             classRank: mName === foremanName ? 0 : (mEmp ? mEmp.classRank : 50),
             location: mEmp ? mEmp.location : '',
+            conditionTag: mEmp ? (mEmp.conditionTag || '') : '',
             activeJobs: Array.from(jobSet).sort((a, b) => a.localeCompare(b, undefined, { numeric: true })),
             equipment: sortedItems,
             overdueCount: sortedItems.filter(i => i.urgency === 'overdue').length,
@@ -1625,8 +1702,12 @@ class ForemanReportCardEngine {
         expiringCerts.sort((a, b) => a.diffDays - b.diffDays || a.employee.localeCompare(b.employee));
 
         currentState = {
+          mode: currentStateMode, // 'active' | 'on_hold'
+          stateJobs,
           activeJobs,
+          onHoldJobs: secondaryOnHoldJobs,
           activeJobCount: activeJobs.length,
+          stateJobCount: stateJobs.length,
           members,
           memberCount: members.length,
           equipmentSummary: {
@@ -1641,16 +1722,8 @@ class ForemanReportCardEngine {
         };
       }
 
-      const onHoldJobNumbers = [];
-      jtByBaseJob.forEach(jt => {
-        if (jt.status === 'On Hold' && jt.foreman === foremanName) {
-          onHoldJobNumbers.push(jt.jobNumber);
-        }
-      });
-      onHoldJobNumbers.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-
       const homeLocation = (activeJobs[0] && activeJobs[0].location) ||
-        (jobs.find(j => j.status === 'On Hold' && j.location)?.location) ||
+        (onHoldJobs[0] && onHoldJobs[0].location) ||
         (empInfo && empInfo.location) ||
         (jobs.find(j => j.location)?.location) || '—';
 
@@ -1699,7 +1772,7 @@ class ForemanReportCardEngine {
     return foremanPacket.jobs.filter(j => {
       if (j.status === 'Active') return this.statusFilters['Active'] !== false;
       if (j.status === 'On Hold') return this.statusFilters['On Hold'] !== false;
-      if (j.status === 'Completed' || j.status === 'Handed Off') return this.statusFilters['Completed'] !== false;
+      if (j.status === 'Completed' || j.status === 'Handed Off' || j.status === 'FY Transition') return this.statusFilters['Completed'] !== false;
       return true;
     });
   }
@@ -1718,14 +1791,27 @@ class ForemanReportCardEngine {
       badge: 'YTD Summary'
     });
 
-    // Page 2: Current State (only when foreman has >= 1 Active job AND Active filter is on)
-    if (foremanPacket.currentState && this.statusFilters['Active'] !== false) {
+    // Page 2: Current State
+    // - Active mode: shown when Active filter is enabled
+    // - On-Hold fallback mode: shown when On Hold filter is enabled
+    const cs = foremanPacket.currentState;
+    const showCurrentState = Boolean(
+      cs && (
+        (cs.mode === 'active' && this.statusFilters['Active'] !== false) ||
+        (cs.mode === 'on_hold' && this.statusFilters['On Hold'] !== false)
+      )
+    );
+    if (showCurrentState) {
       pages.push({
         id: 'current_state',
         type: 'current_state',
-        title: `Current State — Active Crew, Equipment & Certs`,
+        title: cs.mode === 'on_hold'
+          ? 'Current State — Crew On Hold, Equipment & Certs'
+          : 'Current State — Active Crew, Equipment & Certs',
         shortLabel: 'Current State',
-        badge: `${foremanPacket.currentState.activeJobCount} Active`
+        badge: cs.mode === 'on_hold'
+          ? `${cs.stateJobCount} On Hold`
+          : `${cs.activeJobCount} Active`
       });
     }
 
@@ -1818,7 +1904,7 @@ class ForemanReportCardEngine {
     // Status filter chips bar + book navigation bar + white-paper page with floating dossier chevrons
     const activeCount = foreman.jobs.filter(j => j.status === 'Active').length;
     const holdCount = foreman.jobs.filter(j => j.status === 'On Hold').length;
-    const compCount = foreman.jobs.filter(j => j.status === 'Completed' || j.status === 'Handed Off').length;
+    const compCount = foreman.jobs.filter(j => j.status === 'Completed' || j.status === 'Handed Off' || j.status === 'FY Transition').length;
 
     let pageBodyHtml = '';
     if (activePage.type === 'cover') {
@@ -2139,18 +2225,22 @@ class ForemanReportCardEngine {
   // Shared HTML Render Helpers (Report Card Metric Cards & Badges)
   // =========================================================================
 
-  renderStatusBadgeHtml(status, currentOwnerForeman = '') {
+  renderStatusBadgeHtml(status, currentOwnerForeman = '', transitionedToJob = '') {
     const map = {
       'Active': { bg: '#dcfce7', color: '#166534', border: '#86efac', icon: '●' },
       'On Hold': { bg: '#fef3c7', color: '#92400e', border: '#fcd34d', icon: '⏸' },
       'Handed Off': { bg: '#e0e7ff', color: '#3730a3', border: '#a5b4fc', icon: '↪' },
+      'FY Transition': { bg: '#cffafe', color: '#155e75', border: '#67e8f9', icon: '🔄' },
       'Completed': { bg: '#e2e8f0', color: '#334155', border: '#cbd5e1', icon: '✓' },
       'Pending Start': { bg: '#dbeafe', color: '#1e40af', border: '#93c5fd', icon: '◷' }
     };
     const st = map[status] || map['Completed'];
-    const label = (status === 'Handed Off' && currentOwnerForeman)
-      ? `Handed Off → ${currentOwnerForeman}`
-      : status;
+    let label = status;
+    if (status === 'Handed Off' && currentOwnerForeman) {
+      label = `Handed Off → ${currentOwnerForeman}`;
+    } else if (status === 'FY Transition' && transitionedToJob) {
+      label = `FY Transition → ${transitionedToJob}`;
+    }
     return `<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:12px;font-size:10.5px;font-weight:800;background:${st.bg};color:${st.color};border:1px solid ${st.border};white-space:nowrap;">${st.icon} ${this.escapeHtml(label)}</span>`;
   }
 
@@ -2247,18 +2337,29 @@ class ForemanReportCardEngine {
 
     // Recompute displayed YTD totals respecting status filters only if subset? No — Cover Page shows true YTD totals for the foreman across the period!
     const t = foreman.totals;
+    const onHoldObjs = foreman.jobs.filter(j => j.status === 'On Hold');
     const hasOnHold = foreman.onHoldJobNumbers && foreman.onHoldJobNumbers.length > 0;
+    const onHoldHeaderList = foreman.onHoldJobNumbers.map(jn => {
+      const obj = onHoldObjs.find(j => j.jobNumber === jn);
+      if (obj && obj.estimatedReturn) {
+        const due = obj.estimatedReturn.getTime() <= period.today.getTime();
+        return `${jn} (${due ? '⚠️ Return Due ' : 'Est. Return '}${this.formatDateUs(obj.estimatedReturn)})`;
+      }
+      return jn;
+    });
+    const anyReturnDue = onHoldObjs.some(j => j.estimatedReturn && j.estimatedReturn.getTime() <= period.today.getTime());
     const activeBadgeStr = foreman.activeJobNumbers.length > 0
       ? `ACTIVE JOB${foreman.activeJobNumbers.length > 1 ? 'S' : ''}: ${foreman.activeJobNumbers.join(', ')}`
       : (hasOnHold
-          ? `ON HOLD JOB${foreman.onHoldJobNumbers.length > 1 ? 'S' : ''}: ${foreman.onHoldJobNumbers.join(', ')}`
+          ? `ON HOLD JOB${foreman.onHoldJobNumbers.length > 1 ? 'S' : ''}: ${onHoldHeaderList.join(', ')}`
           : 'NO ACTIVE JOBS');
-    const activeBadgeColor = foreman.hasActiveJob ? '#15803d' : (hasOnHold ? '#b45309' : '#64748b');
+    const activeBadgeColor = foreman.hasActiveJob ? '#15803d' : (hasOnHold ? (anyReturnDue ? '#b91c1c' : '#b45309') : '#64748b');
 
     const statusMix = [
       t.activeJobsCount > 0 ? `${t.activeJobsCount} Active` : '',
       t.onHoldJobsCount > 0 ? `${t.onHoldJobsCount} On Hold` : '',
       t.handedOffJobsCount > 0 ? `${t.handedOffJobsCount} Handed Off` : '',
+      t.fyTransitionJobsCount > 0 ? `${t.fyTransitionJobsCount} FY Trans.` : '',
       t.completedJobsCount > 0 ? `${t.completedJobsCount} Completed` : ''
     ].filter(Boolean).join(' · ') || '0 Jobs';
 
@@ -2328,17 +2429,17 @@ class ForemanReportCardEngine {
         ${this.renderMetricCardHtml('Monthly Inspection', 'month', 'months', foreman.ytdMonthly, '≥4 consec. wks · On-time thru 7th of next mo')}
       </div>
 
-      <!-- Quick Callout to Page 2 Current State if Active -->
-      ${foreman.currentState && !isPrint ? `
-        <div style="border:1.5px solid #2563eb;background:#eff6ff;border-radius:6px;padding:9px 14px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;gap:10px;">
-          <div style="font-size:11.5px;color:#1e3a8a;">
-            <strong>⚡ Current State Ready (Page 2):</strong>
+      <!-- Quick Callout to Page 2 Current State if Active or On-Hold Fallback -->
+      ${foreman.currentState && pages.some(p => p.type === 'current_state') && !isPrint ? `
+        <div style="border:1.5px solid ${foreman.currentState.mode === 'on_hold' ? '#d97706' : '#2563eb'};background:${foreman.currentState.mode === 'on_hold' ? '#fffbeb' : '#eff6ff'};border-radius:6px;padding:9px 14px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;gap:10px;">
+          <div style="font-size:11.5px;color:${foreman.currentState.mode === 'on_hold' ? '#92400e' : '#1e3a8a'};">
+            <strong>${foreman.currentState.mode === 'on_hold' ? '⏸ Current State Ready — Crew On Hold (Page 2):' : '⚡ Current State Ready (Page 2):'}</strong>
             ${foreman.currentState.memberCount} crew member${foreman.currentState.memberCount === 1 ? '' : 's'} ·
             ${foreman.currentState.equipmentSummary.total} assigned items
             ${foreman.currentState.equipmentSummary.overdue > 0 ? `(<strong style="color:#b91c1c;">${foreman.currentState.equipmentSummary.overdue} overdue</strong>)` : '(all current)'} ·
             ${foreman.currentState.expiringCerts.length} cert${foreman.currentState.expiringCerts.length === 1 ? '' : 's'} expiring ≤60d
           </div>
-          <button type="button" class="frc-inline-btn" onclick="window.foremanReportCardEngine.goToPage(1, 1)">
+          <button type="button" class="frc-inline-btn" style="${foreman.currentState.mode === 'on_hold' ? 'background:#d97706;' : ''}" onclick="window.foremanReportCardEngine.goToPage(1, 1)">
             Open Current State →
           </button>
         </div>
@@ -2388,11 +2489,20 @@ class ForemanReportCardEngine {
                     ${spanStr ? `<div style="font-size:9.5px;color:#64748b;">${this.escapeHtml(spanStr)}</div>` : ''}
                   </td>
                   <td style="border:1px solid #cbd5e1;padding:6px 6px;text-align:center;">
-                    ${this.renderStatusBadgeHtml(j.status, j.currentOwnerForeman)}
+                    ${this.renderStatusBadgeHtml(j.status, j.currentOwnerForeman, j.transitionedToJob)}
+                    ${j.status === 'On Hold' && j.estimatedReturn ? (() => {
+                      const isDue = j.estimatedReturn.getTime() <= period.today.getTime();
+                      return `<div style="font-size:9px;font-weight:${isDue ? '800' : '700'};color:${isDue ? '#b91c1c' : '#92400e'};margin-top:3px;white-space:nowrap;">${isDue ? '⚠️ Return Due ' : '↩ Ret. '}${this.formatDateUs(j.estimatedReturn)}</div>`;
+                    })() : ''}
                   </td>
                   <td style="border:1px solid #cbd5e1;padding:6px 6px;text-align:center;font-weight:800;font-size:12px;">
-                    ${j.daysWorked}
-                    <div style="font-size:9.5px;font-weight:600;color:#64748b;">${j.weeksWorked} wk${j.weeksWorked === 1 ? '' : 's'}</div>
+                    ${j.weeksWorked === 0 && j.daysWorked === 0 && j.status === 'Completed' ? `
+                      <span style="color:#94a3b8;" title="No Safety Compliance rows recorded (job completed before Safety Compliance tracking)">—</span>
+                      <div style="font-size:9px;font-weight:600;color:#94a3b8;">No SC rows</div>
+                    ` : `
+                      ${j.daysWorked}
+                      <div style="font-size:9.5px;font-weight:600;color:#64748b;">${j.weeksWorked} wk${j.weeksWorked === 1 ? '' : 's'}</div>
+                    `}
                   </td>
                   <td style="border:1px solid #cbd5e1;padding:6px 6px;text-align:center;">
                     ${this.renderCompactPctCell(j.jha)}
@@ -2410,13 +2520,15 @@ class ForemanReportCardEngine {
                   </td>
                   ${canEdit ? `
                     <td style="border:1px solid #cbd5e1;padding:6px 6px;text-align:center;" class="frc-no-print" onclick="event.stopPropagation();">
-                      ${j.isHandedOff ? `
+                      ${j.isFyTransition ? `
+                        <span style="font-size:9.5px;font-weight:700;color:#0e7490;" title="Migrated in-place to ${this.escapeHtml(j.transitionedToJob)} during Fiscal Year Transition">→ ${this.escapeHtml(j.transitionedToJob)}</span>
+                      ` : (j.isHandedOff ? `
                         <span style="font-size:9.5px;font-weight:700;color:#4338ca;" title="Currently owned by ${this.escapeHtml(j.currentOwnerForeman)} (${this.escapeHtml(j.globalJobStatus)})">Owned by ${this.escapeHtml(j.currentOwnerForeman)}</span>
                       ` : `
                         <button type="button" class="frc-edit-status-btn" onclick="window.foremanReportCardEngine.openJobStatusModal('${this.escapeJs(j.jobNumber)}')" title="Change job status (Active / On Hold / Completed)">
                           ✏️ Status
                         </button>
-                      `}
+                      `)}
                     </td>
                   ` : ''}
                 </tr>
@@ -2440,9 +2552,12 @@ class ForemanReportCardEngine {
   renderCurrentStatePageHtml(foreman, period, { isPrint = false } = {}) {
     const cs = foreman.currentState;
     if (!cs) {
-      return `<div style="padding:24px;text-align:center;color:#64748b;">No active jobs for ${this.escapeHtml(foreman.name)}.</div>`;
+      return `<div style="padding:24px;text-align:center;color:#64748b;">No active or on-hold jobs for ${this.escapeHtml(foreman.name)}.</div>`;
     }
 
+    const isOnHoldFallback = cs.mode === 'on_hold';
+    const stateJobs = cs.stateJobs || cs.activeJobs || [];
+    const secondaryOnHold = cs.onHoldJobs || [];
     const eqSum = cs.equipmentSummary;
     const renderUrgencyPill = (it) => {
       if (it.urgency === 'overdue') {
@@ -2461,24 +2576,33 @@ class ForemanReportCardEngine {
       return `<span style="background:#f1f5f9;color:#475569;border:1px solid #cbd5e1;padding:1px 6px;border-radius:10px;font-size:9.5px;font-weight:600;white-space:nowrap;">No Date</span>`;
     };
 
+    const jobPillBg = isOnHoldFallback ? '#fef3c7' : '#dcfce7';
+    const jobPillColor = isOnHoldFallback ? '#92400e' : '#166534';
+    const jobPillBorder = isOnHoldFallback ? '#fcd34d' : '#86efac';
+
     return `
       <!-- Header -->
-      <div style="border:2px solid #0f172a;padding:12px 16px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;gap:12px;background:#f8fafc;border-radius:4px;">
+      <div style="border:2px solid #0f172a;padding:12px 16px;margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;gap:12px;background:${isOnHoldFallback ? '#fffbeb' : '#f8fafc'};border-radius:4px;">
         <div>
-          <div style="font-size:10px;font-weight:800;letter-spacing:1px;color:#15803d;text-transform:uppercase;">
-            ⚡ CURRENT STATE · ACTIVE CREW, EQUIPMENT & CERTIFICATIONS
+          <div style="font-size:10px;font-weight:800;letter-spacing:1px;color:${isOnHoldFallback ? '#b45309' : '#15803d'};text-transform:uppercase;">
+            ${isOnHoldFallback ? '⏸ CURRENT STATE · CREW ON HOLD — EQUIPMENT & CERTIFICATIONS' : '⚡ CURRENT STATE · ACTIVE CREW, EQUIPMENT & CERTIFICATIONS'}
           </div>
           <div style="font-size:18px;font-weight:900;color:#0f172a;margin-top:2px;">
             FOREMAN: ${this.escapeHtml(foreman.name)}
           </div>
           <div style="font-size:11px;font-weight:700;color:#334155;margin-top:3px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;">
-            <span>Active Job${cs.activeJobs.length > 1 ? 's' : ''}:</span>
-            ${cs.activeJobs.map((aj, i) => `
-              <span style="background:#dcfce7;color:#166534;border:1px solid #86efac;padding:1px 7px;border-radius:10px;font-size:10.5px;font-weight:800;">
-                ${this.escapeHtml(aj.jobNumber)}${aj.jobName ? ` · ${this.escapeHtml(aj.jobName)}` : ''}${cs.activeJobs.length > 1 && i === 0 ? ' (Primary)' : ''}
+            <span>${isOnHoldFallback ? 'On Hold Job' : 'Active Job'}${stateJobs.length > 1 ? 's' : ''}:</span>
+            ${stateJobs.map((aj, i) => `
+              <span style="background:${jobPillBg};color:${jobPillColor};border:1px solid ${jobPillBorder};padding:1px 7px;border-radius:10px;font-size:10.5px;font-weight:800;">
+                ${isOnHoldFallback ? '⏸ ' : ''}${this.escapeHtml(aj.jobNumber)}${aj.jobName ? ` · ${this.escapeHtml(aj.jobName)}` : ''}${isOnHoldFallback && aj.estimatedReturn ? ` · Est. Return ${this.formatDateUs(aj.estimatedReturn)}` : ''}${stateJobs.length > 1 && i === 0 ? ' (Primary)' : ''}
               </span>
             `).join('')}
           </div>
+          ${secondaryOnHold.length > 0 ? `
+            <div style="font-size:10px;font-weight:600;color:#64748b;margin-top:4px;">
+              ⏸ Also On Hold: <strong>${secondaryOnHold.map(h => `${this.escapeHtml(h.jobNumber)}${h.estimatedReturn ? ` (Ret. ${this.formatDateUs(h.estimatedReturn)})` : ''}`).join(', ')}</strong> <span style="font-weight:500;">(roster &amp; equipment below reflect Active job${stateJobs.length > 1 ? 's' : ''} only)</span>
+            </div>
+          ` : ''}
         </div>
         <div style="text-align:right;font-size:11px;color:#334155;">
           <div style="font-weight:800;color:#0f172a;">As of ${this.escapeHtml(this.formatDateUs(period.today))}</div>
@@ -2488,11 +2612,29 @@ class ForemanReportCardEngine {
         </div>
       </div>
 
-      ${cs.activeJobs.length > 1 ? `
+      ${isOnHoldFallback ? (() => {
+        const dueJobs = stateJobs.filter(j => j.estimatedReturn && j.estimatedReturn.getTime() <= period.today.getTime());
+        const upcomingRetJobs = stateJobs.filter(j => j.estimatedReturn && j.estimatedReturn.getTime() > period.today.getTime());
+        if (dueJobs.length > 0) {
+          return `
+            <div style="font-size:10.5px;background:#fef2f2;border:1px solid #fca5a5;color:#991b1b;border-radius:4px;padding:6px 10px;margin-bottom:12px;">
+              <strong>⚠️ Return Date Reached:</strong> ${dueJobs.map(j => `<strong>${this.escapeHtml(j.jobNumber)}</strong> (Est. Return ${this.formatDateUs(j.estimatedReturn)})`).join(', ')} ${dueJobs.length === 1 ? 'is' : 'are'} due to return from hold. Update job status back to <strong>Active</strong> when the crew resumes work.
+            </div>
+          `;
+        }
+        const retSuffix = upcomingRetJobs.length > 0
+          ? ` (Est. Return ${upcomingRetJobs.map(j => this.formatDateUs(j.estimatedReturn)).join(', ')})`
+          : '';
+        return `
+          <div style="font-size:10.5px;background:#fef3c7;border:1px solid #fcd34d;color:#92400e;border-radius:4px;padding:6px 10px;margin-bottom:12px;">
+            <strong>⏸ Crew Currently On Hold:</strong> ${this.escapeHtml(foreman.name)} has no other active job assigned right now. Current crew equipment change-out status and 60-day expiring certifications for <strong>${stateJobs.map(j => this.escapeHtml(j.jobNumber)).join(', ')}</strong>${this.escapeHtml(retSuffix)} are shown below.
+          </div>
+        `;
+      })() : (stateJobs.length > 1 ? `
         <div style="font-size:10.5px;background:#eff6ff;border:1px solid #93c5fd;color:#1e3a8a;border-radius:4px;padding:6px 10px;margin-bottom:12px;">
-          <strong>Deduplicated Multi-Job View:</strong> ${this.escapeHtml(foreman.name)} currently leads <strong>${cs.activeJobs.length} active jobs</strong> (${cs.activeJobs.map(a => this.escapeHtml(a.jobNumber)).join(', ')}). Crew members and assigned gear are listed once below with job badges so nothing is duplicated.
+          <strong>Deduplicated Multi-Job View:</strong> ${this.escapeHtml(foreman.name)} currently leads <strong>${stateJobs.length} active jobs</strong> (${stateJobs.map(a => this.escapeHtml(a.jobNumber)).join(', ')}). Crew members and assigned gear are listed once below with job badges so nothing is duplicated.
         </div>
-      ` : ''}
+      ` : '')}
 
       <!-- Quick Status Strip -->
       <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px;">
@@ -2520,7 +2662,7 @@ class ForemanReportCardEngine {
       </div>
       ${cs.expiringCerts.length === 0 ? `
         <div style="font-size:11px;padding:7px 10px;border:1px solid #86efac;border-radius:4px;background:#f0fdf4;color:#166534;font-weight:700;margin-bottom:14px;">
-          ✓ All active crew certifications are current (> 60 days remaining).
+          ✓ All crew certifications are current (> 60 days remaining).
         </div>
       ` : `
         <table style="width:100%;border-collapse:collapse;font-size:10.5px;margin-bottom:14px;color:#0f172a;">
@@ -2558,7 +2700,8 @@ class ForemanReportCardEngine {
             <div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap;">
               <span style="font-weight:900;font-size:11.5px;">${m.isForeman ? '👷 ' : ''}${this.escapeHtml(m.name)}</span>
               ${m.classification ? `<span style="font-size:9.5px;font-weight:800;padding:1px 6px;border-radius:4px;background:${m.isForeman ? 'rgba(255,255,255,0.18)' : '#e2e8f0'};color:${m.isForeman ? '#f8fafc' : '#334155'};">${this.escapeHtml(m.classification)}</span>` : ''}
-              ${m.activeJobs.map(jn => `<span style="font-size:9.5px;font-weight:700;padding:1px 6px;border-radius:4px;background:${m.isForeman ? 'rgba(34,197,94,0.28)' : '#dcfce7'};color:${m.isForeman ? '#bbf7d0' : '#166534'};">${this.escapeHtml(jn)}</span>`).join('')}
+              ${m.activeJobs.map(jn => `<span style="font-size:9.5px;font-weight:700;padding:1px 6px;border-radius:4px;background:${m.isForeman ? (isOnHoldFallback ? 'rgba(245,158,11,0.3)' : 'rgba(34,197,94,0.28)') : jobPillBg};color:${m.isForeman ? (isOnHoldFallback ? '#fde68a' : '#bbf7d0') : jobPillColor};">${this.escapeHtml(jn)}</span>`).join('')}
+              ${m.conditionTag ? `<span style="font-size:9.5px;font-weight:800;padding:1px 6px;border-radius:4px;background:${m.isForeman ? 'rgba(56,189,248,0.25)' : '#e0f2fe'};color:${m.isForeman ? '#bae6fd' : '#075985'};border:1px solid ${m.isForeman ? 'rgba(125,211,252,0.4)' : '#7dd3fc'};">${this.escapeHtml(m.conditionTag)}</span>` : ''}
             </div>
             <div style="font-size:10px;font-weight:700;color:${m.isForeman ? '#cbd5e1' : '#475569'};">
               ${m.equipment.length} item${m.equipment.length === 1 ? '' : 's'}
@@ -2682,8 +2825,8 @@ class ForemanReportCardEngine {
           </div>
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:3px;">
             <span style="font-size:20px;font-weight:900;color:#1d4ed8;">JOB ${this.escapeHtml(job.jobNumber)}</span>
-            ${this.renderStatusBadgeHtml(job.status, job.currentOwnerForeman)}
-            ${canEdit && !job.isHandedOff ? `
+            ${this.renderStatusBadgeHtml(job.status, job.currentOwnerForeman, job.transitionedToJob)}
+            ${canEdit && !job.isHandedOff && !job.isFyTransition ? `
               <button type="button" class="frc-edit-status-btn frc-no-print" onclick="window.foremanReportCardEngine.openJobStatusModal('${this.escapeJs(job.jobNumber)}')" title="Update Active / On Hold / Completed status">
                 ✏️ Change Status
               </button>
@@ -2692,9 +2835,19 @@ class ForemanReportCardEngine {
           <div style="font-size:11.5px;font-weight:700;color:#0f172a;margin-top:3px;">
             ${job.jobName ? `${this.escapeHtml(job.jobName)} · ` : ''}📍 ${this.escapeHtml(job.location || foreman.location)} · Foreman: ${this.escapeHtml(foreman.name)}
           </div>
+          ${job.isFyTransition ? `
+            <div style="font-size:10px;color:#155e75;background:#ecfeff;border:1px solid #a5f3fc;border-radius:4px;padding:3px 7px;margin-top:5px;font-weight:700;display:inline-block;">
+              🔄 Fiscal Year Transition · Continued as Job <strong>${this.escapeHtml(job.transitionedToJob)}</strong> (Job Name inherited from ${this.escapeHtml(job.transitionedToJob)})
+            </div>
+          ` : ''}
           ${job.isHandedOff ? `
             <div style="font-size:10px;color:#3730a3;background:#eef2ff;border:1px solid #c7d2fe;border-radius:4px;padding:3px 7px;margin-top:5px;font-weight:700;display:inline-block;">
               ↪ Reassigned to ${this.escapeHtml(job.currentOwnerForeman)} (${this.escapeHtml(job.globalJobStatus)}) · Scored only on ${this.escapeHtml(foreman.name)}'s weeks${job.firstWorkDate && job.lastWorkDate ? ` (${this.formatDateUs(job.firstWorkDate)} – ${this.formatDateUs(job.lastWorkDate)})` : ''}
+            </div>
+          ` : ''}
+          ${job.status === 'On Hold' && job.estimatedReturn && job.estimatedReturn.getTime() <= period.today.getTime() ? `
+            <div style="font-size:10px;color:#991b1b;background:#fef2f2;border:1px solid #fca5a5;border-radius:4px;padding:3px 7px;margin-top:5px;font-weight:800;display:inline-block;">
+              ⚠️ Return Date Reached (${this.formatDateUs(job.estimatedReturn)}) — Ready to switch back to Active
             </div>
           ` : ''}
           ${dateBadges.length > 0 ? `

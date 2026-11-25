@@ -7147,12 +7147,22 @@ class CrewPlanningEngine {
         ? 'Work Schedule'
         : (jtTable?.headers && jtTable.headers.includes('Schedule') ? 'Schedule' : 'Work Schedule');
       const hasCrewSizeCol = Boolean(jtTable?.headers && jtTable.headers.includes('Crew Size'));
+      const publishWeekUs = this._toUsDate(publishWeek) || todayFormatted;
 
       for (const crew of plan.crews) {
         let jtRow = (jtTable?.rows || []).find(j => {
           const jn = String(j['Job Number'] || j['Job #'] || '').trim();
           return jn === crew.jobNumber || jn.replace(/\.\d+.*$/, '').trim() === crew.jobNumber;
         });
+
+        // Auto-resolve foreman from assigned crew members if crew.foreman was left blank
+        const resolvedCrewForeman = String(crew.foreman || '').trim() ||
+          ((Array.isArray(crew.members) && crew.members.length > 0 && typeof this.pickBestForeman === 'function')
+            ? String(this.pickBestForeman(crew.members) || '').trim()
+            : '');
+        if (resolvedCrewForeman && !String(crew.foreman || '').trim()) {
+          crew.foreman = resolvedCrewForeman;
+        }
 
         // If crew.jobName is empty on this week's plan (and wasn't explicitly cleared), check other weeks' plans or roster history
         if (!crew._clearedJobName && (!crew.jobName || crew.jobName === crew.jobNumber) && !jtRow?.['Job Name']) {
@@ -7191,12 +7201,19 @@ class CrewPlanningEngine {
             jtRow['Crew Type'] = finalType;
             updated['Crew Type'] = finalType;
           }
-          const statusChanged = Boolean(crew.status && jtRow['Status'] !== crew.status);
+          const liveStLow = String(jtRow['Status'] || '').trim().toLowerCase();
+          const hasStaffedMembers = Array.isArray(crew.members) && crew.members.length > 0;
+          // Auto-activate Pending Start jobs once staffed and published from Crew Planning
+          const effectiveStatus = crew.status ||
+            ((liveStLow === 'pending start' || liveStLow === 'pending' || !liveStLow) && hasStaffedMembers
+              ? 'Active'
+              : jtRow['Status']);
+          const statusChanged = Boolean(effectiveStatus && jtRow['Status'] !== effectiveStatus);
           if (statusChanged) {
-            jtRow['Status'] = crew.status;
-            updated['Status'] = crew.status;
+            jtRow['Status'] = effectiveStatus;
+            updated['Status'] = effectiveStatus;
           }
-          const stLow = String(crew.status || jtRow['Status'] || '').trim().toLowerCase();
+          const stLow = String(effectiveStatus || jtRow['Status'] || '').trim().toLowerCase();
           const isCompSt = stLow === 'completed' || stLow === 'closed';
           const isHoldSt = stLow === 'on hold' || stLow === 'hold' || stLow === 'paused';
           if (isCompSt && (statusChanged || !jtRow['Actual End Date'] || crew.actualEndDate)) {
@@ -7213,17 +7230,25 @@ class CrewPlanningEngine {
               jtRow['Put On Hold Date'] = holdUs;
               updated['Put On Hold Date'] = holdUs;
             }
+            if (!jtRow['Start Date'] && hasStaffedMembers) {
+              jtRow['Start Date'] = publishWeekUs;
+              updated['Start Date'] = publishWeekUs;
+            }
             if (jtRow['Actual End Date']) { jtRow['Actual End Date'] = ''; updated['Actual End Date'] = ''; }
-          } else if (statusChanged && stLow === 'active') {
-            if (!jtRow['Start Date']) { jtRow['Start Date'] = todayFormatted; updated['Start Date'] = todayFormatted; }
-            if (jtRow['Actual End Date']) { jtRow['Actual End Date'] = ''; updated['Actual End Date'] = ''; }
-            if (jtRow['Put On Hold Date']) { jtRow['Put On Hold Date'] = ''; updated['Put On Hold Date'] = ''; }
-            if (jtRow['Estimated Return']) { jtRow['Estimated Return'] = ''; updated['Estimated Return'] = ''; }
+          } else if (stLow === 'active') {
+            if (!jtRow['Start Date']) { jtRow['Start Date'] = publishWeekUs; updated['Start Date'] = publishWeekUs; }
+            if (statusChanged) {
+              if (jtRow['Actual End Date']) { jtRow['Actual End Date'] = ''; updated['Actual End Date'] = ''; }
+              if (jtRow['Put On Hold Date']) { jtRow['Put On Hold Date'] = ''; updated['Put On Hold Date'] = ''; }
+              if (jtRow['Estimated Return']) { jtRow['Estimated Return'] = ''; updated['Estimated Return'] = ''; }
+            }
           }
-          if (crew.foreman !== undefined && String(jtRow['Foreman'] || '').trim() !== String(crew.foreman || '').trim()) {
-            const nextForeman = String(crew.foreman || '').trim();
-            jtRow['Foreman'] = nextForeman;
-            updated['Foreman'] = nextForeman;
+          if (resolvedCrewForeman && String(jtRow['Foreman'] || '').trim() !== resolvedCrewForeman) {
+            jtRow['Foreman'] = resolvedCrewForeman;
+            updated['Foreman'] = resolvedCrewForeman;
+          } else if (crew.foreman !== undefined && !resolvedCrewForeman && !hasStaffedMembers && String(jtRow['Foreman'] || '').trim() !== '') {
+            jtRow['Foreman'] = '';
+            updated['Foreman'] = '';
           }
           if (crew.location && jtRow['Location'] !== crew.location) {
             jtRow['Location'] = crew.location;
@@ -7292,11 +7317,11 @@ class CrewPlanningEngine {
             'Job Number': crew.jobNumber,
             'Job Name': crew._clearedJobName ? '' : (crew.jobName || crew.jobNumber),
             'Location': crew.location || 'Helena',
-            'Foreman': crew.foreman || '',
+            'Foreman': resolvedCrewForeman || '',
             'Crew Type': this.detectCrewType(crew.jobNumber, crew.jobName, crew.location, crew.crewType),
             [schedCol]: crew.schedule || 'Mon-Thu (4 10s)',
             'Status': newStatusVal,
-            'Start Date': newStLow === 'active' ? todayFormatted : '',
+            'Start Date': (newStLow === 'active' || (newStLow === 'on hold' && Array.isArray(crew.members) && crew.members.length > 0)) ? publishWeekUs : '',
             'Put On Hold Date': (newStLow === 'on hold' || newStLow === 'hold' || newStLow === 'paused') ? (this._toUsDate(crew.putOnHoldDate) || todayFormatted) : '',
             'Actual End Date': (newStLow === 'completed' || newStLow === 'closed') ? (this._toUsDate(crew.actualEndDate) || todayFormatted) : '',
             'Last Updated': todayFormatted,
@@ -8317,6 +8342,7 @@ class CrewPlanningEngine {
         jobNumber: cleanJob,
         location: cleanLoc,
         foreman: designatedForeman,
+        status: 'Active',
         crewType: cleanType,
         schedule: activePreset,
         isSkipSun: !isSun,
