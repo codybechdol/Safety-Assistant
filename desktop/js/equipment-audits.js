@@ -1394,10 +1394,93 @@ END $$;`;
     return String(val || '').trim().replace(/^#/, '').replace(/\s+/g, '').toLowerCase();
   }
 
+  isMissingDateValue(val) {
+    const s = String(val || '').trim().toLowerCase();
+    return s === 'none' || s === 'no sticker' || s === 'no date' || s === 'missing' || s === 'unknown';
+  }
+
+  isUnnumberedPlaceholderId(val) {
+    const s = String(val || '').trim().replace(/^#/, '');
+    if (!s) return false;
+    return /^n\s*\/?\s*a(?:[-\s#_]*\d*)?$/i.test(s);
+  }
+
+  getNextSequentialUnnumberedId(catKey, extraReservedNormIds = null) {
+    const table = this.db ? this.db.getTable(catKey) : null;
+    const rows = (table && Array.isArray(table.rows)) ? table.rows : [];
+    const headers = (table && Array.isArray(table.headers)) ? table.headers : [];
+    const usedNorm = new Set(extraReservedNormIds || []);
+    let maxNum = 0;
+
+    const inspectId = (rawId) => {
+      const s = String(rawId || '').trim().replace(/^#/, '');
+      if (!s) return;
+      usedNorm.add(this.normId(s));
+      const m = s.match(/^n\s*\/?\s*a[-\s#_]*(\d+)$/i);
+      if (m) {
+        const n = parseInt(m[1], 10);
+        if (!isNaN(n) && n > maxNum) maxNum = n;
+      }
+    };
+
+    rows.forEach((r) => inspectId(this.getRowPrimaryId(catKey, r, headers)));
+    if (extraReservedNormIds) {
+      extraReservedNormIds.forEach((id) => inspectId(id));
+    }
+
+    let next = maxNum + 1;
+    let candidate = `NA-${String(next).padStart(3, '0')}`;
+    while (usedNorm.has(this.normId(candidate))) {
+      next++;
+      candidate = `NA-${String(next).padStart(3, '0')}`;
+    }
+    return candidate;
+  }
+
+  matchesUnnumberedPhysicalSpecs(catKey, rep, appRow, isShopPool) {
+    const eq = (a, b, norm) => {
+      const sa = (a === null || a === undefined) ? '' : String(a).trim();
+      const sb = (b === null || b === undefined) ? '' : String(b).trim();
+      if (!sa || !sb) return true;
+      return norm ? norm(sa) === norm(sb) : sa.toLowerCase() === sb.toLowerCase();
+    };
+    if (catKey === 'hot_sticks') {
+      return eq(rep.type, appRow['Type']) && eq(rep.length, appRow['Length'], (v) => this.normLength(v));
+    }
+    if (catKey === 'grounds') {
+      return eq(rep.type, appRow['Type']) &&
+        (rep.type === 'OH' ? eq(rep.size, appRow['Size']) : eq(rep.kv, appRow['KV'], (v) => this.normKv(v))) &&
+        eq(rep.length, appRow['Length'], (v) => this.normLength(v));
+    }
+    if (catKey === 'blankets') {
+      return eq(rep.type, appRow['Type']) &&
+        eq(rep.itemClass, appRow['Class'], (v) => String(v).replace(/class\s*/i, '').trim());
+    }
+    if (catKey === 'macks') {
+      return eq(rep.kv, appRow['KV'], (v) => this.normKv(v)) &&
+        eq(rep.size, appRow['Size']) &&
+        eq(rep.length, appRow['Length'], (v) => this.normLength(v));
+    }
+    if (catKey === 'gloves' || catKey === 'sleeves') {
+      const empOk = isShopPool ? true : eq(rep.employeeName, appRow['Assigned To'], (v) => this.normPerson(v));
+      return empOk &&
+        eq(rep.size, appRow['Size'], catKey === 'sleeves' ? (v) => this.normSleeveSize(v) : (v) => String(parseFloat(v) || v).toLowerCase()) &&
+        eq(rep.itemClass, appRow['Class'], (v) => String(v).replace(/class\s*/i, '').trim());
+    }
+    if (catKey === 'hv_testers' || catKey === 'phasing_sets') {
+      return eq(rep.model, appRow['Model']) && eq(rep.kv, appRow['KV'], (v) => this.normKv(v));
+    }
+    if (catKey === 'aed') {
+      return eq(rep.model, appRow['Model']);
+    }
+    return false;
+  }
+
   normDate(val) {
     if (!val) return '';
     const s = String(val).trim();
     if (!s || s.toUpperCase() === 'N/A') return '';
+    if (this.isMissingDateValue(s)) return 'none';
     let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
     if (m) return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
     m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
@@ -1413,6 +1496,7 @@ END $$;`;
   }
 
   toSheetDate(isoOrDate) {
+    if (this.isMissingDateValue(isoOrDate)) return 'None';
     const iso = this.normDate(isoOrDate);
     const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
     if (m) return `${m[2]}/${m[3]}/${m[1]}`;
@@ -1575,19 +1659,30 @@ END $$;`;
       const rows = Array.isArray(table.rows) ? table.rows : [];
       const headers = Array.isArray(table.headers) ? table.headers : [];
 
-      // Index all app rows by primary ID, ESL ID, and Serial #
+      // Index regular numbered app rows by primary ID, ESL ID, and Serial #.
+      // Unnumbered placeholder rows (NA-001, NA1, etc.) are tracked separately ONLY within
+      // this crew / shop pool so one crew's NA1 can NEVER cross-match another crew's NA1.
       const byPrimary = new Map();
       const byAlt = new Map();
+      const inScopeUnnumbered = [];
       rows.forEach((r, idx) => {
-        const pid = this.normId(this.getRowPrimaryId(cat.key, r, headers));
+        const rawPid = this.getRowPrimaryId(cat.key, r, headers);
+        const pid = this.normId(rawPid);
+        if (this.isUnnumberedPlaceholderId(rawPid)) {
+          if (isRowInScope(r)) {
+            inScopeUnnumbered.push({ row: r, idx, rawPid, normPid: pid });
+          }
+          return;
+        }
         if (pid && !byPrimary.has(pid)) byPrimary.set(pid, { row: r, idx });
         const esl = this.normId(r['ESL ID']);
-        if (esl && !byAlt.has(esl)) byAlt.set(esl, { row: r, idx });
+        if (esl && !this.isUnnumberedPlaceholderId(r['ESL ID']) && !byAlt.has(esl)) byAlt.set(esl, { row: r, idx });
         const ser = this.normId(r['Serial #']);
-        if (ser && !byAlt.has(ser)) byAlt.set(ser, { row: r, idx });
+        if (ser && !this.isUnnumberedPlaceholderId(r['Serial #']) && !byAlt.has(ser)) byAlt.set(ser, { row: r, idx });
       });
 
       const matchedAppIndices = new Set();
+      const reservedUnnumbered = new Set();
       const reportedList = Array.isArray(itemsByCat[cat.key]) ? itemsByCat[cat.key] : [];
 
       reportedList.forEach((rep) => {
@@ -1595,17 +1690,35 @@ END $$;`;
         const repId = this.normId(rep.itemNum);
         const repEsl = this.normId(rep.eslId);
         const repSer = this.normId(rep.serialNum);
+        const isUnnumbered = this.isUnnumberedPlaceholderId(rep.itemNum);
+        const needsChangeoutNoDate = this.isMissingDateValue(rep.testDate) || this.isMissingDateValue(rep.calibrationDate);
 
-        const found = (repId && byPrimary.get(repId)) ||
-                      (repEsl && byAlt.get(repEsl)) ||
-                      (repId && byAlt.get(repId)) ||
-                      (repSer && byAlt.get(repSer)) ||
-                      null;
+        let found = null;
+        if (isUnnumbered) {
+          // Match ONLY against unmatched unnumbered items already on THIS SAME crew / shop pool:
+          // 1) Exact same ID on this crew (e.g. NA-001), 2) exact spec + date match, 3) physical spec match.
+          const available = inScopeUnnumbered.filter((u) => !matchedAppIndices.has(u.idx));
+          found = available.find((u) => repId && u.normPid === repId) ||
+                  available.find((u) => this.compareItemFields(cat.key, rep, u.row, { isShopPool: Boolean(shopPool) }).length === 0) ||
+                  available.find((u) => this.matchesUnnumberedPhysicalSpecs(cat.key, rep, u.row, Boolean(shopPool))) ||
+                  null;
+        } else {
+          found = (repId && byPrimary.get(repId)) ||
+                  (repEsl && byAlt.get(repEsl)) ||
+                  (repId && byAlt.get(repId)) ||
+                  (repSer && byAlt.get(repSer)) ||
+                  null;
+        }
 
         const keyId = `${cat.key}:${rep.id || repId}`;
 
         if (!found) {
           counts.new_item++;
+          let suggestedItemNum = '';
+          if (isUnnumbered) {
+            suggestedItemNum = this.getNextSequentialUnnumberedId(cat.key, reservedUnnumbered);
+            reservedUnnumbered.add(suggestedItemNum);
+          }
           results.push({
             key: keyId,
             bucket: 'new_item',
@@ -1613,6 +1726,9 @@ END $$;`;
             catLabel: cat.label,
             catIcon: cat.icon,
             itemNum: rep.itemNum,
+            isUnnumbered,
+            suggestedItemNum,
+            needsChangeoutNoDate,
             reported: rep,
             appRow: null,
             diffs: []
@@ -1634,6 +1750,8 @@ END $$;`;
             catLabel: cat.label,
             catIcon: cat.icon,
             itemNum: this.getRowPrimaryId(cat.key, appRow, headers) || rep.itemNum,
+            isUnnumbered,
+            needsChangeoutNoDate,
             reported: rep,
             appRow,
             appRowIdx: appRow._rowIdx || (found.idx + 2),
@@ -1648,6 +1766,8 @@ END $$;`;
             catLabel: cat.label,
             catIcon: cat.icon,
             itemNum: this.getRowPrimaryId(cat.key, appRow, headers) || rep.itemNum,
+            isUnnumbered,
+            needsChangeoutNoDate,
             reported: rep,
             appRow,
             appRowIdx: appRow._rowIdx || (found.idx + 2),
@@ -1662,6 +1782,8 @@ END $$;`;
             catLabel: cat.label,
             catIcon: cat.icon,
             itemNum: this.getRowPrimaryId(cat.key, appRow, headers) || rep.itemNum,
+            isUnnumbered,
+            needsChangeoutNoDate,
             reported: rep,
             appRow,
             appRowIdx: appRow._rowIdx || (found.idx + 2),
@@ -1842,10 +1964,14 @@ END $$;`;
       `;
     } else if (item.bucket === 'new_item') {
       const r = item.reported;
-      const specs = [shopPool ? '' : r.employeeName, r.type, r.model, r.size, r.itemClass ? `Class ${r.itemClass}` : '', r.kv, r.length, r.serialNum ? `S/N ${r.serialNum}` : '', r.eslId ? `ESL ${r.eslId}` : '', r.testDate ? `Tested ${this.toSheetDate(r.testDate)}` : '', r.calibrationDate ? `Cal ${this.toSheetDate(r.calibrationDate)}` : '', r.padExpiration ? `Pads Exp ${this.toSheetDate(r.padExpiration)}` : '', r.batteryExpiration ? `Battery Exp ${this.toSheetDate(r.batteryExpiration)}` : ''].filter(Boolean);
+      const fmtClass = (r.itemClass !== undefined && r.itemClass !== null && String(r.itemClass).trim() !== '') ? `Class ${r.itemClass}` : '';
+      const fmtTest = r.testDate ? (this.isMissingDateValue(r.testDate) ? 'Test Date: None (OVERDUE)' : `Tested ${this.toSheetDate(r.testDate)}`) : '';
+      const fmtCal = r.calibrationDate ? (this.isMissingDateValue(r.calibrationDate) ? 'Cal Date: None (OVERDUE)' : `Cal ${this.toSheetDate(r.calibrationDate)}`) : '';
+      const specs = [shopPool ? '' : r.employeeName, r.type, r.model, r.size, fmtClass, r.kv, r.length, r.serialNum ? `S/N ${r.serialNum}` : '', r.eslId ? `ESL ${r.eslId}` : '', fmtTest, fmtCal, r.padExpiration ? `Pads Exp ${this.toSheetDate(r.padExpiration)}` : '', r.batteryExpiration ? `Battery Exp ${this.toSheetDate(r.batteryExpiration)}` : ''].filter(Boolean);
       detailsHtml = `
         <div style="margin-top: 5px; font-size: 12px; color: #bfdbfe;">
           Not found in ${this.escapeHtml(item.catLabel)} inventory. Reported specs: <strong>${this.escapeHtml(specs.join(' • ') || 'Basic entry')}</strong>
+          ${item.isUnnumbered && item.suggestedItemNum ? `<div style="margin-top:4px;font-size:11.5px;color:#c4b5fd;">🏷️ Unnumbered item — will be added as <strong>#${this.escapeHtml(item.suggestedItemNum)}</strong> (sequential unique ID).</div>` : ''}
         </div>
       `;
     } else {
@@ -1869,7 +1995,9 @@ END $$;`;
         <button class="btn btn-secondary" style="font-size:11.5px;padding:5px 9px;" onclick="window.equipmentAuditsEngine.dismissItem('${escKey}')">Dismiss</button>
       `;
     } else if (item.bucket === 'new_item') {
-      const addLabel = shopPool ? `➕ Add to ${shopPool.name}` : '➕ Add to Inventory';
+      const addLabel = item.isUnnumbered && item.suggestedItemNum
+        ? (shopPool ? `➕ Add as #${item.suggestedItemNum} (${shopPool.name})` : `➕ Add as #${item.suggestedItemNum}`)
+        : (shopPool ? `➕ Add to ${shopPool.name}` : '➕ Add to Inventory');
       actionsHtml = `
         <button class="btn btn-primary admin-only-control" style="font-size:11.5px;padding:5px 10px;background:#2563eb;border:none;" onclick="window.equipmentAuditsEngine.applyAddNewItem('${escKey}')">${this.escapeHtml(addLabel)}</button>
         <button class="btn btn-secondary" style="font-size:11.5px;padding:5px 9px;" onclick="window.equipmentAuditsEngine.dismissItem('${escKey}')">Dismiss</button>
@@ -1883,6 +2011,13 @@ END $$;`;
       `;
     }
 
+    const unnumberedBadgeHtml = item.isUnnumbered
+      ? `<span style="font-size:10.5px;font-weight:700;padding:2px 7px;border-radius:999px;background:rgba(139,92,246,0.2);border:1px solid rgba(167,139,250,0.45);color:#ddd6fe;">🏷️ Unnumbered${item.suggestedItemNum && item.bucket === 'new_item' ? ` → #${this.escapeHtml(item.suggestedItemNum)}` : ''}</span>`
+      : '';
+    const noDateBadgeHtml = item.needsChangeoutNoDate
+      ? `<span style="font-size:10.5px;font-weight:800;padding:2px 7px;border-radius:999px;background:rgba(220,38,38,0.22);border:1px solid rgba(248,113,113,0.55);color:#fecaca;">⚠️ No Test/Cal Sticker — Out of Date (Needs Changeout)</span>`
+      : '';
+
     return `
       <div style="background:${meta.bg};border:1px solid ${meta.border};border-radius:10px;padding:11px 14px;display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:10px;">
         <div style="flex:1;min-width:260px;">
@@ -1890,6 +2025,8 @@ END $$;`;
             <span style="font-size:11px;font-weight:800;color:${meta.color};">${meta.badge}</span>
             <span style="font-size:12px;font-weight:700;color:#cbd5e1;">${item.catIcon} ${this.escapeHtml(item.catLabel)}</span>
             <span style="font-size:14px;font-weight:800;color:#ffffff;">#${this.escapeHtml(item.itemNum)}</span>
+            ${unnumberedBadgeHtml}
+            ${noDateBadgeHtml}
           </div>
           ${detailsHtml}
           ${item.reported?.notes ? `<div style="margin-top:4px;font-size:11px;color:#94a3b8;">Foreman note: ${this.escapeHtml(item.reported.notes)}</div>` : ''}
@@ -1971,16 +2108,62 @@ END $$;`;
     return true;
   }
 
+  async recalculateRowChangeOutDate(catKey, appRow, appRowIdx) {
+    if (!appRow) return '';
+    const testVal = appRow['Test Date'] || '';
+    const calVal = appRow['Calibration Date'] || '';
+    const padVal = appRow['Pad Expiration'] || '';
+    const batVal = appRow['Battery Expiration'] || '';
+    const dateAssignedVal = appRow['Date Assigned'] || '';
+    const locVal = appRow['Location'] || '';
+    const assignedVal = appRow['Assigned To'] || '';
+
+    let newChgOut = '';
+    if (window.inventoryManager && typeof window.inventoryManager.calculateChangeOutDate === 'function') {
+      newChgOut = window.inventoryManager.calculateChangeOutDate(
+        dateAssignedVal || testVal || calVal || padVal,
+        locVal,
+        assignedVal,
+        catKey,
+        {
+          testDate: testVal,
+          calibrationDate: calVal,
+          padExpiration: padVal,
+          batteryExpiration: batVal
+        }
+      );
+    } else if (this.isMissingDateValue(testVal) || this.isMissingDateValue(calVal)) {
+      newChgOut = 'OVERDUE';
+    }
+
+    if (newChgOut) {
+      const table = this.db ? this.db.getTable(catKey) : null;
+      const headers = (table && Array.isArray(table.headers)) ? table.headers : [];
+      const chgCol = headers.find((h) => /^change\s*out\s*date$/i.test(String(h || '').trim()))
+        || (catKey === 'phasing_sets' ? headers.find((h) => /^replacement\s*date$/i.test(String(h || '').trim())) : null);
+      if (chgCol) {
+        await this.updateTableCellByColName(catKey, appRow, appRowIdx, chgCol, newChgOut, { skipHistory: true });
+      }
+    }
+    return newChgOut;
+  }
+
   async applyDiscrepancyUpdate(key) {
     const item = this.findReconcileItem(key);
     if (!item || !item.appRow) return;
     const hasAssignedDiff = item.diffs.some((d) => d.colName === 'Assigned To');
+    const hasDateOrLocDiff = hasAssignedDiff || item.diffs.some((d) =>
+      ['Test Date', 'Calibration Date', 'Pad Expiration', 'Battery Expiration', 'Location'].includes(d.colName)
+    );
     const todayMdy = this.getLocalTodayMdy();
     if (hasAssignedDiff) {
       await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Date Assigned', todayMdy, { skipHistory: true });
     }
     for (const d of item.diffs) {
       await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, d.colName, d.reportedValue, { skipHistory: true });
+    }
+    if (hasDateOrLocDiff) {
+      await this.recalculateRowChangeOutDate(item.catKey, item.appRow, item.appRowIdx);
     }
     if (hasAssignedDiff && typeof this.db.recordItemHistoryEvent === 'function') {
       const table = this.db.getTable(item.catKey);
@@ -2019,7 +2202,10 @@ END $$;`;
     await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Status', targetStatus, { skipHistory: true });
     await this.updateTableCellByColName(item.catKey, item.appRow, item.appRowIdx, 'Assigned To', assignee, { skipHistory: true });
 
-    // 4. Record ONE clean history transition now that Date Assigned, Location, Status, and Assigned To are all final
+    // 4. Recalculate Change Out Date based on updated assignment, location, and test/calibration date (handles None -> OVERDUE)
+    await this.recalculateRowChangeOutDate(item.catKey, item.appRow, item.appRowIdx);
+
+    // 5. Record ONE clean history transition now that Date Assigned, Location, Status, and Assigned To are all final
     if (typeof this.db.recordItemHistoryEvent === 'function') {
       const table = this.db.getTable(item.catKey);
       if (table) {
@@ -2047,12 +2233,17 @@ END $$;`;
     const todayIso = this.getLocalTodayIso();
     const todayMdy = this.getLocalTodayMdy();
 
+    // Auto-assign sequential NA-001, NA-002, NA-003... for unnumbered placeholders
+    const wasUnnumbered = this.isUnnumberedPlaceholderId(r.itemNum);
+    const finalItemNum = wasUnnumbered ? this.getNextSequentialUnnumberedId(item.catKey) : r.itemNum;
+
     const testDateMdy = this.toSheetDate(r.testDate);
     const calDateMdy = this.toSheetDate(r.calibrationDate);
     const padExpMdy = this.toSheetDate(r.padExpiration);
     const batExpMdy = this.toSheetDate(r.batteryExpiration);
+    const isMissingStickerDate = this.isMissingDateValue(r.testDate) || this.isMissingDateValue(r.calibrationDate);
 
-    const changeOutDate = (window.inventoryManager && typeof window.inventoryManager.calculateChangeOutDate === 'function')
+    let changeOutDate = (window.inventoryManager && typeof window.inventoryManager.calculateChangeOutDate === 'function')
       ? window.inventoryManager.calculateChangeOutDate(todayIso, loc, assignee, item.catKey, {
         testDate: r.testDate,
         calibrationDate: r.calibrationDate,
@@ -2060,50 +2251,58 @@ END $$;`;
         batteryExpiration: r.batteryExpiration
       })
       : '';
+    if (isMissingStickerDate && changeOutDate !== 'N/A') {
+      changeOutDate = 'OVERDUE';
+    }
+
+    const baseNote = r.notes || `Added via Equipment Audit (${req.campaign_name})`;
+    const finalNotes = wasUnnumbered
+      ? `${baseNote}${baseNote ? ' | ' : ''}Unnumbered (Audit: ${r.itemNum})`
+      : baseNote;
 
     const newRow = {
-      'Item #': r.itemNum,
+      'Item #': finalItemNum,
       'Date Assigned': todayMdy,
       'Location': loc,
       'Status': targetStatus,
       'Assigned To': assignee,
       'Change Out Date': changeOutDate,
       'Picked For': '',
-      'Notes': r.notes || `Added via Equipment Audit (${req.campaign_name})`
+      'Notes': finalNotes
     };
 
     if (item.catKey === 'gloves' || item.catKey === 'sleeves') {
-      newRow[item.catKey === 'gloves' ? 'Glove' : 'Sleeve'] = r.itemNum;
+      newRow[item.catKey === 'gloves' ? 'Glove' : 'Sleeve'] = finalItemNum;
       newRow['ESL ID'] = r.eslId || '';
       newRow['Size'] = r.size || '';
       newRow['Class'] = (r.itemClass !== undefined && r.itemClass !== null && String(r.itemClass).trim() !== '') ? String(r.itemClass).trim() : '2';
       newRow['Test Date'] = testDateMdy;
     } else if (item.catKey === 'blankets') {
-      newRow['Blanket'] = r.itemNum;
+      newRow['Blanket'] = finalItemNum;
       newRow['Type'] = r.type || 'Regular';
       newRow['Class'] = r.itemClass || '4';
       newRow['Test Date'] = testDateMdy;
     } else if (item.catKey === 'macks') {
-      newRow['MACK'] = r.itemNum;
+      newRow['MACK'] = finalItemNum;
       newRow['KV'] = r.kv || '15KV';
       newRow['Size'] = r.size || '';
       newRow['Length'] = r.length || '';
       newRow['Test Date'] = testDateMdy;
     } else if (item.catKey === 'hv_testers' || item.catKey === 'phasing_sets') {
-      newRow[item.catKey === 'hv_testers' ? 'HVT #' : 'Phasing Set'] = r.itemNum;
+      newRow[item.catKey === 'hv_testers' ? 'HVT #' : 'Phasing Set'] = finalItemNum;
       newRow['Model'] = r.model || '';
       newRow['KV'] = r.kv || '';
       newRow['Serial #'] = r.serialNum || '';
       newRow['Calibration Date'] = calDateMdy;
       if (item.catKey === 'phasing_sets') newRow['Replacement Date'] = changeOutDate;
     } else if (item.catKey === 'aed') {
-      newRow['AED'] = r.itemNum;
+      newRow['AED'] = finalItemNum;
       newRow['Model'] = r.model || 'ZOLL AED 3';
       newRow['Serial #'] = r.serialNum || '';
       newRow['Pad Expiration'] = padExpMdy;
       newRow['Battery Expiration'] = batExpMdy;
     } else if (item.catKey === 'grounds') {
-      newRow['Serial #'] = r.itemNum;
+      newRow['Serial #'] = finalItemNum;
       newRow['Type'] = r.type || 'OH';
       newRow['Size'] = r.type === 'OH' ? (r.size || '') : '';
       newRow['KV'] = r.type === 'UG' ? (r.kv || '') : '';
@@ -2116,8 +2315,9 @@ END $$;`;
     }
 
     await this.db.addRow(item.catKey, newRow, `Equipment Audit (${req.foreman_name})`);
-    this.toast(`➕ Added ${item.catLabel} #${r.itemNum} to inventory!`, 'success');
-    await this.recordAppliedAction(key, `Added to ${item.catLabel} (${assignee})`);
+    const msgSuffix = `${wasUnnumbered ? ` (from ${r.itemNum})` : ''}${changeOutDate === 'OVERDUE' ? ' — flagged OVERDUE (no date)' : ''}`;
+    this.toast(`➕ Added ${item.catLabel} #${finalItemNum}${msgSuffix}!`, 'success');
+    await this.recordAppliedAction(key, `Added #${finalItemNum} to ${item.catLabel} (${assignee})`);
   }
 
   async applyMarkMissingLost(key) {

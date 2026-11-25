@@ -102,6 +102,11 @@ class InventoryManager {
    * HOT STICKS:
    * - Test Date + 24 months (2-year cycle per OSHA 1910.269 / ASTM F711)
    */
+  isMissingTestDate(val) {
+    const s = String(val || '').trim().toLowerCase();
+    return s === 'none' || s === 'no sticker' || s === 'no date' || s === 'missing' || s === 'unknown';
+  }
+
   calculateChangeOutDate(dateAssigned, location, assignedTo, itemType, extra = {}) {
     const sAssigned = String(assignedTo || '').trim().toLowerCase();
     const sLoc = String(location || '').trim().toLowerCase();
@@ -120,10 +125,20 @@ class InventoryManager {
       return 'N/A';
     }
 
+    // Missing Test Date or Calibration Date ("None" / no sticker) is ALWAYS out of date and requires changeout
+    const isCalType = (sType === 'hv_testers' || sType === 'hv testers' || sType === 'phasing_sets' || sType === 'phasing sets');
+    if (isCalType && this.isMissingTestDate(extra.calibrationDate)) {
+      return 'OVERDUE';
+    }
+    if (!isCalType && sType !== 'aed' && this.isMissingTestDate(extra.testDate)) {
+      return 'OVERDUE';
+    }
+
     const parseToDate = (val) => {
-      if (!val || val === 'N/A') return null;
+      if (!val || val === 'N/A' || this.isMissingTestDate(val)) return null;
       if (val instanceof Date) return isNaN(val.getTime()) ? null : val;
       const s = String(val).trim();
+      if (s.toUpperCase().includes('OVERDUE')) return null;
       if (s.includes('/')) {
         const parts = s.split('/');
         if (parts.length === 3) {
@@ -433,6 +448,9 @@ class InventoryManager {
           <div>
             <label style="display: block; font-size: 11.5px; font-weight: 700; margin-bottom: 4px;">TEST DATE</label>
             <input type="date" id="f-test-date" class="form-control" value="${todayIso}" onchange="window.inventoryManager.updatePreview()">
+            <label style="display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600; color: #fca5a5; margin-top: 4px; cursor: pointer;">
+              <input type="checkbox" id="f-date-none" onchange="window.inventoryManager.onNoDateToggled('f-test-date')"> None (No Sticker — Overdue)
+            </label>
           </div>
           <div>
             <label style="display: block; font-size: 11.5px; font-weight: 700; margin-bottom: 4px;">DATE ASSIGNED</label>
@@ -499,6 +517,9 @@ class InventoryManager {
           <div>
             <label style="display: block; font-size: 11.5px; font-weight: 700; margin-bottom: 4px;">TEST DATE *</label>
             <input type="date" id="f-test-date" class="form-control" value="${todayIso}" onchange="window.inventoryManager.updatePreview()">
+            <label style="display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600; color: #fca5a5; margin-top: 4px; cursor: pointer;">
+              <input type="checkbox" id="f-date-none" onchange="window.inventoryManager.onNoDateToggled('f-test-date')"> None (No Sticker — Overdue)
+            </label>
           </div>
         </div>
 
@@ -558,6 +579,9 @@ class InventoryManager {
           <div>
             <label style="display: block; font-size: 11.5px; font-weight: 700; margin-bottom: 4px;">TEST DATE *</label>
             <input type="date" id="f-test-date" class="form-control" value="${todayIso}" onchange="window.inventoryManager.updatePreview()">
+            <label style="display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600; color: #fca5a5; margin-top: 4px; cursor: pointer;">
+              <input type="checkbox" id="f-date-none" onchange="window.inventoryManager.onNoDateToggled('f-test-date')"> None (No Sticker — Overdue)
+            </label>
           </div>
           <div>
             <label style="display: block; font-size: 11.5px; font-weight: 700; margin-bottom: 4px;">STATUS</label>
@@ -623,6 +647,9 @@ class InventoryManager {
           <div>
             <label style="display: block; font-size: 11.5px; font-weight: 700; margin-bottom: 4px;">CALIBRATION DATE *</label>
             <input type="date" id="f-cal-date" class="form-control" value="${todayIso}" onchange="window.inventoryManager.updatePreview()">
+            <label style="display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600; color: #fca5a5; margin-top: 4px; cursor: pointer;">
+              <input type="checkbox" id="f-date-none" onchange="window.inventoryManager.onNoDateToggled('f-cal-date')"> None (No Sticker — Overdue)
+            </label>
           </div>
           <div>
             <label style="display: block; font-size: 11.5px; font-weight: 700; margin-bottom: 4px;">STATUS</label>
@@ -745,6 +772,9 @@ class InventoryManager {
           <div>
             <label style="display: block; font-size: 11.5px; font-weight: 700; margin-bottom: 4px;">TEST DATE * (1-YR CYCLE)</label>
             <input type="date" id="f-test-date" class="form-control" value="${todayIso}" onchange="window.inventoryManager.updatePreview()">
+            <label style="display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600; color: #fca5a5; margin-top: 4px; cursor: pointer;">
+              <input type="checkbox" id="f-date-none" onchange="window.inventoryManager.onNoDateToggled('f-test-date')"> None (No Sticker — Overdue)
+            </label>
           </div>
           <div>
             <label style="display: block; font-size: 11.5px; font-weight: 700; margin-bottom: 4px;">DATE ASSIGNED</label>
@@ -806,6 +836,9 @@ class InventoryManager {
           <div>
             <label style="display: block; font-size: 11.5px; font-weight: 700; margin-bottom: 4px;">TEST DATE * (2-YR CYCLE)</label>
             <input type="date" id="f-test-date" class="form-control" value="${todayIso}" onchange="window.inventoryManager.updatePreview()">
+            <label style="display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600; color: #fca5a5; margin-top: 4px; cursor: pointer;">
+              <input type="checkbox" id="f-date-none" onchange="window.inventoryManager.onNoDateToggled('f-test-date')"> None (No Sticker — Overdue)
+            </label>
           </div>
         </div>
 
@@ -1058,6 +1091,22 @@ class InventoryManager {
     this.updatePreview();
   }
 
+  onNoDateToggled(inputId) {
+    const cb = document.getElementById('f-date-none');
+    const inp = document.getElementById(inputId);
+    if (cb && inp) {
+      if (cb.checked) {
+        inp.value = '';
+        inp.disabled = true;
+        inp.style.opacity = '0.5';
+      } else {
+        inp.disabled = false;
+        inp.style.opacity = '1';
+      }
+    }
+    this.updatePreview();
+  }
+
   updatePreview() {
     const cat = document.getElementById('new-item-category') ? document.getElementById('new-item-category').value : 'gloves';
     const previewEl = document.getElementById('new-item-preview-change-out');
@@ -1066,8 +1115,10 @@ class InventoryManager {
     const assignedTo = document.getElementById('f-assigned-to') ? document.getElementById('f-assigned-to').value : '';
     const location = document.getElementById('f-location') ? document.getElementById('f-location').value : '';
     const dateAssigned = document.getElementById('f-date-assigned') ? document.getElementById('f-date-assigned').value : '';
-    const testDate = document.getElementById('f-test-date') ? document.getElementById('f-test-date').value : '';
-    const calDate = document.getElementById('f-cal-date') ? document.getElementById('f-cal-date').value : '';
+    const isNoDate = Boolean(document.getElementById('f-date-none')?.checked);
+    const isCalCat = (cat === 'hv_testers' || cat === 'phasing_sets');
+    const testDate = (!isCalCat && isNoDate) ? 'None' : (document.getElementById('f-test-date') ? document.getElementById('f-test-date').value : '');
+    const calDate = (isCalCat && isNoDate) ? 'None' : (document.getElementById('f-cal-date') ? document.getElementById('f-cal-date').value : '');
     const padExp = document.getElementById('f-pad-exp') ? document.getElementById('f-pad-exp').value : '';
     const batExp = document.getElementById('f-bat-exp') ? document.getElementById('f-bat-exp').value : '';
 
@@ -1078,7 +1129,7 @@ class InventoryManager {
       batteryExpiration: batExp
     });
 
-    previewEl.textContent = chgOut || '—';
+    previewEl.textContent = chgOut === 'OVERDUE' ? '⚠️ OVERDUE (No Test/Cal Sticker)' : (chgOut || '—');
   }
 
   async submitNewItem() {
@@ -1133,9 +1184,11 @@ class InventoryManager {
       }
     }
 
-    const rawTestDate = document.getElementById('f-test-date') ? document.getElementById('f-test-date').value : '';
+    const isNoDate = Boolean(document.getElementById('f-date-none')?.checked);
+    const isCalCat = (cat === 'hv_testers' || cat === 'phasing_sets');
+    const rawTestDate = (!isCalCat && isNoDate) ? 'None' : (document.getElementById('f-test-date') ? document.getElementById('f-test-date').value : '');
     const rawDateAssigned = document.getElementById('f-date-assigned') ? document.getElementById('f-date-assigned').value : '';
-    const rawCalDate = document.getElementById('f-cal-date') ? document.getElementById('f-cal-date').value : '';
+    const rawCalDate = (isCalCat && isNoDate) ? 'None' : (document.getElementById('f-cal-date') ? document.getElementById('f-cal-date').value : '');
     const rawPadExp = document.getElementById('f-pad-exp') ? document.getElementById('f-pad-exp').value : '';
     const rawBatExp = document.getElementById('f-bat-exp') ? document.getElementById('f-bat-exp').value : '';
 
@@ -1154,6 +1207,7 @@ class InventoryManager {
 
     const formatToMdY = (dStr) => {
       if (!dStr) return '';
+      if (this.isMissingTestDate(dStr)) return 'None';
       if (dStr.includes('/')) return dStr;
       const parts = dStr.split('-');
       if (parts.length === 3) return `${parts[1]}/${parts[2]}/${parts[0]}`;
@@ -1420,8 +1474,9 @@ class InventoryManager {
         const location = row['Location'];
         const assignedTo = row['Assigned To'];
         const currentChangeOut = row['Change Out Date'] || row['Pad Expiration'];
+        const hasMissingSticker = this.isMissingTestDate(row['Test Date']) || this.isMissingTestDate(row['Calibration Date']);
 
-        if (!dateAssigned) return;
+        if (!dateAssigned && !hasMissingSticker) return;
 
         const correct = this.calculateChangeOutDate(dateAssigned, location, assignedTo, tKey, {
           testDate: row['Test Date'],

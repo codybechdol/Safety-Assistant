@@ -1203,6 +1203,8 @@ class TaskManagerApp {
 
   checkIfOverdue(dateStr) {
     if (!dateStr || dateStr === 'N/A' || dateStr === '—') return false;
+    const sLower = String(dateStr).trim().toLowerCase();
+    if (sLower.includes('overdue') || sLower === 'none' || sLower === 'no sticker' || sLower === 'no date') return true;
     const d = this.parseDate(dateStr);
     if (!d || isNaN(d.getTime())) return false;
     const today = new Date().setHours(0, 0, 0, 0);

@@ -17,10 +17,29 @@ class SwapGenerationEngine {
     this._db = val;
   }
 
+  isMissingDateValue(val) {
+    const s = String(val || '').trim().toLowerCase();
+    return s === 'none' || s === 'no sticker' || s === 'no date' || s === 'missing' || s === 'unknown';
+  }
+
+  isNoDateOverdueRow(r) {
+    if (!r) return false;
+    const status = String(r['Status'] || '').trim().toLowerCase();
+    const assigned = String(r['Assigned To'] || '').trim().toLowerCase();
+    if (['lost', 'destroyed', 'failed rubber', 'not repairable', 'retired'].includes(status) ||
+        ['lost', 'destroyed', 'failed rubber', 'not repairable'].includes(assigned)) {
+      return false;
+    }
+    const chgStr = String(r['Change Out Date'] || '').trim().toUpperCase();
+    if (chgStr.includes('OVERDUE')) return true;
+    return this.isMissingDateValue(r['Test Date']) || this.isMissingDateValue(r['Calibration Date']);
+  }
+
   parseDate(val) {
-    if (!val || val === 'N/A' || val === '—' || val === '-') return null;
+    if (!val || val === 'N/A' || val === '—' || val === '-' || this.isMissingDateValue(val)) return null;
     if (val instanceof Date) return isNaN(val.getTime()) ? null : val;
     const s = String(val).trim();
+    if (s.toUpperCase().includes('OVERDUE')) return null;
     if (s.includes('/')) {
       const parts = s.split('/');
       if (parts.length === 3) {
@@ -742,9 +761,10 @@ class SwapGenerationEngine {
 
       if (isOnShelfOrNew && notOtherLifecycleState) {
         const testDateRaw = item['Test Date'] || item['Calibration Date'] || item['Date Tested'];
-        if (testDateRaw) {
+        const isMissingSticker = this.isMissingDateValue(testDateRaw) || String(item['Change Out Date'] || '').trim().toUpperCase().includes('OVERDUE');
+        if (testDateRaw || isMissingSticker) {
           const testDate = this.parseDate(testDateRaw);
-          if (testDate && !isNaN(testDate.getTime()) && testDate <= oneYearAgo) {
+          if (isMissingSticker || (testDate && !isNaN(testDate.getTime()) && testDate <= oneYearAgo)) {
             const itemNum = String(item['Item #'] || item['Glove'] || item['Sleeve'] || item['ESL ID'] || '').trim();
             const rawClass = item['Class'];
             const itemClass = (rawClass !== '' && rawClass !== null && rawClass !== undefined && !isNaN(parseInt(rawClass, 10)))
@@ -753,9 +773,10 @@ class SwapGenerationEngine {
             const sizeRaw = String(item['Size'] || '').trim();
             const sizeWithClass = sizeRaw + (itemClass !== null ? ` (Class ${itemClass})` : '');
             const dateAssigned = this.formatDate(item['Date Assigned']) || '';
-            const expDate = new Date(testDate.getFullYear() + 1, testDate.getMonth(), testDate.getDate());
-            const expDateFormatted = this.formatDate(expDate);
-            const changeOutVal = this.formatDate(item['Change Out Date']) || expDateFormatted;
+            const expDateFormatted = (testDate && !isNaN(testDate.getTime()))
+              ? this.formatDate(new Date(testDate.getFullYear() + 1, testDate.getMonth(), testDate.getDate()))
+              : 'OVERDUE (No Test Date)';
+            const changeOutVal = isMissingSticker ? 'OVERDUE (No Test Date)' : (this.formatDate(item['Change Out Date']) || expDateFormatted);
 
             const rowData = [
               assignedToRaw || 'On Shelf',
@@ -1017,12 +1038,17 @@ class SwapGenerationEngine {
         const size = String(item['Size'] || '').trim();
         const dateAssigned = item['Date Assigned'];
         const changeOutDate = item['Change Out Date'];
+        const isNoDateOverdue = this.isNoDateOverdueRow(item);
 
         let daysLeft = '';
         let daysLeftColor = '#388e3c';
         let daysDiff = 9999;
 
-        if (changeOutDate) {
+        if (isNoDateOverdue) {
+          daysLeft = 'OVERDUE';
+          daysDiff = -9999;
+          daysLeftColor = '#ff5252';
+        } else if (changeOutDate) {
           const chgDt = this.parseDate(changeOutDate);
           if (chgDt) {
             const days = this.getDaysDifference(chgDt, today);
@@ -1041,7 +1067,7 @@ class SwapGenerationEngine {
         }
 
         const isDue = (daysLeft === 'OVERDUE' || (typeof daysLeft === 'number' && daysLeft < 32));
-        if (dateAssigned && changeOutDate && isDue) {
+        if ((isNoDateOverdue || (dateAssigned && changeOutDate)) && isDue) {
           swapMeta.push({
             empName: String(emp['Name'] || emp['Employee Name'] || Object.values(emp)[0] || '').trim(),
             employeeLocation: employeeLocation,
@@ -1049,7 +1075,7 @@ class SwapGenerationEngine {
             itemNum: itemNum,
             size: size,
             dateAssigned: this.formatDate(dateAssigned),
-            changeOutDate: this.formatDate(changeOutDate),
+            changeOutDate: isNoDateOverdue ? (this.formatDate(changeOutDate) || 'OVERDUE (No Test Date)') : this.formatDate(changeOutDate),
             daysLeft: daysLeft,
             daysDiff: daysDiff,
             daysLeftColor: daysLeftColor,
@@ -1226,7 +1252,8 @@ class SwapGenerationEngine {
             const pickedFor = String(it['Picked For'] || '').trim();
             const isReservedForOther = (stat === 'ready for delivery') && pickedFor !== '' && !pickedFor.toLowerCase().includes(employeeName.toLowerCase());
             const notLost = !isLostLocate(it);
-            return stat === 'on shelf' && classMatch && sizeMatch && notAssigned && !isReservedForOther && notLost;
+            const hasValidTestDate = !this.isNoDateOverdueRow(it);
+            return stat === 'on shelf' && classMatch && sizeMatch && notAssigned && !isReservedForOther && notLost && hasValidTestDate;
           });
 
           if (match) {
@@ -1246,12 +1273,14 @@ class SwapGenerationEngine {
             const pickedFor = String(it['Picked For'] || '').trim();
             const isReservedForOther = (stat === 'ready for delivery') && pickedFor !== '' && !pickedFor.toLowerCase().includes(employeeName.toLowerCase());
             const notLost = !isLostLocate(it);
+            const hasValidTestDate = !this.isNoDateOverdueRow(it);
             return stat === 'on shelf' &&
                    parseClassNum(it['Class']) === meta.itemClass &&
                    parseFloat(it['Size']) === useSize + 0.5 &&
                    !assignedItemNums.has(itNum) &&
                    !isReservedForOther &&
-                   notLost;
+                   notLost &&
+                   hasValidTestDate;
           });
 
           if (match) {
@@ -2246,19 +2275,20 @@ class SwapGenerationEngine {
       const itemNum = String(r['Item #'] || r['Blanket'] || r['Blanket #'] || Object.entries(r).find(([k]) => k !== '_rowIdx')?.[1] || '').trim();
       const status = String(r['Status'] || '').trim().toLowerCase();
       const chgOut = this.parseDate(r['Change Out Date']);
+      const isNoDateOverdue = this.isNoDateOverdueRow(r);
       const assignedTo = String(r['Assigned To'] || '').trim();
 
       if (status === 'on shelf' || status === 'in stock' || status === 'available') {
-        shelfBlankets.push(r);
-      } else if ((status === 'in service' || status === 'assigned') && assignedTo && chgOut) {
-        const daysLeft = this.getDaysDifference(chgOut, today);
+        if (!isNoDateOverdue) shelfBlankets.push(r);
+      } else if ((status === 'in service' || status === 'assigned') && assignedTo && (chgOut || isNoDateOverdue)) {
+        const daysLeft = isNoDateOverdue ? -9999 : this.getDaysDifference(chgOut, today);
         if (daysLeft < 32) {
           blanketsNeedingSwap.push({
             itemNum: itemNum,
             type: r['Type'] || 'Regular',
             itemClass: r['Class'] || '2',
             dateAssigned: this.formatDate(r['Date Assigned']),
-            changeOutDate: this.formatDate(chgOut),
+            changeOutDate: isNoDateOverdue ? 'OVERDUE (No Test Date)' : this.formatDate(chgOut),
             daysLeft: daysLeft < 0 ? 'OVERDUE' : daysLeft,
             daysDiff: daysLeft,
             assignedTo: assignedTo,
@@ -2377,12 +2407,13 @@ class SwapGenerationEngine {
       const itemNum = String(r['Item #'] || r['ESL ID'] || r['MACK'] || r['MACK #'] || Object.entries(r).find(([k]) => k !== '_rowIdx')?.[1] || '').trim();
       const status = String(r['Status'] || '').trim().toLowerCase();
       const chgOut = this.parseDate(r['Change Out Date']);
+      const isNoDateOverdue = this.isNoDateOverdueRow(r);
       const assignedTo = String(r['Assigned To'] || '').trim();
 
       if (status === 'on shelf' || status === 'in stock' || status === 'available') {
-        shelfMacks.push(r);
-      } else if ((status === 'in service' || status === 'assigned') && assignedTo && chgOut) {
-        const daysLeft = this.getDaysDifference(chgOut, today);
+        if (!isNoDateOverdue) shelfMacks.push(r);
+      } else if ((status === 'in service' || status === 'assigned') && assignedTo && (chgOut || isNoDateOverdue)) {
+        const daysLeft = isNoDateOverdue ? -9999 : this.getDaysDifference(chgOut, today);
         if (daysLeft < 32) {
           macksNeedingSwap.push({
             itemNum: itemNum,
@@ -2390,7 +2421,7 @@ class SwapGenerationEngine {
             size: r['Size'] || '',
             length: r['Length'] || '',
             dateAssigned: this.formatDate(r['Date Assigned']),
-            changeOutDate: this.formatDate(chgOut),
+            changeOutDate: isNoDateOverdue ? 'OVERDUE (No Test Date)' : this.formatDate(chgOut),
             daysLeft: daysLeft < 0 ? 'OVERDUE' : daysLeft,
             daysDiff: daysLeft,
             assignedTo: assignedTo,
@@ -2503,12 +2534,13 @@ class SwapGenerationEngine {
       const itemNum = String(r['HVT #'] || r['Phasing Set #'] || r['Item #'] || r['Item'] || r['Serial #'] || Object.entries(r).find(([k]) => k !== '_rowIdx')?.[1] || '').trim();
       const status = String(r['Status'] || '').trim().toLowerCase();
       const chgOut = this.parseDate(r['Change Out Date'] || r['Calibration Date']);
+      const isNoDateOverdue = this.isNoDateOverdueRow(r);
       const assignedTo = String(r['Assigned To'] || '').trim();
 
       if (status === 'on shelf' || status === 'in stock' || status === 'available') {
-        shelfItems.push(r);
-      } else if ((status === 'in service' || status === 'assigned') && assignedTo && chgOut) {
-        const daysLeft = this.getDaysDifference(chgOut, today);
+        if (!isNoDateOverdue) shelfItems.push(r);
+      } else if ((status === 'in service' || status === 'assigned') && assignedTo && (chgOut || isNoDateOverdue)) {
+        const daysLeft = isNoDateOverdue ? -9999 : this.getDaysDifference(chgOut, today);
         if (daysLeft < 32) {
           needingSwap.push({
             itemNum: itemNum,
@@ -2516,7 +2548,7 @@ class SwapGenerationEngine {
             kv: r['KV'] || '',
             serialNum: r['Serial #'] || '',
             dateAssigned: this.formatDate(r['Date Assigned']),
-            changeOutDate: this.formatDate(chgOut),
+            changeOutDate: isNoDateOverdue ? 'OVERDUE (No Cal Date)' : this.formatDate(chgOut),
             daysLeft: daysLeft < 0 ? 'OVERDUE' : daysLeft,
             daysDiff: daysLeft,
             assignedTo: assignedTo,
@@ -2741,12 +2773,13 @@ class SwapGenerationEngine {
       const itemNum = String(r['Serial #'] || r['Ground #'] || r['Item #'] || Object.entries(r).find(([k]) => k !== '_rowIdx')?.[1] || '').trim();
       const status = String(r['Status'] || '').trim().toLowerCase();
       const chgOut = this.parseDate(r['Change Out Date']);
+      const isNoDateOverdue = this.isNoDateOverdueRow(r);
       const assignedTo = String(r['Assigned To'] || '').trim();
 
       if (status === 'on shelf' || status === 'in stock' || status === 'available') {
-        shelfItems.push(r);
-      } else if ((status === 'in service' || status === 'assigned') && assignedTo && chgOut) {
-        const daysLeft = this.getDaysDifference(chgOut, today);
+        if (!isNoDateOverdue) shelfItems.push(r);
+      } else if ((status === 'in service' || status === 'assigned') && assignedTo && (chgOut || isNoDateOverdue)) {
+        const daysLeft = isNoDateOverdue ? -9999 : this.getDaysDifference(chgOut, today);
         if (daysLeft < 32) {
           needingSwap.push({
             itemNum: itemNum,
@@ -2755,8 +2788,9 @@ class SwapGenerationEngine {
             kv: r['KV'] || '',
             length: r['Length'] || '',
             dateAssigned: this.formatDate(r['Date Assigned']),
-            changeOutDate: this.formatDate(chgOut),
+            changeOutDate: isNoDateOverdue ? 'OVERDUE (No Test Date)' : this.formatDate(chgOut),
             daysLeft: daysLeft < 0 ? 'OVERDUE' : daysLeft,
+            daysDiff: daysLeft,
             assignedTo: assignedTo,
             status: r['Status'] || 'In Service'
           });
@@ -2860,20 +2894,22 @@ class SwapGenerationEngine {
       const itemNum = String(r['Item #'] || r['Hot Stick #'] || r['Item'] || Object.entries(r).find(([k]) => k !== '_rowIdx')?.[1] || '').trim();
       const status = String(r['Status'] || '').trim().toLowerCase();
       const chgOut = this.parseDate(r['Change Out Date']);
+      const isNoDateOverdue = this.isNoDateOverdueRow(r);
       const assignedTo = String(r['Assigned To'] || '').trim();
 
       if (status === 'on shelf' || status === 'in stock' || status === 'available') {
-        shelfItems.push(r);
-      } else if ((status === 'in service' || status === 'assigned') && assignedTo && chgOut) {
-        const daysLeft = this.getDaysDifference(chgOut, today);
+        if (!isNoDateOverdue) shelfItems.push(r);
+      } else if ((status === 'in service' || status === 'assigned') && assignedTo && (chgOut || isNoDateOverdue)) {
+        const daysLeft = isNoDateOverdue ? -9999 : this.getDaysDifference(chgOut, today);
         if (daysLeft < 32) {
           needingSwap.push({
             itemNum: itemNum,
             type: r['Type'] || '',
             length: r['Length'] || '',
             dateAssigned: this.formatDate(r['Date Assigned']),
-            changeOutDate: this.formatDate(chgOut),
+            changeOutDate: isNoDateOverdue ? 'OVERDUE (No Test Date)' : this.formatDate(chgOut),
             daysLeft: daysLeft < 0 ? 'OVERDUE' : daysLeft,
+            daysDiff: daysLeft,
             assignedTo: assignedTo,
             status: r['Status'] || 'In Service'
           });

@@ -174,12 +174,63 @@
       .replace(/'/g, '&#39;');
   }
 
+  function isMissingDateValue(val) {
+    const s = String(val || '').trim().toLowerCase();
+    return s === 'none' || s === 'no sticker' || s === 'no date';
+  }
+
+  function isBareUnnumberedNA(val) {
+    return /^n\s*\/?\s*a$/i.test(String(val || '').trim());
+  }
+
+  function extractUnnumberedNAIndex(val) {
+    const m = String(val || '').trim().match(/^n\s*\/?\s*a[-\s#]*(\d+)$/i);
+    return m ? parseInt(m[1], 10) : null;
+  }
+
+  function getNextAutoNAId(catKey, excludeId = null) {
+    const existingList = state.draft.items[catKey] || [];
+    const usedIds = new Set();
+    let maxIdx = 0;
+    existingList.forEach((it) => {
+      if (excludeId && it.id === excludeId) return;
+      const raw = String(it.itemNum || '').trim();
+      usedIds.add(raw.toLowerCase());
+      const idx = extractUnnumberedNAIndex(raw);
+      if (idx !== null && idx > maxIdx) maxIdx = idx;
+    });
+    let next = maxIdx + 1;
+    while (usedIds.has(`na${next}`)) next++;
+    return `NA${next}`;
+  }
+
   function formatDisplayDate(isoStr) {
     if (!isoStr) return '';
+    if (isMissingDateValue(isoStr)) return 'None (No Sticker)';
     const s = String(isoStr).trim();
     const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
     if (m) return `${m[2]}/${m[3]}/${m[1]}`;
     return s;
+  }
+
+  function renderDateWithNoneField(inputId, labelText, currentVal) {
+    const isNone = isMissingDateValue(currentVal);
+    const dateVal = isNone ? '' : escapeHtml(currentVal || '');
+    return `
+      <div class="field-group">
+        <label class="field-label" for="${inputId}">
+          <span>${escapeHtml(labelText)} <span class="field-req">*</span></span>
+        </label>
+        <div class="date-input-wrap">
+          <input type="date" id="${inputId}" class="field-input ${isNone ? 'date-disabled' : ''}"
+            value="${dateVal}" ${isNone ? 'disabled' : ''}>
+          <button type="button" class="date-none-btn ${isNone ? 'active' : ''}"
+            data-none-target="${inputId}" aria-pressed="${isNone ? 'true' : 'false'}">
+            ${isNone ? '⚠️ None — No Sticker (Needs Changeout)' : '🚫 None (No Sticker / Missing Date)'}
+          </button>
+        </div>
+      </div>
+    `;
   }
 
   function formatTimestamp(ts) {
@@ -661,8 +712,9 @@
           <label class="field-label" for="f-item-num">
             <span>${isGlove ? 'Glove / Item #' : 'Sleeve / Item #'} <span class="field-req">*</span></span>
           </label>
-          <input type="text" id="f-item-num" class="field-input" placeholder="${isGlove ? 'e.g., 2045' : 'e.g., S-1102'}"
+          <input type="text" id="f-item-num" class="field-input" placeholder="${isGlove ? 'e.g., 2045 or NA' : 'e.g., S-1102 or NA'}"
             value="${escapeHtml(vals.itemNum || '')}" autocapitalize="characters">
+          <div class="field-hint">Not numbered? Type <strong>NA</strong> (auto-numbers NA1, NA2...)</div>
         </div>
 
         <div class="field-group">
@@ -698,12 +750,7 @@
           </select>
         </div>
 
-        <div class="field-group">
-          <label class="field-label" for="f-test-date">
-            <span>Test Date <span class="field-req">*</span></span>
-          </label>
-          <input type="date" id="f-test-date" class="field-input" value="${escapeHtml(vals.testDate || '')}">
-        </div>
+        ${renderDateWithNoneField('f-test-date', 'Test Date', vals.testDate)}
 
         <div class="field-group">
           <label class="field-label" for="f-notes">
@@ -720,8 +767,9 @@
           <label class="field-label" for="f-item-num">
             <span>Blanket # <span class="field-req">*</span></span>
           </label>
-          <input type="text" id="f-item-num" class="field-input" placeholder="e.g., B104 or S208"
+          <input type="text" id="f-item-num" class="field-input" placeholder="e.g., B104, S208, or NA"
             value="${escapeHtml(vals.itemNum || '')}" autocapitalize="characters">
+          <div class="field-hint">Not numbered? Type <strong>NA</strong> (auto-numbers NA1, NA2...)</div>
         </div>
 
         <div class="field-group">
@@ -743,12 +791,7 @@
           </select>
         </div>
 
-        <div class="field-group">
-          <label class="field-label" for="f-test-date">
-            <span>Test Date <span class="field-req">*</span></span>
-          </label>
-          <input type="date" id="f-test-date" class="field-input" value="${escapeHtml(vals.testDate || '')}">
-        </div>
+        ${renderDateWithNoneField('f-test-date', 'Test Date', vals.testDate)}
 
         <div class="field-group full-width">
           <label class="field-label" for="f-notes">
@@ -764,8 +807,9 @@
           <label class="field-label" for="f-item-num">
             <span>MACK # (ESL ID) <span class="field-req">*</span></span>
           </label>
-          <input type="text" id="f-item-num" class="field-input" placeholder="e.g., 64977789"
+          <input type="text" id="f-item-num" class="field-input" placeholder="e.g., 64977789 or NA"
             value="${escapeHtml(vals.itemNum || '')}" autocapitalize="characters">
+          <div class="field-hint">Not numbered? Type <strong>NA</strong> (auto-numbers NA1, NA2...)</div>
         </div>
 
         <div class="field-group">
@@ -798,12 +842,7 @@
           </div>
         </div>
 
-        <div class="field-group">
-          <label class="field-label" for="f-test-date">
-            <span>Test Date <span class="field-req">*</span></span>
-          </label>
-          <input type="date" id="f-test-date" class="field-input" value="${escapeHtml(vals.testDate || '')}">
-        </div>
+        ${renderDateWithNoneField('f-test-date', 'Test Date', vals.testDate)}
 
         <div class="field-group">
           <label class="field-label" for="f-notes">
@@ -825,8 +864,9 @@
           <label class="field-label" for="f-item-num">
             <span>${isHV ? 'HVT # / Item #' : 'Phasing Set #'} <span class="field-req">*</span></span>
           </label>
-          <input type="text" id="f-item-num" class="field-input" placeholder="${isHV ? 'e.g., HVT-04' : 'e.g., PS-12'}"
+          <input type="text" id="f-item-num" class="field-input" placeholder="${isHV ? 'e.g., HVT-04 or NA' : 'e.g., PS-12 or NA'}"
             value="${escapeHtml(vals.itemNum || '')}" autocapitalize="characters">
+          <div class="field-hint">Not numbered? Type <strong>NA</strong> (auto-numbers NA1, NA2...)</div>
         </div>
 
         <div class="field-group">
@@ -861,12 +901,7 @@
             value="${escapeHtml(vals.serialNum || '')}" autocapitalize="characters">
         </div>
 
-        <div class="field-group">
-          <label class="field-label" for="f-cal-date">
-            <span>Calibration Date <span class="field-req">*</span></span>
-          </label>
-          <input type="date" id="f-cal-date" class="field-input" value="${escapeHtml(vals.calibrationDate || '')}">
-        </div>
+        ${renderDateWithNoneField('f-cal-date', 'Calibration Date', vals.calibrationDate)}
 
         <div class="field-group">
           <label class="field-label" for="f-notes">
@@ -886,8 +921,9 @@
           <label class="field-label" for="f-item-num">
             <span>AED # / Item # <span class="field-req">*</span></span>
           </label>
-          <input type="text" id="f-item-num" class="field-input" placeholder="e.g., AED-01"
+          <input type="text" id="f-item-num" class="field-input" placeholder="e.g., AED-01 or NA"
             value="${escapeHtml(vals.itemNum || '')}" autocapitalize="characters">
+          <div class="field-hint">Not numbered? Type <strong>NA</strong> (auto-numbers NA1, NA2...)</div>
         </div>
 
         <div class="field-group">
@@ -941,8 +977,9 @@
           <label class="field-label" for="f-item-num">
             <span>Serial # / Ground # <span class="field-req">*</span></span>
           </label>
-          <input type="text" id="f-item-num" class="field-input" placeholder="e.g., GND-552"
+          <input type="text" id="f-item-num" class="field-input" placeholder="e.g., GND-552 or NA"
             value="${escapeHtml(vals.itemNum || '')}" autocapitalize="characters">
+          <div class="field-hint">Not numbered? Type <strong>NA</strong> (auto-numbers NA1, NA2...)</div>
         </div>
 
         <div class="field-group">
@@ -985,12 +1022,7 @@
           </div>
         </div>
 
-        <div class="field-group">
-          <label class="field-label" for="f-test-date">
-            <span>Test Date <span class="field-req">*</span></span>
-          </label>
-          <input type="date" id="f-test-date" class="field-input" value="${escapeHtml(vals.testDate || '')}">
-        </div>
+        ${renderDateWithNoneField('f-test-date', 'Test Date', vals.testDate)}
 
         <div class="field-group full-width">
           <label class="field-label" for="f-notes">
@@ -1010,8 +1042,9 @@
           <label class="field-label" for="f-item-num">
             <span>Stick # / Item # <span class="field-req">*</span></span>
           </label>
-          <input type="text" id="f-item-num" class="field-input" placeholder="e.g., HS-10, TEL-04"
+          <input type="text" id="f-item-num" class="field-input" placeholder="e.g., HS-10, TEL-04, or NA"
             value="${escapeHtml(vals.itemNum || '')}" autocapitalize="characters">
+          <div class="field-hint">Not numbered? Type <strong>NA</strong> (auto-numbers NA1, NA2...)</div>
         </div>
 
         <div class="field-group">
@@ -1037,12 +1070,7 @@
           </div>
         </div>
 
-        <div class="field-group">
-          <label class="field-label" for="f-test-date">
-            <span>Test Date <span class="field-req">*</span></span>
-          </label>
-          <input type="date" id="f-test-date" class="field-input" value="${escapeHtml(vals.testDate || '')}">
-        </div>
+        ${renderDateWithNoneField('f-test-date', 'Test Date', vals.testDate)}
 
         <div class="field-group full-width">
           <label class="field-label" for="f-notes">
@@ -1116,6 +1144,30 @@
       });
     });
 
+    // Date "None (No Sticker)" toggles
+    document.querySelectorAll('.date-none-btn').forEach((btn) => {
+      const targetId = btn.dataset.noneTarget;
+      const dateInput = document.getElementById(targetId);
+      if (!dateInput) return;
+      btn.addEventListener('click', () => {
+        const nextActive = !btn.classList.contains('active');
+        btn.classList.toggle('active', nextActive);
+        btn.setAttribute('aria-pressed', nextActive ? 'true' : 'false');
+        btn.textContent = nextActive
+          ? '⚠️ None — No Sticker (Needs Changeout)'
+          : '🚫 None (No Sticker / Missing Date)';
+        if (nextActive) {
+          dateInput.value = '';
+          dateInput.disabled = true;
+          dateInput.classList.add('date-disabled');
+        } else {
+          dateInput.disabled = false;
+          dateInput.classList.remove('date-disabled');
+          dateInput.focus();
+        }
+      });
+    });
+
     // Blanket prefix auto-detect (B -> Regular, S -> Split)
     if (catKey === 'blankets') {
       const itemInput = document.getElementById('f-item-num');
@@ -1142,20 +1194,38 @@
       const el = document.getElementById(id);
       return el ? String(el.value || '').trim() : '';
     };
+    const readDateOrNone = (id) => {
+      const noneBtn = document.querySelector(`.date-none-btn[data-none-target="${id}"]`);
+      if (noneBtn && noneBtn.classList.contains('active')) return 'None';
+      return val(id);
+    };
 
-    const itemNum = val('f-item-num');
+    let itemNum = val('f-item-num');
     if (!itemNum) {
-      return { error: `Please enter the ${CATEGORY_MAP[catKey].idLabel}.` };
+      return { error: `Please enter the ${CATEGORY_MAP[catKey].idLabel} (or type NA if unnumbered).` };
+    }
+
+    // Auto-number plain NA / N/A / na / n/a into NA1, NA2, NA3... if the foreman didn't add a digit
+    let autoNumberedFrom = '';
+    if (isBareUnnumberedNA(itemNum)) {
+      autoNumberedFrom = itemNum;
+      itemNum = getNextAutoNAId(catKey, state.editingId);
     }
 
     // Check duplicate in current category (unless editing that exact entry)
     const existingList = state.draft.items[catKey] || [];
+    const normKey = (s) => String(s || '').trim().replace(/\s+/g, '').toLowerCase();
     const dup = existingList.find((it) =>
       it.id !== state.editingId &&
-      String(it.itemNum || '').trim().toLowerCase() === itemNum.toLowerCase()
+      normKey(it.itemNum) === normKey(itemNum)
     );
     if (dup) {
-      return { error: `Item "${itemNum}" is already in your ${CATEGORY_MAP[catKey].label} list. Edit the existing entry instead.` };
+      const isNAEntry = extractUnnumberedNAIndex(itemNum) !== null;
+      return {
+        error: isNAEntry
+          ? `Item "${itemNum}" is already in your ${CATEGORY_MAP[catKey].label} list. Enter the next number or just type NA to auto-number.`
+          : `Item "${itemNum}" is already in your ${CATEGORY_MAP[catKey].label} list. Edit the existing entry instead.`
+      };
     }
 
     const entry = {
@@ -1178,8 +1248,8 @@
       if (!size) return { error: 'Please select or enter the size.' };
       const itemClass = val('f-class');
       if (!itemClass) return { error: 'Please select the voltage class.' };
-      const testDate = val('f-test-date');
-      if (!testDate) return { error: 'Please enter the test date.' };
+      const testDate = readDateOrNone('f-test-date');
+      if (!testDate) return { error: 'Please enter the test date or tap "None (No Sticker)".' };
 
       entry.employeeName = employeeName;
       entry.eslId = val('f-esl-id');
@@ -1189,8 +1259,8 @@
     } else if (catKey === 'blankets') {
       const bType = val('f-type') || 'Regular';
       const itemClass = val('f-class') || '4';
-      const testDate = val('f-test-date');
-      if (!testDate) return { error: 'Please enter the blanket test date.' };
+      const testDate = readDateOrNone('f-test-date');
+      if (!testDate) return { error: 'Please enter the blanket test date or tap "None (No Sticker)".' };
       entry.type = bType;
       entry.itemClass = itemClass;
       entry.testDate = testDate;
@@ -1198,11 +1268,11 @@
       const kv = val('f-kv');
       const size = val('f-size');
       const length = val('f-length');
-      const testDate = val('f-test-date');
+      const testDate = readDateOrNone('f-test-date');
       if (!kv) return { error: 'Please enter the kV rating.' };
       if (!size) return { error: 'Please enter the conductor size.' };
       if (!length) return { error: 'Please enter the length.' };
-      if (!testDate) return { error: 'Please enter the test date.' };
+      if (!testDate) return { error: 'Please enter the test date or tap "None (No Sticker)".' };
       entry.kv = kv;
       entry.size = size;
       entry.length = length;
@@ -1210,8 +1280,8 @@
     } else if (catKey === 'hv_testers' || catKey === 'phasing_sets') {
       const modelSel = val('f-model-select');
       const model = modelSel === '__OTHER__' ? val('f-model-custom') : modelSel;
-      const calibrationDate = val('f-cal-date');
-      if (!calibrationDate) return { error: 'Please enter the calibration date.' };
+      const calibrationDate = readDateOrNone('f-cal-date');
+      if (!calibrationDate) return { error: 'Please enter the calibration date or tap "None (No Sticker)".' };
       entry.model = model;
       entry.kv = val('f-kv');
       entry.serialNum = val('f-serial-num');
@@ -1228,9 +1298,9 @@
     } else if (catKey === 'grounds') {
       const gType = val('f-type') || 'OH';
       const length = val('f-length');
-      const testDate = val('f-test-date');
+      const testDate = readDateOrNone('f-test-date');
       if (!length) return { error: 'Please enter the ground set length.' };
-      if (!testDate) return { error: 'Please enter the test date.' };
+      if (!testDate) return { error: 'Please enter the test date or tap "None (No Sticker)".' };
       entry.type = gType;
       entry.size = gType === 'OH' ? val('f-size') : '';
       entry.kv = gType === 'UG' ? val('f-kv') : '';
@@ -1240,16 +1310,16 @@
       const typeSel = val('f-type-select');
       const type = typeSel === '__OTHER__' ? val('f-type-custom') : typeSel;
       const length = val('f-length');
-      const testDate = val('f-test-date');
+      const testDate = readDateOrNone('f-test-date');
       if (!type) return { error: 'Please select or enter the hot stick type.' };
       if (!length) return { error: 'Please enter the hot stick length.' };
-      if (!testDate) return { error: 'Please enter the test date.' };
+      if (!testDate) return { error: 'Please enter the test date or tap "None (No Sticker)".' };
       entry.type = type;
       entry.length = length;
       entry.testDate = testDate;
     }
 
-    return { entry };
+    return { entry, autoNumberedFrom };
   }
 
   function showValidationMsg(msg) {
@@ -1266,7 +1336,7 @@
 
   function handleSaveEntry(keepSpecs = false) {
     const catKey = state.activeCategory;
-    const { entry, error } = readAndValidateEntry(catKey);
+    const { entry, error, autoNumberedFrom } = readAndValidateEntry(catKey);
     if (error) {
       showValidationMsg(error);
       return;
@@ -1278,11 +1348,11 @@
       const idx = list.findIndex((i) => i.id === state.editingId);
       if (idx !== -1) list[idx] = entry;
       state.editingId = null;
-      showToast(`Updated ${entry.itemNum}`, 'success');
+      showToast(autoNumberedFrom ? `Auto-numbered as ${entry.itemNum} & updated` : `Updated ${entry.itemNum}`, 'success');
     } else {
       list.unshift(entry);
       state.draft.noneConfirmed[catKey] = false;
-      showToast(`Added ${entry.itemNum}`, 'success');
+      showToast(autoNumberedFrom ? `Auto-numbered as ${entry.itemNum} & added` : `Added ${entry.itemNum}`, 'success');
     }
 
     markDraftModified();
@@ -1308,47 +1378,57 @@
   // ---------------------------------------------------------------------------
   function buildItemSpecPills(catKey, it) {
     const pills = [];
+    const pushDatePill = (prefix, rawVal) => {
+      if (!rawVal) return;
+      if (isMissingDateValue(rawVal)) {
+        pills.push({ text: `⚠️ ${prefix}: None (Needs Changeout)`, warn: true });
+      } else {
+        pills.push({ text: `${prefix} ${formatDisplayDate(rawVal)}`, warn: false });
+      }
+    };
+    const pushStd = (text) => pills.push({ text, warn: false });
+
     if (catKey === 'gloves' || catKey === 'sleeves') {
-      if (it.eslId) pills.push(`ESL: ${it.eslId}`);
-      if (it.size) pills.push(`Size ${it.size}`);
-      if (it.itemClass) pills.push(`Class ${it.itemClass}`);
-      if (it.testDate) pills.push(`Tested ${formatDisplayDate(it.testDate)}`);
+      if (it.eslId) pushStd(`ESL: ${it.eslId}`);
+      if (it.size) pushStd(`Size ${it.size}`);
+      if (it.itemClass !== undefined && it.itemClass !== null && String(it.itemClass).trim() !== '') pushStd(`Class ${it.itemClass}`);
+      pushDatePill('Tested', it.testDate);
     } else if (catKey === 'blankets') {
-      if (it.type) pills.push(it.type);
-      if (it.itemClass) pills.push(`Class ${it.itemClass}`);
-      if (it.testDate) pills.push(`Tested ${formatDisplayDate(it.testDate)}`);
+      if (it.type) pushStd(it.type);
+      if (it.itemClass) pushStd(`Class ${it.itemClass}`);
+      pushDatePill('Tested', it.testDate);
     } else if (catKey === 'macks') {
-      if (it.kv) pills.push(it.kv);
-      if (it.size) pills.push(it.size);
-      if (it.length) pills.push(it.length);
-      if (it.testDate) pills.push(`Tested ${formatDisplayDate(it.testDate)}`);
+      if (it.kv) pushStd(it.kv);
+      if (it.size) pushStd(it.size);
+      if (it.length) pushStd(it.length);
+      pushDatePill('Tested', it.testDate);
     } else if (catKey === 'hv_testers' || catKey === 'phasing_sets') {
-      if (it.model) pills.push(it.model);
-      if (it.kv) pills.push(`${it.kv}${String(it.kv).toUpperCase().includes('KV') ? '' : ' kV'}`);
-      if (it.serialNum) pills.push(`S/N: ${it.serialNum}`);
-      if (it.calibrationDate) pills.push(`Cal ${formatDisplayDate(it.calibrationDate)}`);
+      if (it.model) pushStd(it.model);
+      if (it.kv) pushStd(`${it.kv}${String(it.kv).toUpperCase().includes('KV') ? '' : ' kV'}`);
+      if (it.serialNum) pushStd(`S/N: ${it.serialNum}`);
+      pushDatePill('Cal', it.calibrationDate);
     } else if (catKey === 'aed') {
-      if (it.model) pills.push(it.model);
-      if (it.serialNum) pills.push(`S/N: ${it.serialNum}`);
-      if (it.padExpiration) pills.push(`Pads Exp ${formatDisplayDate(it.padExpiration)}`);
-      if (it.batteryExpiration) pills.push(`Battery Exp ${formatDisplayDate(it.batteryExpiration)}`);
+      if (it.model) pushStd(it.model);
+      if (it.serialNum) pushStd(`S/N: ${it.serialNum}`);
+      if (it.padExpiration) pushStd(`Pads Exp ${formatDisplayDate(it.padExpiration)}`);
+      if (it.batteryExpiration) pushStd(`Battery Exp ${formatDisplayDate(it.batteryExpiration)}`);
     } else if (catKey === 'grounds') {
-      if (it.type) pills.push(it.type);
-      if (it.type === 'OH' && it.size) pills.push(it.size);
-      if (it.type === 'UG' && it.kv) pills.push(it.kv);
-      if (it.length) pills.push(it.length);
-      if (it.testDate) pills.push(`Tested ${formatDisplayDate(it.testDate)}`);
+      if (it.type) pushStd(it.type);
+      if (it.type === 'OH' && it.size) pushStd(it.size);
+      if (it.type === 'UG' && it.kv) pushStd(it.kv);
+      if (it.length) pushStd(it.length);
+      pushDatePill('Tested', it.testDate);
     } else if (catKey === 'hot_sticks') {
-      if (it.type) pills.push(it.type);
-      if (it.length) pills.push(it.length);
-      if (it.testDate) pills.push(`Tested ${formatDisplayDate(it.testDate)}`);
+      if (it.type) pushStd(it.type);
+      if (it.length) pushStd(it.length);
+      pushDatePill('Tested', it.testDate);
     }
     return pills;
   }
 
   function renderItemCard(catKey, it) {
     const pills = buildItemSpecPills(catKey, it)
-      .map((p) => `<span class="spec-pill">${escapeHtml(p)}</span>`)
+      .map((p) => `<span class="spec-pill${p.warn ? ' warn' : ''}">${escapeHtml(p.text)}</span>`)
       .join('');
     return `
       <div class="item-card" data-item-id="${escapeHtml(it.id)}">

@@ -13671,6 +13671,11 @@ class SheetNavigator {
             return stat === 'failed rubber' || assigned === 'failed rubber' || stat === 'failed' || assigned === 'failed';
           }
           if (this.filterStatus === 'expiring_soon' || this.filterStatus === 'overdue') {
+            const rawTestLower = String(r['Test Date'] || r['Calibration Date'] || '').trim().toLowerCase();
+            const isNoDateOverdue = chgOutStr.toUpperCase().includes('OVERDUE') || rawTestLower === 'none' || rawTestLower === 'no sticker' || rawTestLower === 'no date';
+            if (isNoDateOverdue) {
+              return this.filterStatus === 'overdue';
+            }
             if (!chgOutStr || chgOutStr === 'N/A') return false;
             let dTime = NaN;
             if (chgOutStr.includes('/')) {

@@ -603,10 +603,36 @@ class InventoryAgingEngine {
         let recertLabel = '🟢 Current';
         let recertBadgeClass = 'badge-success';
 
+        let rawTestStr = '';
+        let rawChgOutStr = '';
+        if (Array.isArray(row)) {
+          if (cat.key === 'gloves' || cat.key === 'sleeves' || cat.key === 'macks' || cat.key === 'hv_testers' || cat.key === 'phasing_sets') {
+            rawTestStr = String(row[4] || '').trim().toLowerCase();
+            rawChgOutStr = String(row[9] || '').trim().toLowerCase();
+          } else if (cat.key === 'blankets' || cat.key === 'hot_sticks') {
+            rawTestStr = String(row[3] || '').trim().toLowerCase();
+            rawChgOutStr = String(row[8] || '').trim().toLowerCase();
+          } else if (cat.key === 'grounds') {
+            rawTestStr = String(row[5] || '').trim().toLowerCase();
+            rawChgOutStr = String(row[10] || '').trim().toLowerCase();
+          }
+        } else if (typeof row === 'object' && row !== null) {
+          rawTestStr = String(row['Test Date'] || row['Calibration Date'] || '').trim().toLowerCase();
+          rawChgOutStr = String(row['Change Out Date'] || '').trim().toLowerCase();
+        }
+        const isMissingStickerOverdue = !recertIsNA && (
+          rawTestStr === 'none' || rawTestStr === 'no sticker' || rawTestStr === 'no date' || rawChgOutStr.includes('overdue')
+        );
+
         if (recertIsNA) {
           recertStatus = 'NA';
           recertLabel = 'N/A';
           recertBadgeClass = 'badge-secondary';
+        } else if (isMissingStickerOverdue) {
+          daysUntil = -9999;
+          recertStatus = 'OVERDUE';
+          recertLabel = '🔴 Overdue (No Test Date)';
+          recertBadgeClass = 'badge-danger';
         } else if (finalRecertDate && !isNaN(finalRecertDate.getTime())) {
           daysUntil = Math.floor((finalRecertDate - today) / (1000 * 60 * 60 * 24));
           if (daysUntil < 0) {

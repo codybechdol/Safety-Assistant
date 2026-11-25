@@ -30,6 +30,8 @@ function calculateChangeOutDate(dateAssigned, location, assignedTo, isSleeve, te
 
   var assignedToLower = (assignedTo || '').toString().trim().toLowerCase();
   var locationLower = typeof getPhysicalLocation === 'function' ? getPhysicalLocation(location).toLowerCase() : String(location || '').toLowerCase();
+  var testDateLower = String(testDate || '').trim().toLowerCase();
+  var isMissingSticker = (testDateLower === 'none' || testDateLower === 'no sticker' || testDateLower === 'no date');
 
   // SLEEVES: Always 12 months (hardcoded from Date Assigned)
   if (isSleeve) {
@@ -39,6 +41,7 @@ function calculateChangeOutDate(dateAssigned, location, assignedTo, isSleeve, te
         locationLower === 'destroyed' || locationLower === 'lost') {
       return 'N/A';
     }
+    if (isMissingSticker) return 'OVERDUE';
     var baseDate = dateAssigned || testDate;
     var d = typeof parseDateNoon === 'function' ? parseDateNoon(baseDate) : new Date(baseDate);
     if (!d || isNaN(d.getTime())) return null;
@@ -53,6 +56,7 @@ function calculateChangeOutDate(dateAssigned, location, assignedTo, isSleeve, te
       locationLower === 'destroyed' || locationLower === 'lost') {
     return 'N/A';
   }
+  if (isMissingSticker) return 'OVERDUE';
 
   // If On Shelf, shelf life is 1 year from Test Date (or Date Assigned)
   // If Assigned to Employee, wear cycle is 3 months from Date Assigned (6 months for Northern Lights)

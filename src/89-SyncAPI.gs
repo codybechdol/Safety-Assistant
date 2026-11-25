@@ -2213,26 +2213,32 @@ function applyBatchSyncMutations(mutations, returnSnapshot, options) {
                     safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColLocation), newLocation);
                   }
 
-                  // Recalculate Change Out Date if Date Assigned exists
-                  if (eqColDateAssigned && eqColChangeOutDate && assignedValLower !== 'failed rubber' && assignedValLower !== 'lost') {
-                    var dateAssignedVal = sheet.getRange(targetRow, eqColDateAssigned).getValue();
-                    if (dateAssignedVal) {
-                      var chgOut = null;
-                      if (isBlanket && typeof calculateBlanketChangeOutDate === 'function') {
-                        var bTest = sheet.getRange(targetRow, eqColTestDate).getValue();
-                        chgOut = calculateBlanketChangeOutDate(bTest);
-                      } else if (isMack && typeof calculateMackChangeOutDate === 'function') {
-                        var mTest = sheet.getRange(targetRow, eqColTestDate).getValue();
-                        chgOut = calculateMackChangeOutDate(mTest);
-                      } else if (typeof calculateChangeOutDate === 'function') {
-                        chgOut = calculateChangeOutDate(dateAssignedVal, newLocation, assignedVal, isSleeve);
+                  // Recalculate Change Out Date if Date Assigned exists (or if Test/Calibration Date is None -> OVERDUE)
+                  if (eqColChangeOutDate && assignedValLower !== 'failed rubber' && assignedValLower !== 'lost') {
+                    var rawTestForAssigned = eqColTestDate ? String(sheet.getRange(targetRow, eqColTestDate).getValue() || '').trim().toLowerCase() : '';
+                    var isMissingStickerAssigned = (rawTestForAssigned === 'none' || rawTestForAssigned === 'no sticker' || rawTestForAssigned === 'no date');
+                    if (isMissingStickerAssigned && !isAED) {
+                      safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColChangeOutDate), 'OVERDUE');
+                    } else if (eqColDateAssigned) {
+                      var dateAssignedVal = sheet.getRange(targetRow, eqColDateAssigned).getValue();
+                      if (dateAssignedVal) {
+                        var chgOut = null;
+                        if (isBlanket && typeof calculateBlanketChangeOutDate === 'function') {
+                          var bTest = sheet.getRange(targetRow, eqColTestDate).getValue();
+                          chgOut = calculateBlanketChangeOutDate(bTest);
+                        } else if (isMack && typeof calculateMackChangeOutDate === 'function') {
+                          var mTest = sheet.getRange(targetRow, eqColTestDate).getValue();
+                          chgOut = calculateMackChangeOutDate(mTest);
+                        } else if (typeof calculateChangeOutDate === 'function') {
+                          chgOut = calculateChangeOutDate(dateAssignedVal, newLocation, assignedVal, isSleeve);
+                        }
+                        if (chgOut && chgOut !== 'N/A') {
+                          safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColChangeOutDate), chgOut);
+                        }
                       }
-                      if (chgOut && chgOut !== 'N/A') {
-                        safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColChangeOutDate), chgOut);
-                      }
-                      if (eqColPicked && assignedValLower !== 'on shelf' && assignedValLower !== 'in testing' && assignedValLower !== 'packed for delivery') {
-                        safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColPicked), '');
-                      }
+                    }
+                    if (eqColPicked && assignedValLower !== 'on shelf' && assignedValLower !== 'in testing' && assignedValLower !== 'packed for delivery') {
+                      safeSetCellWithValidationFallback(sheet.getRange(targetRow, eqColPicked), '');
                     }
                   }
                 }
@@ -2316,9 +2322,14 @@ function applyBatchSyncMutations(mutations, returnSnapshot, options) {
                   var curAssigned = eqColAssignedTo ? sheet.getRange(targetRow, eqColAssignedTo).getValue() : 'On Shelf';
                   var curDateAssigned = eqColDateAssigned ? sheet.getRange(targetRow, eqColDateAssigned).getValue() : '';
                   var curTestDate = eqColTestDate ? sheet.getRange(targetRow, eqColTestDate).getValue() : '';
+                  var curAssignedLower = String(curAssigned || '').trim().toLowerCase();
+                  var curTestLower = String(curTestDate || (isTestDateEdit ? mut.value : '') || '').trim().toLowerCase();
+                  var isMissingStickerDate = (curTestLower === 'none' || curTestLower === 'no sticker' || curTestLower === 'no date');
                   
                   var chgOut = null;
-                  if (isBlanket && typeof calculateBlanketChangeOutDate === 'function') {
+                  if (isMissingStickerDate && !isAED && curAssignedLower !== 'failed rubber' && curAssignedLower !== 'lost' && curAssignedLower !== 'destroyed') {
+                    chgOut = 'OVERDUE';
+                  } else if (isBlanket && typeof calculateBlanketChangeOutDate === 'function') {
                     chgOut = calculateBlanketChangeOutDate(curTestDate || mut.value);
                   } else if (isMack && typeof calculateMackChangeOutDate === 'function') {
                     chgOut = calculateMackChangeOutDate(curTestDate || mut.value);
