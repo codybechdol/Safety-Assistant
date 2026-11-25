@@ -512,32 +512,51 @@
         <div class="grid-wrapper" id="weekly-summary-content" style="overflow-y: auto; height: calc(100% - 50px); padding: 0;"></div>
       </section>
 
-      <!-- View: Foreman Tailgate Generator Workspace -->
+      <!-- View: Foreman Report Cards & Tailgate Workspace -->
       <section id="tailgate-generator-view" class="view-container">
-        <div class="sheet-toolbar">
+        <div class="sheet-toolbar" style="flex-wrap: wrap; gap: 8px; min-height: 50px; height: auto; padding-top: 6px; padding-bottom: 6px;">
           <div style="display: flex; align-items: center; gap: 10px;">
-            <h2 style="font-size: 16px;">👷 Foreman Tailgate Packets & Generator</h2>
-            <span class="brand-badge" id="tailgate-badge" style="background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.35);">1-Page Packets</span>
+            <h2 style="font-size: 15.5px; margin: 0;">👷 Foreman Report Cards</h2>
+            <span class="brand-badge" id="tailgate-badge" style="background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.35);">FY Report Cards</span>
           </div>
           <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-            <div style="display: flex; align-items: center; gap: 6px;">
-              <span style="font-size: 11.5px; font-weight: 700; color: #94a3b8; text-transform: uppercase;">Crew:</span>
-              <select id="tailgate-workspace-crew-select" title="Select crew for tailgate packets" aria-label="Select crew for tailgate packets" onchange="window.weeklySummaryEngine.onTailgateCrewChange(this.value)" style="background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 6px; padding: 6px 12px; color: #60a5fa; font-size: 12.5px; font-weight: 700; outline: none; cursor: pointer;">
-                <option value="all">📦 All Active Crews (All Packets)</option>
+            <!-- Foreman Selector -->
+            <div style="display: flex; align-items: center; gap: 5px;">
+              <span style="font-size: 11px; font-weight: 700; color: #94a3b8; text-transform: uppercase;">Foreman:</span>
+              <select id="frc-foreman-select" title="Select foreman report card book" aria-label="Select foreman report card book" onchange="window.foremanReportCardEngine.onForemanChange(this.value)" style="background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 6px; padding: 5px 10px; color: #60a5fa; font-size: 12px; font-weight: 700; outline: none; cursor: pointer; max-width: 260px;">
+                <option value="">Loading foremen…</option>
               </select>
             </div>
-            <button class="btn btn-primary" style="font-size: 12px; font-weight: 700; background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); color: #000; border: none; display: flex; align-items: center; gap: 6px; box-shadow: 0 2px 6px rgba(245, 158, 11, 0.3);" onclick="window.weeklySummaryEngine.printTailgateSheets()" title="Print 1-page tailgate briefing packets with attendance sign-off">
-              <span>🖨️</span> Print Tailgates
+
+            <!-- Fiscal vs Calendar Year Mode Toggle -->
+            <div class="frc-period-toggle" role="group" aria-label="Reporting year mode">
+              <button type="button" id="frc-mode-fiscal" class="frc-period-btn is-active" onclick="window.foremanReportCardEngine.setPeriodMode('fiscal')" title="Fiscal Year (Oct 1 – Sep 30)">Fiscal Yr</button>
+              <button type="button" id="frc-mode-calendar" class="frc-period-btn" onclick="window.foremanReportCardEngine.setPeriodMode('calendar')" title="Calendar Year (Jan 1 – Dec 31)">Calendar Yr</button>
+            </div>
+
+            <!-- Specific Year Selector -->
+            <select id="frc-year-select" title="Select fiscal or calendar year" aria-label="Select reporting year" onchange="window.foremanReportCardEngine.onYearChange(this.value)" style="background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 6px; padding: 5px 9px; color: #e2e8f0; font-size: 12px; font-weight: 600; outline: none; cursor: pointer;">
+            </select>
+
+            <!-- Print / PDF Scope Selector -->
+            <select id="frc-print-scope-select" title="Select pages to print or save as PDF" aria-label="Print or PDF scope" style="background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 6px; padding: 5px 9px; color: #cbd5e1; font-size: 11.5px; font-weight: 600; outline: none; cursor: pointer;">
+              <option value="foreman">📦 Foreman Packet</option>
+              <option value="current">📄 Current Page</option>
+              <option value="all">📚 All Foremen</option>
+            </select>
+
+            <button class="btn btn-primary" style="font-size: 12px; font-weight: 700; background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); color: #000; border: none; display: flex; align-items: center; gap: 5px; box-shadow: 0 2px 6px rgba(245, 158, 11, 0.3);" onclick="window.foremanReportCardEngine.printPackets()" title="Print selected report card scope">
+              <span>🖨️</span> Print
             </button>
-            <button class="btn btn-secondary" style="font-size: 12px; font-weight: 600; display: flex; align-items: center; gap: 6px; border-color: #3b82f6; color: #93c5fd;" onclick="window.weeklySummaryEngine.archiveTailgatePdf()" title="Save all or selected tailgate packets directly to PDF">
+            <button class="btn btn-secondary" style="font-size: 12px; font-weight: 600; display: flex; align-items: center; gap: 5px; border-color: #3b82f6; color: #93c5fd;" onclick="window.foremanReportCardEngine.savePdfPackets()" title="Save selected report card scope as PDF">
               <span>💾</span> Save PDF
             </button>
-            <button class="btn btn-secondary" style="font-size: 12px; font-weight: 600; display: flex; align-items: center; gap: 6px;" onclick="window.weeklySummaryEngine.renderTailgateWorkspace()" title="Refresh live compliance, swaps, and attendance data">
+            <button class="btn btn-secondary" style="font-size: 12px; font-weight: 600; display: flex; align-items: center; gap: 5px;" onclick="window.foremanReportCardEngine.refresh()" title="Refresh compliance, equipment, certs, audits, and incidents">
               <span>🔄</span> Refresh
             </button>
           </div>
         </div>
-        <div class="grid-wrapper" id="tailgate-workspace-content" style="overflow-y: auto; height: calc(100% - 50px); padding: 20px; background: #0b1120;"></div>
+        <div class="grid-wrapper" id="tailgate-workspace-content" style="overflow-y: auto; height: calc(100% - 54px); padding: 18px 24px 36px 24px; background: #0b1120;"></div>
       </section>
 
       <!-- View: Incident Reports Workspace -->
@@ -3736,6 +3755,7 @@
   <script src="js/incident-reports.js?v=20261116_01"></script>
   <script src="js/site-audits.js?v=20261119_02"></script>
   <script src="js/equipment-audits.js?v=20261123_01"></script>
+  <script src="js/foreman-report-card.js?v=20261125_01"></script>
   <script src="js/weekly-summary.js?v=20261014_03"></script>
   <script src="js/fiscal-year.js?v=20261001_04"></script>
   <script src="js/location-approvals.js?v=20261109_02"></script>
@@ -3953,7 +3973,10 @@
         window.equipmentAuditsEngine.refreshData({ silent: true });
       }
       if (viewId === 'weekly-summary-view' && window.weeklySummaryEngine) window.weeklySummaryEngine.render();
-      if (viewId === 'tailgate-generator-view' && window.weeklySummaryEngine) window.weeklySummaryEngine.renderTailgateWorkspace();
+      if (viewId === 'tailgate-generator-view') {
+        if (window.foremanReportCardEngine) window.foremanReportCardEngine.renderWorkspace();
+        else if (window.weeklySummaryEngine) window.weeklySummaryEngine.renderTailgateWorkspace();
+      }
       if (viewId === 'settings-view') {
         if (typeof window.hydrateHostingUrlInputs === 'function') window.hydrateHostingUrlInputs();
         if (typeof window.updateSettingsConfigBadge === 'function') window.updateSettingsConfigBadge();
@@ -4726,6 +4749,10 @@
         if (window.RubberPpeTrackingEngine) {
           window.ppeTrackingEngine = new RubberPpeTrackingEngine(window.localDB);
           window.ppeTrackingEngine.init();
+        }
+        if (window.ForemanReportCardEngine) {
+          window.foremanReportCardEngine = new ForemanReportCardEngine(window.localDB);
+          window.foremanReportCardEngine.init();
         }
         window.weeklySummaryEngine = new WeeklySummaryEngine(window.localDB);
         window.weeklySummaryEngine.init();

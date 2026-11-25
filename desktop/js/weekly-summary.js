@@ -2257,9 +2257,13 @@ class WeeklySummaryEngine {
   }
 
   /**
-   * Modal to generate and print individual Foreman Tailgate Packets.
+   * Opens the reworked Foreman Report Cards workspace (delegates to ForemanReportCardEngine).
    */
   openTailgateModal() {
+    if (window.navigateToView && window.foremanReportCardEngine) {
+      window.navigateToView('tailgate-generator-view');
+      return;
+    }
     const existingModal = document.getElementById('tailgate-sheets-modal');
     if (existingModal) existingModal.remove();
 
@@ -2521,9 +2525,18 @@ class WeeklySummaryEngine {
   }
 
   /**
-   * Dedicated Workspace renderer for the full Tailgate Generator view.
+   * Dedicated Workspace renderer for the Foreman Report Cards / Tailgate view.
+   * Delegates to ForemanReportCardEngine when loaded.
    */
   renderTailgateWorkspace(targetScope = null) {
+    if (window.foremanReportCardEngine) {
+      if (targetScope && targetScope !== 'all') {
+        window.foremanReportCardEngine.onForemanChange(targetScope);
+      } else {
+        window.foremanReportCardEngine.renderWorkspace();
+      }
+      return;
+    }
     const container = document.getElementById('tailgate-workspace-content');
     if (!container) return;
 
@@ -2616,6 +2629,10 @@ class WeeklySummaryEngine {
    * Generates and prints the Foreman Tailgate Packet.
    */
   printTailgateSheets() {
+    if (window.foremanReportCardEngine) {
+      window.foremanReportCardEngine.printPackets();
+      return;
+    }
     const modalSelect = document.getElementById('tailgate-crew-select');
     const workspaceSelect = document.getElementById('tailgate-workspace-crew-select');
     const targetScope = (modalSelect && modalSelect.offsetParent !== null)
@@ -2651,6 +2668,10 @@ class WeeklySummaryEngine {
    * Automatically archives the Foreman Tailgate sheets as a PDF using Electron printToPDF.
    */
   async archiveTailgatePdf() {
+    if (window.foremanReportCardEngine) {
+      await window.foremanReportCardEngine.savePdfPackets();
+      return;
+    }
     const modalSelect = document.getElementById('tailgate-crew-select');
     const workspaceSelect = document.getElementById('tailgate-workspace-crew-select');
     const targetScope = (modalSelect && modalSelect.offsetParent !== null)
