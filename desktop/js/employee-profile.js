@@ -2232,13 +2232,13 @@ class EmployeeProfileEngine {
 
     const functions = [];
 
-    // 1. Foreman Tailgates
+    // 1. Foreman Report Cards
     if (canSee('tailgate-generator-view')) {
       functions.push({
         icon: '👷',
-        title: 'Foreman Tailgates & Attendance Packets',
-        mode: canEdit('tailgate-generator-view') ? 'Full Access & Generation' : 'View Only',
-        desc: 'Generate tailored weekly Tailgate Briefing Packets for your crew. Summarizes your crew\'s safety compliance status, upcoming rubber equipment change-outs, expiring certifications, and an automated attendance sign-off sheet for Monday meetings.'
+        title: 'Foreman Report Cards',
+        mode: canEdit('tailgate-generator-view') ? 'Full Access & Export' : 'View Only',
+        desc: 'View and print Foreman Safety Report Card books across Fiscal or Calendar Year. Includes weighted JHA, Weekly Safety, and Monthly Inspection percentages, deduplicated Current State crew equipment & 60-day expiring certifications, and per-job report cards.'
       });
     }
 

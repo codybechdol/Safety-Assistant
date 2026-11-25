@@ -161,7 +161,7 @@ class SupabaseSyncEngine {
         ]
       },
       { key: 'weekly-summary-view', label: '📊 Weekly Summary & Briefing', tabs: [] },
-      { key: 'tailgate-generator-view', label: '👷 Foreman Tailgates', tabs: [] },
+      { key: 'tailgate-generator-view', label: '👷 Foreman Report Cards', tabs: [] },
       { key: 'crew-import-view', label: '👥 Crew Import (Excel)', tabs: [] },
       { key: 'safety-compliance-view', label: '🛡️ Safety Compliance', tabs: [] },
       { key: 'incident-reports-view', label: '⚠️ Incident Reports', tabs: [] },

@@ -689,10 +689,79 @@ class ForemanReportCardEngine {
     }
 
     // -----------------------------------------------------------------------
+    // 3b. Index JHA Log & Weekly Safety Log for Foreman Attribution Cross-Check
+    // -----------------------------------------------------------------------
+    // Build set of legitimate leaders/foremen so random crew members or malformed
+    // values (e.g. a job number parsed into Foreman column) never override SC.
+    const LEADER_CLASSES = new Set(['SUP', 'GF', 'F', 'GTO F']);
+    const knownLeaders = new Set();
+    empByCanonical.forEach((info, name) => {
+      if (LEADER_CLASSES.has(info.classification.toUpperCase()) || info.isCrewLead) {
+        knownLeaders.add(name);
+      }
+    });
+    jtByBaseJob.forEach(jt => {
+      if (jt.foreman) knownLeaders.add(jt.foreman);
+    });
+
+    const scTable = this.db ? this.db.getTable('safety_compliance') : null;
+    if (scTable && Array.isArray(scTable.rows)) {
+      scTable.rows.forEach(r => {
+        const fm = this.resolveCanonicalName(r['Foreman'] || r['Crew Lead'] || r['Lead'] || '', aliasMap);
+        if (fm && empByCanonical.has(fm)) knownLeaders.add(fm);
+      });
+    }
+
+    // jhaForemanByJobWeek: `${baseJob}|${weekStartKey}` -> Map(canonicalForeman -> Set(uniqueDateKeys))
+    const jhaForemanByJobWeek = new Map();
+    const jhaLogTable = this.db ? this.db.getTable('jha_log') : null;
+    if (jhaLogTable && Array.isArray(jhaLogTable.rows)) {
+      jhaLogTable.rows.forEach(r => {
+        const st = String(r['Status'] || '').trim().toLowerCase();
+        if (st === 'duplicate' || st === 'error') return;
+        const dt = this.parseDate(r['Date Created'] || r['Date Received'] || r['Date Recieved']);
+        if (!dt) return;
+        const sun = new Date(dt.getFullYear(), dt.getMonth(), dt.getDate() - dt.getDay(), 12, 0, 0);
+        const wsKey = this.dateKey(sun);
+        const bj = this.getBaseJobNumber(r['Credited To'] || r['Job Number'] || '');
+        if (!bj || this.isExcludedJob(bj)) return;
+        const fm = this.resolveCanonicalName(r['Foreman'] || '', aliasMap);
+        if (!fm || !empByCanonical.has(fm) || !knownLeaders.has(fm)) return;
+
+        const key = `${bj}|${wsKey}`;
+        if (!jhaForemanByJobWeek.has(key)) jhaForemanByJobWeek.set(key, new Map());
+        const fmMap = jhaForemanByJobWeek.get(key);
+        if (!fmMap.has(fm)) fmMap.set(fm, new Set());
+        fmMap.get(fm).add(this.dateKey(dt));
+      });
+    }
+
+    // weeklyForemanByJobWeek: `${baseJob}|${weekStartKey}` -> Set(canonicalForeman)
+    const weeklyForemanByJobWeek = new Map();
+    const weeklyLogTable = this.db ? this.db.getTable('weekly_safety_log') : null;
+    if (weeklyLogTable && Array.isArray(weeklyLogTable.rows)) {
+      weeklyLogTable.rows.forEach(r => {
+        const st = String(r['Status'] || '').trim().toLowerCase();
+        if (st === 'duplicate' || st === 'error') return;
+        const dt = this.parseDate(r['Week Of'] || r['Date Received'] || r['Date Recieved']);
+        if (!dt) return;
+        const sun = new Date(dt.getFullYear(), dt.getMonth(), dt.getDate() - dt.getDay(), 12, 0, 0);
+        const wsKey = this.dateKey(sun);
+        const bj = this.getBaseJobNumber(r['Credited To'] || r['Job Number'] || '');
+        if (!bj || this.isExcludedJob(bj)) return;
+        const fm = this.resolveCanonicalName(r['Foreman'] || '', aliasMap);
+        if (!fm || !empByCanonical.has(fm) || !knownLeaders.has(fm)) return;
+
+        const key = `${bj}|${wsKey}`;
+        if (!weeklyForemanByJobWeek.has(key)) weeklyForemanByJobWeek.set(key, new Set());
+        weeklyForemanByJobWeek.get(key).add(fm);
+      });
+    }
+
+    // -----------------------------------------------------------------------
     // 4. Parse ALL Safety Compliance Rows (full history for 4-week streaks + period filtering)
     // -----------------------------------------------------------------------
     const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-    const scTable = this.db ? this.db.getTable('safety_compliance') : null;
 
     // 4a. Per-job complete weekly timeline (for consecutive-week streak across job lifetime)
     // baseJob -> Map(weekStartKey -> { weekStart, mondayDate, monthKey, isActiveWeek, monthlyRawStates: Set, foremenCount: Map })
@@ -715,6 +784,34 @@ class ForemanReportCardEngine {
         if (!foreman) foreman = 'Unassigned';
 
         const wsKey = this.dateKey(ws);
+
+        // JHA Log Foreman Cross-Check:
+        // If Safety Compliance stamped an outdated foreman (0 JHA days submitted by them)
+        // while a known leader submitted >=2 unique JHA days (or >=1 JHA day + Weekly Mtg)
+        // for this exact (baseJob, week), credit the week to the actual submitting foreman.
+        let reattributedFrom = '';
+        const jwKey = `${baseJob}|${wsKey}`;
+        const jhaFmMap = jhaForemanByJobWeek.get(jwKey);
+        const wmFmSet = weeklyForemanByJobWeek.get(jwKey);
+        if (jhaFmMap && jhaFmMap.size > 0) {
+          const scDays = jhaFmMap.has(foreman) ? jhaFmMap.get(foreman).size : 0;
+          if (scDays === 0) {
+            let bestFm = '';
+            let bestDays = 0;
+            jhaFmMap.forEach((dateSet, candFm) => {
+              if (dateSet.size > bestDays || (dateSet.size === bestDays && wmFmSet && wmFmSet.has(candFm))) {
+                bestDays = dateSet.size;
+                bestFm = candFm;
+              }
+            });
+            const corroboratedByWeekly = Boolean(wmFmSet && wmFmSet.has(bestFm));
+            if (bestFm && bestFm !== foreman && (bestDays >= 2 || (bestDays >= 1 && corroboratedByWeekly))) {
+              reattributedFrom = foreman;
+              foreman = bestFm;
+            }
+          }
+        }
+
         const monDt = new Date(ws.getTime() + 86400000);
         const wkMonthKey = this.monthKey(monDt);
 
@@ -763,7 +860,8 @@ class ForemanReportCardEngine {
             days: { ...dayStates },
             weekly: weeklyState,
             monthlyCells: monthlyRaw ? [monthlyRaw] : [],
-            status: String(r['Status'] || '').trim()
+            status: String(r['Status'] || '').trim(),
+            reattributedFrom
           });
         } else {
           const existing = mergedForemanJobWeeks.get(fjKey);
@@ -772,6 +870,7 @@ class ForemanReportCardEngine {
           });
           existing.weekly = this.mergeCellState(existing.weekly, weeklyState);
           if (monthlyRaw) existing.monthlyCells.push(monthlyRaw);
+          if (reattributedFrom && !existing.reattributedFrom) existing.reattributedFrom = reattributedFrom;
         }
       });
     }
@@ -1025,12 +1124,20 @@ class ForemanReportCardEngine {
       const jMap = foremanJobsMap.get(foreman);
       if (!jMap.has(baseJob)) {
         const jt = jtByBaseJob.get(baseJob);
+        const isHandedOff = Boolean(
+          jt && jt.foreman && jt.foreman !== foreman &&
+          (jt.status === 'Active' || jt.status === 'On Hold')
+        );
+        const effectiveStatus = isHandedOff ? 'Handed Off' : (jt ? jt.status : 'Completed');
         jMap.set(baseJob, {
           foreman,
           jobNumber: baseJob,
           jobName: jt ? jt.jobName : '',
           location: jt ? jt.location : '',
-          status: jt ? jt.status : 'Completed',
+          status: effectiveStatus,
+          isHandedOff,
+          currentOwnerForeman: jt ? jt.foreman : '',
+          globalJobStatus: jt ? jt.status : 'Completed',
           startDate: jt ? jt.startDate : null,
           putOnHoldDate: jt ? jt.putOnHoldDate : null,
           estimatedReturn: jt ? jt.estimatedReturn : null,
@@ -1119,6 +1226,7 @@ class ForemanReportCardEngine {
         days: dayCellsInPeriod,
         weekly: weeklyStateInPeriod,
         status: wk.status,
+        reattributedFrom: wk.reattributedFrom || '',
         jhaSummary: `${jhaOnTimeW + jhaLateW}/${jhaOnTimeW + jhaLateW + jhaMissingW}`
       });
     });
@@ -1317,7 +1425,7 @@ class ForemanReportCardEngine {
     // -----------------------------------------------------------------------
     // 9. Build Final Foreman Packets (Cover + Current State + Sorted Job Cards)
     // -----------------------------------------------------------------------
-    const STATUS_SORT = { 'Active': 1, 'On Hold': 2, 'Completed': 3, 'Pending Start': 4 };
+    const STATUS_SORT = { 'Active': 1, 'On Hold': 2, 'Handed Off': 3, 'Completed': 4, 'Pending Start': 5 };
     const foremen = [];
 
     foremanJobsMap.forEach((jMap, foremanName) => {
@@ -1351,7 +1459,7 @@ class ForemanReportCardEngine {
         });
       });
 
-      // Sort jobs: Active -> On Hold -> Completed (newest work date first within status)
+      // Sort jobs: Active -> On Hold -> Handed Off -> Completed (newest work date first within status)
       jobs.sort((a, b) => {
         const sa = STATUS_SORT[a.status] || 9;
         const sb = STATUS_SORT[b.status] || 9;
@@ -1368,6 +1476,7 @@ class ForemanReportCardEngine {
         totalJobs: jobs.length,
         activeJobsCount: 0,
         onHoldJobsCount: 0,
+        handedOffJobsCount: 0,
         completedJobsCount: 0,
         jhaOnTime: 0, jhaLate: 0, jhaMissing: 0, jhaPending: 0,
         weeklyOnTime: 0, weeklyLate: 0, weeklyMissing: 0, weeklyPending: 0,
@@ -1381,6 +1490,7 @@ class ForemanReportCardEngine {
         totals.daysWorked += j.daysWorked;
         if (j.status === 'Active') totals.activeJobsCount++;
         else if (j.status === 'On Hold') totals.onHoldJobsCount++;
+        else if (j.status === 'Handed Off') totals.handedOffJobsCount++;
         else if (j.status === 'Completed') totals.completedJobsCount++;
 
         totals.jhaOnTime += j.jha.onTime;
@@ -1531,7 +1641,16 @@ class ForemanReportCardEngine {
         };
       }
 
+      const onHoldJobNumbers = [];
+      jtByBaseJob.forEach(jt => {
+        if (jt.status === 'On Hold' && jt.foreman === foremanName) {
+          onHoldJobNumbers.push(jt.jobNumber);
+        }
+      });
+      onHoldJobNumbers.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+
       const homeLocation = (activeJobs[0] && activeJobs[0].location) ||
+        (jobs.find(j => j.status === 'On Hold' && j.location)?.location) ||
         (empInfo && empInfo.location) ||
         (jobs.find(j => j.location)?.location) || '—';
 
@@ -1541,6 +1660,7 @@ class ForemanReportCardEngine {
         classification: empInfo ? empInfo.classification : 'F',
         hasActiveJob: activeJobs.length > 0,
         activeJobNumbers: activeJobs.map(a => a.jobNumber),
+        onHoldJobNumbers,
         jobs,
         totals,
         ytdJha,
@@ -1550,9 +1670,12 @@ class ForemanReportCardEngine {
       });
     });
 
-    // Sort Foremen: Active foremen first, then alphabetically
+    // Sort Foremen: Active foremen first, then On Hold foremen, then alphabetically
     foremen.sort((a, b) => {
       if (a.hasActiveJob !== b.hasActiveJob) return a.hasActiveJob ? -1 : 1;
+      const aHold = a.onHoldJobNumbers.length > 0;
+      const bHold = b.onHoldJobNumbers.length > 0;
+      if (aHold !== bHold) return aHold ? -1 : 1;
       return a.name.localeCompare(b.name);
     });
 
@@ -1576,7 +1699,7 @@ class ForemanReportCardEngine {
     return foremanPacket.jobs.filter(j => {
       if (j.status === 'Active') return this.statusFilters['Active'] !== false;
       if (j.status === 'On Hold') return this.statusFilters['On Hold'] !== false;
-      if (j.status === 'Completed') return this.statusFilters['Completed'] !== false;
+      if (j.status === 'Completed' || j.status === 'Handed Off') return this.statusFilters['Completed'] !== false;
       return true;
     });
   }
@@ -1695,7 +1818,7 @@ class ForemanReportCardEngine {
     // Status filter chips bar + book navigation bar + white-paper page with floating dossier chevrons
     const activeCount = foreman.jobs.filter(j => j.status === 'Active').length;
     const holdCount = foreman.jobs.filter(j => j.status === 'On Hold').length;
-    const compCount = foreman.jobs.filter(j => j.status === 'Completed').length;
+    const compCount = foreman.jobs.filter(j => j.status === 'Completed' || j.status === 'Handed Off').length;
 
     let pageBodyHtml = '';
     if (activePage.type === 'cover') {
@@ -1719,7 +1842,7 @@ class ForemanReportCardEngine {
               <span class="frc-dot frc-dot-hold"></span> On Hold (${holdCount})
             </button>
             <button type="button" class="frc-chip frc-chip-completed ${this.statusFilters['Completed'] ? 'is-on' : ''}" onclick="window.foremanReportCardEngine.toggleStatusFilter('Completed')">
-              <span class="frc-dot frc-dot-completed"></span> Completed (${compCount})
+              <span class="frc-dot frc-dot-completed"></span> Completed / Past (${compCount})
             </button>
           </div>
 
@@ -1755,7 +1878,9 @@ class ForemanReportCardEngine {
           </button>
 
           <div class="frc-paper-sheet" id="frc-paper-sheet">
-            ${pageBodyHtml}
+            <div class="frc-paper-inner">
+              ${pageBodyHtml}
+            </div>
           </div>
 
           <button type="button" class="dossier-floating-nav-btn frc-floating-next" ${!nextPage ? 'disabled' : ''} onclick="window.foremanReportCardEngine.turnPage(1)" aria-label="Next page">
@@ -1793,7 +1918,11 @@ class ForemanReportCardEngine {
     const fmSelect = document.getElementById('frc-foreman-select');
     if (fmSelect) {
       fmSelect.innerHTML = model.foremen.map(f => {
-        const tag = f.hasActiveJob ? `🟢 ${f.activeJobNumbers.join(', ')}` : `${f.totals.totalJobs} job${f.totals.totalJobs === 1 ? '' : 's'}`;
+        const tag = f.hasActiveJob
+          ? `🟢 ${f.activeJobNumbers.join(', ')}`
+          : (f.onHoldJobNumbers && f.onHoldJobNumbers.length > 0
+              ? `⏸️ ${f.onHoldJobNumbers.join(', ')} (On Hold)`
+              : `${f.totals.totalJobs} job${f.totals.totalJobs === 1 ? '' : 's'}`);
         return `<option value="${this.escapeHtml(f.name)}" ${f.name === this.selectedForeman ? 'selected' : ''}>${this.escapeHtml(f.name)} — ${this.escapeHtml(tag)}</option>`;
       }).join('');
     }
@@ -2010,15 +2139,19 @@ class ForemanReportCardEngine {
   // Shared HTML Render Helpers (Report Card Metric Cards & Badges)
   // =========================================================================
 
-  renderStatusBadgeHtml(status) {
+  renderStatusBadgeHtml(status, currentOwnerForeman = '') {
     const map = {
       'Active': { bg: '#dcfce7', color: '#166534', border: '#86efac', icon: '●' },
       'On Hold': { bg: '#fef3c7', color: '#92400e', border: '#fcd34d', icon: '⏸' },
+      'Handed Off': { bg: '#e0e7ff', color: '#3730a3', border: '#a5b4fc', icon: '↪' },
       'Completed': { bg: '#e2e8f0', color: '#334155', border: '#cbd5e1', icon: '✓' },
       'Pending Start': { bg: '#dbeafe', color: '#1e40af', border: '#93c5fd', icon: '◷' }
     };
     const st = map[status] || map['Completed'];
-    return `<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:12px;font-size:10.5px;font-weight:800;background:${st.bg};color:${st.color};border:1px solid ${st.border};white-space:nowrap;">${st.icon} ${this.escapeHtml(status)}</span>`;
+    const label = (status === 'Handed Off' && currentOwnerForeman)
+      ? `Handed Off → ${currentOwnerForeman}`
+      : status;
+    return `<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:12px;font-size:10.5px;font-weight:800;background:${st.bg};color:${st.color};border:1px solid ${st.border};white-space:nowrap;">${st.icon} ${this.escapeHtml(label)}</span>`;
   }
 
   renderMetricCardHtml(title, unitSingular, unitPlural, stats, subtitleNote = '') {
@@ -2114,13 +2247,18 @@ class ForemanReportCardEngine {
 
     // Recompute displayed YTD totals respecting status filters only if subset? No — Cover Page shows true YTD totals for the foreman across the period!
     const t = foreman.totals;
+    const hasOnHold = foreman.onHoldJobNumbers && foreman.onHoldJobNumbers.length > 0;
     const activeBadgeStr = foreman.activeJobNumbers.length > 0
       ? `ACTIVE JOB${foreman.activeJobNumbers.length > 1 ? 'S' : ''}: ${foreman.activeJobNumbers.join(', ')}`
-      : 'NO ACTIVE JOBS';
+      : (hasOnHold
+          ? `ON HOLD JOB${foreman.onHoldJobNumbers.length > 1 ? 'S' : ''}: ${foreman.onHoldJobNumbers.join(', ')}`
+          : 'NO ACTIVE JOBS');
+    const activeBadgeColor = foreman.hasActiveJob ? '#15803d' : (hasOnHold ? '#b45309' : '#64748b');
 
     const statusMix = [
       t.activeJobsCount > 0 ? `${t.activeJobsCount} Active` : '',
       t.onHoldJobsCount > 0 ? `${t.onHoldJobsCount} On Hold` : '',
+      t.handedOffJobsCount > 0 ? `${t.handedOffJobsCount} Handed Off` : '',
       t.completedJobsCount > 0 ? `${t.completedJobsCount} Completed` : ''
     ].filter(Boolean).join(' · ') || '0 Jobs';
 
@@ -2135,7 +2273,7 @@ class ForemanReportCardEngine {
             ${this.escapeHtml(foreman.name)}
           </div>
           <div style="font-size:11.5px;font-weight:700;color:#334155;margin-top:3px;">
-            📍 ${this.escapeHtml(foreman.location)} &nbsp;·&nbsp; <span style="color:${foreman.hasActiveJob ? '#15803d' : '#64748b'};">${this.escapeHtml(activeBadgeStr)}</span>
+            📍 ${this.escapeHtml(foreman.location)} &nbsp;·&nbsp; <span style="color:${activeBadgeColor};">${this.escapeHtml(activeBadgeStr)}</span>
           </div>
         </div>
         <div style="text-align:right;">
@@ -2233,7 +2371,11 @@ class ForemanReportCardEngine {
           <tbody>
             ${filteredJobs.map(j => {
               const spanStart = j.firstWorkDate || j.startDate;
-              const spanEnd = j.status === 'Active' ? null : (j.actualEndDate || j.putOnHoldDate || j.lastWorkDate);
+              const spanEnd = j.status === 'Active'
+                ? null
+                : (j.isHandedOff
+                    ? j.lastWorkDate
+                    : (j.status === 'On Hold' ? (j.lastWorkDate || j.putOnHoldDate) : (j.actualEndDate || j.lastWorkDate)));
               const spanStr = spanStart
                 ? `${this.formatDateUs(spanStart)} – ${j.status === 'Active' ? 'Present' : (spanEnd ? this.formatDateUs(spanEnd) : '—')}`
                 : '';
@@ -2246,7 +2388,7 @@ class ForemanReportCardEngine {
                     ${spanStr ? `<div style="font-size:9.5px;color:#64748b;">${this.escapeHtml(spanStr)}</div>` : ''}
                   </td>
                   <td style="border:1px solid #cbd5e1;padding:6px 6px;text-align:center;">
-                    ${this.renderStatusBadgeHtml(j.status)}
+                    ${this.renderStatusBadgeHtml(j.status, j.currentOwnerForeman)}
                   </td>
                   <td style="border:1px solid #cbd5e1;padding:6px 6px;text-align:center;font-weight:800;font-size:12px;">
                     ${j.daysWorked}
@@ -2268,9 +2410,13 @@ class ForemanReportCardEngine {
                   </td>
                   ${canEdit ? `
                     <td style="border:1px solid #cbd5e1;padding:6px 6px;text-align:center;" class="frc-no-print" onclick="event.stopPropagation();">
-                      <button type="button" class="frc-edit-status-btn" onclick="window.foremanReportCardEngine.openJobStatusModal('${this.escapeJs(j.jobNumber)}')" title="Change job status (Active / On Hold / Completed)">
-                        ✏️ Status
-                      </button>
+                      ${j.isHandedOff ? `
+                        <span style="font-size:9.5px;font-weight:700;color:#4338ca;" title="Currently owned by ${this.escapeHtml(j.currentOwnerForeman)} (${this.escapeHtml(j.globalJobStatus)})">Owned by ${this.escapeHtml(j.currentOwnerForeman)}</span>
+                      ` : `
+                        <button type="button" class="frc-edit-status-btn" onclick="window.foremanReportCardEngine.openJobStatusModal('${this.escapeJs(j.jobNumber)}')" title="Change job status (Active / On Hold / Completed)">
+                          ✏️ Status
+                        </button>
+                      `}
                     </td>
                   ` : ''}
                 </tr>
@@ -2536,8 +2682,8 @@ class ForemanReportCardEngine {
           </div>
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:3px;">
             <span style="font-size:20px;font-weight:900;color:#1d4ed8;">JOB ${this.escapeHtml(job.jobNumber)}</span>
-            ${this.renderStatusBadgeHtml(job.status)}
-            ${canEdit ? `
+            ${this.renderStatusBadgeHtml(job.status, job.currentOwnerForeman)}
+            ${canEdit && !job.isHandedOff ? `
               <button type="button" class="frc-edit-status-btn frc-no-print" onclick="window.foremanReportCardEngine.openJobStatusModal('${this.escapeJs(job.jobNumber)}')" title="Update Active / On Hold / Completed status">
                 ✏️ Change Status
               </button>
@@ -2546,6 +2692,11 @@ class ForemanReportCardEngine {
           <div style="font-size:11.5px;font-weight:700;color:#0f172a;margin-top:3px;">
             ${job.jobName ? `${this.escapeHtml(job.jobName)} · ` : ''}📍 ${this.escapeHtml(job.location || foreman.location)} · Foreman: ${this.escapeHtml(foreman.name)}
           </div>
+          ${job.isHandedOff ? `
+            <div style="font-size:10px;color:#3730a3;background:#eef2ff;border:1px solid #c7d2fe;border-radius:4px;padding:3px 7px;margin-top:5px;font-weight:700;display:inline-block;">
+              ↪ Reassigned to ${this.escapeHtml(job.currentOwnerForeman)} (${this.escapeHtml(job.globalJobStatus)}) · Scored only on ${this.escapeHtml(foreman.name)}'s weeks${job.firstWorkDate && job.lastWorkDate ? ` (${this.formatDateUs(job.firstWorkDate)} – ${this.formatDateUs(job.lastWorkDate)})` : ''}
+            </div>
+          ` : ''}
           ${dateBadges.length > 0 ? `
             <div style="font-size:10px;color:#475569;margin-top:4px;font-weight:600;">
               ${dateBadges.map(b => this.escapeHtml(b)).join(' &nbsp;|&nbsp; ')}
@@ -2654,7 +2805,10 @@ class ForemanReportCardEngine {
               const rowBg = hasMiss ? '#fef2f2' : (hasLate ? '#fffbeb' : '#ffffff');
               return `
                 <tr style="background:${rowBg};">
-                  <td style="border:1px solid #cbd5e1;padding:4px 7px;font-weight:700;white-space:nowrap;">${this.escapeHtml(w.weekStartStr)}</td>
+                  <td style="border:1px solid #cbd5e1;padding:4px 7px;font-weight:700;white-space:nowrap;">
+                    ${this.escapeHtml(w.weekStartStr)}
+                    ${w.reattributedFrom ? `<span title="Foreman verified via JHA Log (Safety Compliance listed ${this.escapeHtml(w.reattributedFrom)})" style="margin-left:4px;font-size:9px;font-weight:700;background:#e0e7ff;color:#3730a3;border:1px solid #c7d2fe;border-radius:4px;padding:0 4px;">JHA Log</span>` : ''}
+                  </td>
                   ${DAYS.map(d => `<td style="border:1px solid #cbd5e1;padding:4px 4px;text-align:center;">${renderDayIconCell(w.days[d])}</td>`).join('')}
                   <td style="border:1px solid #cbd5e1;padding:4px 6px;text-align:center;">${renderDayIconCell(w.weekly)}</td>
                   <td style="border:1px solid #cbd5e1;padding:4px 7px;text-align:right;font-weight:700;color:#334155;">${this.escapeHtml(w.jhaSummary)}</td>

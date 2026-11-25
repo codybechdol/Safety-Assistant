@@ -1233,8 +1233,8 @@ class WeeklySummaryEngine {
 
           <!-- Quick Action Buttons -->
           <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-            <button class="btn btn-secondary" onclick="window.weeklySummaryEngine.openTailgateModal()" style="font-size: 12px; font-weight: 700; display: inline-flex; align-items: center; gap: 6px; border-color: #f59e0b; color: #fbbf24;" title="Generate per-crew 1-page Foreman Tailgate packets with compliance, swaps, and attendance sign-off">
-              <span>👷</span> Foreman Tailgate Sheets
+            <button class="btn btn-secondary" onclick="window.weeklySummaryEngine.openTailgateModal()" style="font-size: 12px; font-weight: 700; display: inline-flex; align-items: center; gap: 6px; border-color: #f59e0b; color: #fbbf24;" title="Open Foreman Report Cards with Fiscal/Calendar YTD compliance, active equipment, and expiring certs">
+              <span>👷</span> Foreman Report Cards
             </button>
             <button class="btn btn-secondary" onclick="window.weeklySummaryEngine.archiveWeeklyPdf()" style="font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; border-color: #3b82f6; color: #93c5fd;" title="Directly archive weekly report to PDF via Electron printToPDF">
               <span>💾</span> Archive PDF
