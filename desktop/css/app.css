@@ -4215,6 +4215,326 @@ body.view-only-mode .card-drop-zone {
   box-shadow: 0 0 0 1px rgba(29, 78, 216, 0.2);
 }
 
+/* --- Foreman Overview Cards Grid (Landing View) --- */
+.frc-cards-shell {
+  width: 100%;
+  max-width: 1680px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.frc-cards-controls-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.frc-cards-search {
+  background: rgba(15, 23, 42, 0.85);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 18px;
+  padding: 5px 13px;
+  color: #f1f5f9;
+  font-size: 12px;
+  font-weight: 600;
+  outline: none;
+  width: 220px;
+  transition: border-color 0.15s ease;
+}
+
+.frc-cards-search:focus {
+  border-color: rgba(96, 165, 250, 0.75);
+}
+
+.frc-cards-sort {
+  background: rgba(30, 41, 59, 0.85);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 18px;
+  padding: 5px 12px;
+  color: #cbd5e1;
+  font-size: 12px;
+  font-weight: 700;
+  outline: none;
+  cursor: pointer;
+}
+
+.frc-cards-section-hdr {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 4px 2px 4px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+  margin-bottom: 10px;
+}
+
+.frc-cards-section-title {
+  font-size: 12.5px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: #cbd5e1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.frc-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(355px, 1fr));
+  gap: 14px;
+}
+
+.frc-foreman-card {
+  background: var(--bg-secondary, #1e293b);
+  border: 1px solid var(--border-color, rgba(148, 163, 184, 0.22));
+  border-radius: 10px;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.28);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  cursor: pointer;
+  transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+  text-align: left;
+  position: relative;
+}
+
+.frc-foreman-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(96, 165, 250, 0.65);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.42);
+}
+
+.frc-foreman-card:focus-visible {
+  outline: 2px solid #60a5fa;
+  outline-offset: 2px;
+}
+
+.frc-foreman-card.role-active {
+  border-left: 4px solid #10b981;
+}
+
+.frc-foreman-card.role-on-hold {
+  border-left: 4px solid #f59e0b;
+}
+
+.frc-foreman-card.role-former {
+  border-left: 4px solid #818cf8;
+}
+
+.frc-foreman-card.role-previous {
+  border-left: 4px solid #64748b;
+  opacity: 0.9;
+}
+
+.frc-foreman-card.role-previous:hover {
+  opacity: 1;
+}
+
+.frc-card-hdr {
+  padding: 12px 14px 10px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.025);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.frc-card-hdr-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.frc-card-name {
+  font-size: 15px;
+  font-weight: 800;
+  color: #f8fafc;
+  letter-spacing: -0.2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.frc-card-role-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.25px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.frc-card-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 11.5px;
+  color: #94a3b8;
+  font-weight: 600;
+}
+
+.frc-card-job-badge {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-weight: 800;
+  font-size: 11.5px;
+  color: #60a5fa;
+  background: rgba(15, 23, 42, 0.7);
+  border: 1px solid rgba(96, 165, 250, 0.35);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+
+.frc-card-body {
+  padding: 11px 14px 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1;
+}
+
+.frc-card-kpis {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+}
+
+.frc-card-kpi {
+  background: rgba(15, 23, 42, 0.52);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 6px;
+  padding: 6px 4px;
+  text-align: center;
+}
+
+.frc-card-kpi-lbl {
+  font-size: 9px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  color: #94a3b8;
+}
+
+.frc-card-kpi-val {
+  font-size: 15px;
+  font-weight: 900;
+  color: #f8fafc;
+  line-height: 1.2;
+  margin-top: 1px;
+}
+
+.frc-card-kpi-sub {
+  font-size: 9px;
+  font-weight: 600;
+  color: #64748b;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.frc-card-metrics {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.frc-card-metric-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.frc-card-metric-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.frc-card-metric-lbl {
+  font-weight: 700;
+  color: #cbd5e1;
+}
+
+.frc-card-metric-pct {
+  font-weight: 800;
+  font-size: 11.5px;
+}
+
+.frc-card-bar {
+  display: flex;
+  height: 7px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: rgba(15, 23, 42, 0.75);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+.frc-card-metric-detail {
+  display: flex;
+  justify-content: space-between;
+  font-size: 9.5px;
+  color: #94a3b8;
+  font-weight: 600;
+}
+
+.frc-card-footer {
+  padding: 8px 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(15, 23, 42, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.frc-card-open-cue {
+  color: #60a5fa;
+  font-weight: 800;
+  font-size: 11px;
+  white-space: nowrap;
+  transition: transform 0.15s ease;
+}
+
+.frc-foreman-card:hover .frc-card-open-cue {
+  color: #93c5fd;
+  transform: translateX(2px);
+}
+
+.frc-back-to-cards-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  border-radius: 18px;
+  font-size: 12px;
+  font-weight: 800;
+  border: 1px solid rgba(96, 165, 250, 0.45);
+  background: rgba(59, 130, 246, 0.16);
+  color: #93c5fd;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.frc-back-to-cards-btn:hover {
+  background: rgba(59, 130, 246, 0.28);
+  border-color: rgba(147, 197, 253, 0.75);
+  color: #ffffff;
+}
+
 .frc-top-bar {
   background: rgba(30, 41, 59, 0.82);
   border: 1px solid rgba(148, 163, 184, 0.25);

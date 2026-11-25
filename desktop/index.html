@@ -526,6 +526,12 @@
             <span class="brand-badge" id="tailgate-badge" style="background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.35);">FY Report Cards</span>
           </div>
           <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+            <!-- Cards Grid vs Report Card Book Mode Toggle -->
+            <div class="frc-period-toggle" role="group" aria-label="Foreman view mode">
+              <button type="button" id="frc-view-cards" class="frc-period-btn is-active" onclick="window.foremanReportCardEngine.setViewMode('cards')" title="View all foremen as overview cards with Cover Page stats">🗂️ Cards</button>
+              <button type="button" id="frc-view-book" class="frc-period-btn" onclick="window.foremanReportCardEngine.setViewMode('book')" title="Open full multi-page Report Card Book for selected foreman">📖 Book</button>
+            </div>
+
             <!-- Foreman Selector -->
             <div style="display: flex; align-items: center; gap: 5px;">
               <span style="font-size: 11px; font-weight: 700; color: #94a3b8; text-transform: uppercase;">Foreman:</span>

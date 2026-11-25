@@ -27,7 +27,10 @@ class ForemanReportCardEngine {
     this.periodMode = 'fiscal'; // 'fiscal' | 'calendar'
     this.selectedYear = null;   // numeric FY (e.g. 2027) or CY (e.g. 2026)
     this.selectedForeman = '';  // canonical foreman name
+    this.viewMode = 'cards';    // 'cards' (overview grid) | 'book' (detail report card book)
     this.roleFilter = 'all';    // 'all' | 'current' | 'former_role' | 'previous'
+    this.searchQuery = '';      // cards grid live filter (foreman name / job # / city)
+    this.cardSortBy = 'role';   // 'role' | 'name' | 'jha_asc' | 'jha_desc' | 'days_desc'
     this.currentPageIndex = 0;
     this.statusFilters = {
       Active: true,
@@ -2126,8 +2129,254 @@ class ForemanReportCardEngine {
 
   getFilteredForemen(model) {
     if (!model || !Array.isArray(model.foremen)) return [];
-    if (!this.roleFilter || this.roleFilter === 'all') return model.foremen;
-    return model.foremen.filter(f => f.roleGroup === this.roleFilter);
+    let list = (!this.roleFilter || this.roleFilter === 'all')
+      ? [...model.foremen]
+      : model.foremen.filter(f => f.roleGroup === this.roleFilter);
+
+    const q = String(this.searchQuery || '').trim().toLowerCase();
+    if (q) {
+      list = list.filter(f => {
+        if (f.name.toLowerCase().includes(q)) return true;
+        if ((f.location || '').toLowerCase().includes(q)) return true;
+        if (f.jobs.some(j => (j.jobNumber || '').toLowerCase().includes(q) || (j.jobName || '').toLowerCase().includes(q) || (j.location || '').toLowerCase().includes(q))) {
+          return true;
+        }
+        return false;
+      });
+    }
+
+    if (this.viewMode === 'cards' && this.cardSortBy && this.cardSortBy !== 'role') {
+      const scoreOf = (f) => (f.ytdJha && f.ytdJha.expected > 0)
+        ? f.ytdJha.submittedPct
+        : ((f.ytdWeekly && f.ytdWeekly.expected > 0) ? f.ytdWeekly.submittedPct : -1);
+      if (this.cardSortBy === 'name') {
+        list.sort((a, b) => a.name.localeCompare(b.name));
+      } else if (this.cardSortBy === 'jha_asc') {
+        list.sort((a, b) => {
+          const sa = scoreOf(a), sb = scoreOf(b);
+          if (sa < 0 && sb < 0) return a.name.localeCompare(b.name);
+          if (sa < 0) return 1;
+          if (sb < 0) return -1;
+          if (sa !== sb) return sa - sb;
+          return a.name.localeCompare(b.name);
+        });
+      } else if (this.cardSortBy === 'jha_desc') {
+        list.sort((a, b) => {
+          const sa = scoreOf(a), sb = scoreOf(b);
+          if (sa !== sb) return sb - sa;
+          return a.name.localeCompare(b.name);
+        });
+      } else if (this.cardSortBy === 'days_desc') {
+        list.sort((a, b) => (b.totals.daysWorked - a.totals.daysWorked) || a.name.localeCompare(b.name));
+      }
+    }
+
+    return list;
+  }
+
+  renderForemanOverviewCardHtml(fm, period) {
+    const t = fm.totals;
+    const roleCardClass = fm.roleStatus === 'active_foreman'
+      ? 'role-active'
+      : (fm.roleStatus === 'on_hold_foreman'
+          ? 'role-on-hold'
+          : (fm.roleStatus === 'previous_employee' ? 'role-previous' : 'role-former'));
+
+    const rolePillHtml = (() => {
+      if (fm.roleStatus === 'active_foreman') {
+        return `<span class="frc-card-role-pill" style="background:rgba(16,185,129,0.16);color:#6ee7b7;border:1px solid rgba(52,211,153,0.45);">● CURRENT FOREMAN</span>`;
+      }
+      if (fm.roleStatus === 'on_hold_foreman') {
+        return `<span class="frc-card-role-pill" style="background:rgba(245,158,11,0.16);color:#fde68a;border:1px solid rgba(251,191,36,0.45);">⏸ ON HOLD</span>`;
+      }
+      if (fm.roleStatus === 'previous_employee') {
+        return `<span class="frc-card-role-pill" style="background:rgba(148,163,184,0.14);color:#cbd5e1;border:1px solid rgba(148,163,184,0.35);">⊘ PREVIOUS</span>`;
+      }
+      return `<span class="frc-card-role-pill" style="background:rgba(99,102,241,0.18);color:#c7d2fe;border:1px solid rgba(129,140,248,0.45);">○ NOT FOREMAN</span>`;
+    })();
+
+    // Job pills / current status line in header
+    const onHoldObjs = fm.jobs.filter(j => j.status === 'On Hold');
+    let subRightHtml = '';
+    if (fm.activeJobNumbers.length > 0) {
+      subRightHtml = fm.activeJobNumbers
+        .map(jn => `<span class="frc-card-job-badge">${this.escapeHtml(jn)}</span>`)
+        .join('');
+    } else if (fm.onHoldJobNumbers && fm.onHoldJobNumbers.length > 0) {
+      subRightHtml = fm.onHoldJobNumbers.map(jn => {
+        const obj = onHoldObjs.find(j => j.jobNumber === jn);
+        let retHtml = '';
+        if (obj && obj.estimatedReturn) {
+          const isDue = obj.estimatedReturn.getTime() <= period.today.getTime();
+          retHtml = `<span style="font-size:10px;font-weight:800;color:${isDue ? '#fca5a5' : '#fde68a'};">${isDue ? '⚠️ Return Due ' : '↩ '}${this.formatDateUs(obj.estimatedReturn)}</span>`;
+        }
+        return `<span class="frc-card-job-badge" style="color:#fbbf24;border-color:rgba(251,191,36,0.4);">${this.escapeHtml(jn)}</span>${retHtml}`;
+      }).join(' ');
+    } else if (fm.isPreviousEmployee) {
+      subRightHtml = `<span style="color:#94a3b8;font-size:11px;">Former Employee</span>`;
+    } else {
+      const empJobStr = fm.currentEmployeeJob ? `Active on ${fm.currentEmployeeJob}` : 'Active Employee';
+      subRightHtml = `<span style="color:#a5b4fc;font-size:11px;">${this.escapeHtml(empJobStr)}</span>`;
+    }
+
+    const isWeeklyOnly = t.daysWorked === 0 && fm.ytdWeekly && fm.ytdWeekly.expected > 0;
+    const statusMixShort = [
+      t.activeJobsCount > 0 ? `${t.activeJobsCount} Act` : '',
+      t.onHoldJobsCount > 0 ? `${t.onHoldJobsCount} Hold` : '',
+      t.handedOffJobsCount > 0 ? `${t.handedOffJobsCount} H/O` : '',
+      t.fyTransitionJobsCount > 0 ? `${t.fyTransitionJobsCount} FY` : '',
+      t.completedJobsCount > 0 ? `${t.completedJobsCount} Comp` : ''
+    ].filter(Boolean).slice(0, 2).join(' · ') || '—';
+
+    const renderMiniMetric = (label, stats, unitShort) => {
+      if (!stats || stats.expected === 0) {
+        const emptyLbl = stats && stats.exempt > 0
+          ? `Exempt (<4w)`
+          : (stats && stats.pending > 0 ? `⏳ ${stats.pending} pending` : 'N/A');
+        return `
+          <div class="frc-card-metric-row">
+            <div class="frc-card-metric-top">
+              <span class="frc-card-metric-lbl">${this.escapeHtml(label)}</span>
+              <span class="frc-card-metric-pct" style="color:#64748b;font-weight:700;font-size:10.5px;">${this.escapeHtml(emptyLbl)}</span>
+            </div>
+            <div class="frc-card-bar"></div>
+          </div>
+        `;
+      }
+      const pctColor = stats.submittedPct >= 95 ? '#4ade80' : (stats.submittedPct >= 80 ? '#fbbf24' : '#f87171');
+      return `
+        <div class="frc-card-metric-row">
+          <div class="frc-card-metric-top">
+            <span class="frc-card-metric-lbl">${this.escapeHtml(label)}</span>
+            <span class="frc-card-metric-pct" style="color:${pctColor};">${stats.submittedPct}% <span style="font-size:9.5px;font-weight:600;color:#94a3b8;">sub</span></span>
+          </div>
+          <div class="frc-card-bar">
+            ${stats.onTimePct > 0 ? `<div style="width:${stats.onTimePct}%;background:#16a34a;"></div>` : ''}
+            ${stats.latePct > 0 ? `<div style="width:${stats.latePct}%;background:#f59e0b;"></div>` : ''}
+            ${stats.missingPct > 0 ? `<div style="width:${stats.missingPct}%;background:#dc2626;"></div>` : ''}
+          </div>
+          <div class="frc-card-metric-detail">
+            <span><span style="color:#86efac;">${stats.onTimePct}% OT</span> · <span style="color:#fde68a;">${stats.latePct}% L</span> · <span style="color:#fca5a5;">${stats.missingPct}% M</span></span>
+            <span>${stats.submitted}/${stats.expected} ${this.escapeHtml(unitShort)}</span>
+          </div>
+        </div>
+      `;
+    };
+
+    // Footer left summary: Current State preview if active/on-hold, else period job list
+    let footerLeftHtml = '';
+    if (fm.currentState) {
+      const cs = fm.currentState;
+      const overdueBit = cs.equipmentSummary.overdue > 0
+        ? ` · <span style="color:#f87171;font-weight:800;">${cs.equipmentSummary.overdue} overdue</span>`
+        : '';
+      const certBit = cs.expiringCerts.length > 0
+        ? ` · <span style="color:#fbbf24;font-weight:700;">${cs.expiringCerts.length} cert${cs.expiringCerts.length === 1 ? '' : 's'} ≤60d</span>`
+        : '';
+      footerLeftHtml = `<span>${cs.mode === 'on_hold' ? '⏸' : '⚡'} ${cs.memberCount} crew · ${cs.equipmentSummary.total} items${overdueBit}${certBit}</span>`;
+    } else {
+      const jobList = fm.jobs.slice(0, 4).map(j => j.jobNumber).join(', ');
+      const extra = fm.jobs.length > 4 ? ` +${fm.jobs.length - 4}` : '';
+      footerLeftHtml = `<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Jobs: <strong style="color:#cbd5e1;">${this.escapeHtml(jobList + extra || '—')}</strong></span>`;
+    }
+
+    return `
+      <div class="frc-foreman-card ${roleCardClass}"
+           role="button"
+           tabindex="0"
+           onclick="window.foremanReportCardEngine.openForemanBook('${this.escapeJs(fm.name)}')"
+           onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();window.foremanReportCardEngine.openForemanBook('${this.escapeJs(fm.name)}');}"
+           title="Open full Report Card Book for ${this.escapeHtml(fm.name)}">
+        <div class="frc-card-hdr">
+          <div class="frc-card-hdr-top">
+            <span class="frc-card-name">${this.escapeHtml(fm.name)}</span>
+            ${rolePillHtml}
+          </div>
+          <div class="frc-card-sub">
+            <span>📍 ${this.escapeHtml(fm.location)}</span>
+            <span style="color:#475569;">·</span>
+            ${subRightHtml}
+          </div>
+        </div>
+
+        <div class="frc-card-body">
+          <!-- Cover Page 4 KPI Tiles -->
+          <div class="frc-card-kpis">
+            <div class="frc-card-kpi">
+              <div class="frc-card-kpi-lbl">${isWeeklyOnly ? 'Weeks' : 'Days'}</div>
+              <div class="frc-card-kpi-val">${isWeeklyOnly ? fm.ytdWeekly.expected : t.daysWorked}</div>
+              <div class="frc-card-kpi-sub">${isWeeklyOnly ? 'Weekly-only' : 'Scheduled'}</div>
+            </div>
+            <div class="frc-card-kpi">
+              <div class="frc-card-kpi-lbl">Jobs</div>
+              <div class="frc-card-kpi-val" style="color:#60a5fa;">${t.totalJobs}</div>
+              <div class="frc-card-kpi-sub">${this.escapeHtml(statusMixShort)}</div>
+            </div>
+            <div class="frc-card-kpi">
+              <div class="frc-card-kpi-lbl">Audits</div>
+              <div class="frc-card-kpi-val" style="color:${t.siteAuditCorrectionsCount > 0 ? '#fbbf24' : '#38bdf8'};">${t.siteAuditsCount}</div>
+              <div class="frc-card-kpi-sub">${t.siteAuditsCount === 0 ? 'None' : (t.siteAuditCorrectionsCount > 0 ? `${t.siteAuditCorrectionsCount} corr.` : 'Clean ✓')}</div>
+            </div>
+            <div class="frc-card-kpi">
+              <div class="frc-card-kpi-lbl">Incidents</div>
+              <div class="frc-card-kpi-val" style="color:${t.incidentsCount > 0 ? '#f87171' : '#4ade80'};">${t.incidentsCount}</div>
+              <div class="frc-card-kpi-sub">${t.incidentsCount === 0 ? 'Clean ✓' : 'Logged'}</div>
+            </div>
+          </div>
+
+          <!-- Cover Page Weighted Compliance Bars -->
+          <div class="frc-card-metrics">
+            ${renderMiniMetric('Daily JHA', fm.ytdJha, 'd')}
+            ${renderMiniMetric('Weekly Safety', fm.ytdWeekly, 'w')}
+            ${renderMiniMetric('Monthly Inspection', fm.ytdMonthly, 'mo')}
+          </div>
+        </div>
+
+        <div class="frc-card-footer">
+          <div style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${footerLeftHtml}</div>
+          <span class="frc-card-open-cue">Open Report Card →</span>
+        </div>
+      </div>
+    `;
+  }
+
+  renderForemanCardsGridBodyHtml(model, visibleForemen) {
+    if (visibleForemen.length === 0) {
+      return `
+        <div style="text-align:center;padding:56px 20px;color:#94a3b8;background:rgba(30,41,59,0.5);border:1px dashed rgba(148,163,184,0.28);border-radius:10px;">
+          <div style="font-size:32px;margin-bottom:8px;">🔍</div>
+          <div style="font-size:14px;font-weight:700;color:#e2e8f0;margin-bottom:4px;">No foremen match your filter</div>
+          <div style="font-size:12px;">Try clearing the search box or selecting a different role group.</div>
+        </div>
+      `;
+    }
+
+    const useSections = this.roleFilter === 'all' && this.cardSortBy === 'role' && !String(this.searchQuery || '').trim();
+    if (!useSections) {
+      return `<div class="frc-cards-grid">${visibleForemen.map(fm => this.renderForemanOverviewCardHtml(fm, model.period)).join('')}</div>`;
+    }
+
+    const sections = [
+      { key: 'current', dot: 'frc-dot-active', title: 'Current Foremen (Active / On Hold)', items: visibleForemen.filter(f => f.roleGroup === 'current') },
+      { key: 'former_role', dot: 'frc-dot-former', title: 'Active Employees — Not Currently Foreman', items: visibleForemen.filter(f => f.roleGroup === 'former_role') },
+      { key: 'previous', dot: 'frc-dot-previous', title: 'Previous Employees', items: visibleForemen.filter(f => f.roleGroup === 'previous') }
+    ].filter(s => s.items.length > 0);
+
+    return sections.map(sec => `
+      <div>
+        <div class="frc-cards-section-hdr">
+          <div class="frc-cards-section-title">
+            <span class="frc-dot ${sec.dot}"></span>
+            <span>${this.escapeHtml(sec.title)}</span>
+            <span style="font-size:11px;font-weight:700;color:#64748b;">(${sec.items.length})</span>
+          </div>
+          <span style="font-size:11px;color:#64748b;font-weight:600;">${this.escapeHtml(model.period.shortLabel)} · Click any card for full report card book</span>
+        </div>
+        <div class="frc-cards-grid">
+          ${sec.items.map(fm => this.renderForemanOverviewCardHtml(fm, model.period)).join('')}
+        </div>
+      </div>
+    `).join('');
   }
 
   renderWorkspace(opts = {}) {
@@ -2139,22 +2388,18 @@ class ForemanReportCardEngine {
     this.periodMode = model.period.mode;
     this.selectedYear = model.period.year;
 
-    // If the active role filter matches 0 foremen in this period, reset to 'all'
-    let visibleForemen = this.getFilteredForemen(model);
-    if (visibleForemen.length === 0 && model.foremen.length > 0 && this.roleFilter !== 'all') {
+    // If the active role filter matches 0 foremen in this period (ignoring search), reset to 'all'
+    const roleScoped = (!this.roleFilter || this.roleFilter === 'all')
+      ? model.foremen
+      : model.foremen.filter(f => f.roleGroup === this.roleFilter);
+    if (roleScoped.length === 0 && model.foremen.length > 0 && this.roleFilter !== 'all') {
       this.roleFilter = 'all';
-      visibleForemen = model.foremen;
     }
 
-    // Ensure a valid foreman is selected inside the visible filtered list
-    if (!this.selectedForeman || !visibleForemen.some(f => f.name === this.selectedForeman)) {
-      this.selectedForeman = visibleForemen.length > 0 ? visibleForemen[0].name : '';
-      this.currentPageIndex = 0;
-    }
-
-    this.syncToolbarControls(model);
+    const visibleForemen = this.getFilteredForemen(model);
 
     if (model.foremen.length === 0) {
+      this.syncToolbarControls(model);
       container.innerHTML = `
         <div style="text-align: center; padding: 70px 20px; color: #94a3b8;">
           <div style="font-size: 44px; margin-bottom: 12px;">📋</div>
@@ -2170,6 +2415,69 @@ class ForemanReportCardEngine {
       `;
       return;
     }
+
+    const rc = model.roleCounts || { all: model.foremen.length, current: 0, former_role: 0, previous: 0 };
+
+    // -----------------------------------------------------------------------
+    // MODE A: FOREMAN OVERVIEW CARDS GRID (DEFAULT LANDING VIEW)
+    // -----------------------------------------------------------------------
+    if (this.viewMode === 'cards') {
+      this.syncToolbarControls(model);
+      container.innerHTML = `
+        <div class="frc-cards-shell">
+          <div class="frc-roster-bar">
+            <div class="frc-role-chips">
+              <span class="frc-bar-label">Foremen:</span>
+              <button type="button" class="frc-role-chip ${this.roleFilter === 'all' ? 'is-active' : ''}" onclick="window.foremanReportCardEngine.setRoleFilter('all')" title="Show all foremen who ran jobs in ${this.escapeHtml(model.period.shortLabel)}">
+                All (${rc.all})
+              </button>
+              <button type="button" class="frc-role-chip frc-role-current ${this.roleFilter === 'current' ? 'is-active' : ''}" onclick="window.foremanReportCardEngine.setRoleFilter('current')" title="Foremen currently leading an Active or On Hold crew">
+                <span class="frc-dot frc-dot-active"></span> Current Foremen (${rc.current})
+              </button>
+              <button type="button" class="frc-role-chip frc-role-former ${this.roleFilter === 'former_role' ? 'is-active' : ''}" onclick="window.foremanReportCardEngine.setRoleFilter('former_role')" title="Active employees who ran a job in this period but are not currently leading a crew">
+                <span class="frc-dot frc-dot-former"></span> Not Currently Foreman (${rc.former_role})
+              </button>
+              <button type="button" class="frc-role-chip frc-role-previous ${this.roleFilter === 'previous' ? 'is-active' : ''}" onclick="window.foremanReportCardEngine.setRoleFilter('previous')" title="Previous employees who ran a job in this period">
+                <span class="frc-dot frc-dot-previous"></span> Previous Employees (${rc.previous})
+              </button>
+            </div>
+            <div class="frc-cards-controls-right">
+              <input type="search"
+                     id="frc-cards-search-input"
+                     class="frc-cards-search"
+                     value="${this.escapeHtml(this.searchQuery)}"
+                     placeholder="🔍 Search foreman, job #, city..."
+                     aria-label="Search foremen"
+                     oninput="window.foremanReportCardEngine.onCardsSearchInput(this.value)">
+              <select class="frc-cards-sort" aria-label="Sort foreman cards" onchange="window.foremanReportCardEngine.onCardsSortChange(this.value)">
+                <option value="role" ${this.cardSortBy === 'role' ? 'selected' : ''}>Sort: Role &amp; Status</option>
+                <option value="name" ${this.cardSortBy === 'name' ? 'selected' : ''}>Sort: Name (A–Z)</option>
+                <option value="jha_asc" ${this.cardSortBy === 'jha_asc' ? 'selected' : ''}>Sort: Compliance (Low → High)</option>
+                <option value="jha_desc" ${this.cardSortBy === 'jha_desc' ? 'selected' : ''}>Sort: Compliance (High → Low)</option>
+                <option value="days_desc" ${this.cardSortBy === 'days_desc' ? 'selected' : ''}>Sort: Most Days Worked</option>
+              </select>
+            </div>
+          </div>
+
+          <div id="frc-cards-grid-body" style="display:flex;flex-direction:column;gap:18px;">
+            ${this.renderForemanCardsGridBodyHtml(model, visibleForemen)}
+          </div>
+        </div>
+      `;
+      return;
+    }
+
+    // -----------------------------------------------------------------------
+    // MODE B: FULL FOREMAN REPORT CARD BOOK (DETAIL VIEW)
+    // -----------------------------------------------------------------------
+    // Ensure a valid foreman is selected inside the visible filtered list
+    const bookList = roleScoped.length > 0 ? roleScoped : model.foremen;
+    if (!this.selectedForeman || !bookList.some(f => f.name === this.selectedForeman)) {
+      this.selectedForeman = bookList.length > 0 ? bookList[0].name : '';
+      this.currentPageIndex = 0;
+    }
+
+    this.syncToolbarControls(model);
 
     const foreman = model.foremenMap.get(this.selectedForeman);
     const pages = this.buildPagesForForeman(foreman);
@@ -2191,7 +2499,6 @@ class ForemanReportCardEngine {
     const activeCount = foreman.jobs.filter(j => j.status === 'Active').length;
     const holdCount = foreman.jobs.filter(j => j.status === 'On Hold').length;
     const compCount = foreman.jobs.filter(j => j.status === 'Completed' || j.status === 'Handed Off' || j.status === 'FY Transition').length;
-    const rc = model.roleCounts || { all: model.foremen.length, current: 0, former_role: 0, previous: 0 };
 
     const viewingPill = (() => {
       if (foreman.roleStatus === 'active_foreman') {
@@ -2218,21 +2525,23 @@ class ForemanReportCardEngine {
 
     container.innerHTML = `
       <div class="frc-workspace-shell">
-        <!-- Foreman Role Filter Strip (Current vs Not Currently Foreman vs Previous Employee) -->
+        <!-- Back to Cards + Foreman Role Filter Strip -->
         <div class="frc-roster-bar">
           <div class="frc-role-chips">
-            <span class="frc-bar-label">Foremen:</span>
+            <button type="button" class="frc-back-to-cards-btn" onclick="window.foremanReportCardEngine.setViewMode('cards')" title="Return to Foreman Overview Cards grid (Esc)">
+              ← All Foremen (${rc.all})
+            </button>
             <button type="button" class="frc-role-chip ${this.roleFilter === 'all' ? 'is-active' : ''}" onclick="window.foremanReportCardEngine.setRoleFilter('all')" title="Show all foremen who ran jobs in ${this.escapeHtml(model.period.shortLabel)}">
               All (${rc.all})
             </button>
             <button type="button" class="frc-role-chip frc-role-current ${this.roleFilter === 'current' ? 'is-active' : ''}" onclick="window.foremanReportCardEngine.setRoleFilter('current')" title="Foremen currently leading an Active or On Hold crew">
-              <span class="frc-dot frc-dot-active"></span> Current Foremen (${rc.current})
+              <span class="frc-dot frc-dot-active"></span> Current (${rc.current})
             </button>
             <button type="button" class="frc-role-chip frc-role-former ${this.roleFilter === 'former_role' ? 'is-active' : ''}" onclick="window.foremanReportCardEngine.setRoleFilter('former_role')" title="Active employees who ran a job in this period but are not currently leading a crew">
-              <span class="frc-dot frc-dot-former"></span> Not Currently Foreman (${rc.former_role})
+              <span class="frc-dot frc-dot-former"></span> Not Foreman (${rc.former_role})
             </button>
             <button type="button" class="frc-role-chip frc-role-previous ${this.roleFilter === 'previous' ? 'is-active' : ''}" onclick="window.foremanReportCardEngine.setRoleFilter('previous')" title="Previous employees who ran a job in this period">
-              <span class="frc-dot frc-dot-previous"></span> Previous Employees (${rc.previous})
+              <span class="frc-dot frc-dot-previous"></span> Previous (${rc.previous})
             </button>
           </div>
           <div>${viewingPill}</div>
@@ -2321,10 +2630,20 @@ class ForemanReportCardEngine {
   syncToolbarControls(model) {
     if (typeof document === 'undefined') return;
 
+    // Cards vs Book mode buttons
+    const btnCards = document.getElementById('frc-view-cards');
+    const btnBook = document.getElementById('frc-view-book');
+    if (btnCards) btnCards.classList.toggle('is-active', this.viewMode === 'cards');
+    if (btnBook) btnBook.classList.toggle('is-active', this.viewMode === 'book');
+
     // Foreman select grouped by Current Foremen / Active (Not Currently Foreman) / Previous Employees
     const fmSelect = document.getElementById('frc-foreman-select');
     if (fmSelect) {
-      const visible = this.getFilteredForemen(model);
+      const visible = (!this.roleFilter || this.roleFilter === 'all')
+        ? model.foremen
+        : model.foremen.filter(f => f.roleGroup === this.roleFilter);
+      const selectedVal = this.viewMode === 'cards' ? '' : this.selectedForeman;
+
       const formatOption = (f) => {
         let label = '';
         if (f.roleStatus === 'active_foreman') {
@@ -2336,8 +2655,10 @@ class ForemanReportCardEngine {
         } else {
           label = `🔵 ${f.name} — ${f.totals.totalJobs} job${f.totals.totalJobs === 1 ? '' : 's'} (Not Foreman)`;
         }
-        return `<option value="${this.escapeHtml(f.name)}" ${f.name === this.selectedForeman ? 'selected' : ''}>${this.escapeHtml(label)}</option>`;
+        return `<option value="${this.escapeHtml(f.name)}" ${f.name === selectedVal ? 'selected' : ''}>${this.escapeHtml(label)}</option>`;
       };
+
+      const overviewOpt = `<option value="" ${selectedVal === '' ? 'selected' : ''}>🗂️ All Foremen Overview (${visible.length})</option>`;
 
       const groups = [
         { key: 'current', label: '🟢 Current Foremen (Active / On Hold)', items: visible.filter(f => f.roleGroup === 'current') },
@@ -2346,13 +2667,13 @@ class ForemanReportCardEngine {
       ].filter(g => g.items.length > 0);
 
       if (groups.length > 1) {
-        fmSelect.innerHTML = groups.map(g => `
+        fmSelect.innerHTML = overviewOpt + groups.map(g => `
           <optgroup label="${this.escapeHtml(g.label)} (${g.items.length})">
             ${g.items.map(formatOption).join('')}
           </optgroup>
         `).join('');
       } else {
-        fmSelect.innerHTML = visible.map(formatOption).join('');
+        fmSelect.innerHTML = overviewOpt + visible.map(formatOption).join('');
       }
     }
 
@@ -2376,10 +2697,63 @@ class ForemanReportCardEngine {
     // Badge
     const badge = document.getElementById('tailgate-badge');
     if (badge) {
-      const fm = model.foremenMap.get(this.selectedForeman);
-      badge.textContent = fm
-        ? `${model.period.shortLabel} · ${fm.totals.totalJobs} Job${fm.totals.totalJobs === 1 ? '' : 's'}`
-        : model.period.shortLabel;
+      if (this.viewMode === 'cards') {
+        badge.textContent = `${model.period.shortLabel} · ${model.foremen.length} Forem${model.foremen.length === 1 ? 'an' : 'en'}`;
+      } else {
+        const fm = model.foremenMap.get(this.selectedForeman);
+        badge.textContent = fm
+          ? `${model.period.shortLabel} · ${fm.totals.totalJobs} Job${fm.totals.totalJobs === 1 ? '' : 's'}`
+          : model.period.shortLabel;
+      }
+    }
+  }
+
+  setViewMode(mode) {
+    const next = mode === 'book' ? 'book' : 'cards';
+    if (next === this.viewMode) return;
+    this.viewMode = next;
+    if (next === 'book' && !this.selectedForeman) {
+      const model = this.cachedModel || this.buildDataModel();
+      const visible = this.getFilteredForemen(model);
+      if (visible.length > 0) this.selectedForeman = visible[0].name;
+    }
+    this.renderWorkspace({ reuseCache: true, preservePage: next === 'book' });
+  }
+
+  openForemanBook(foremanName, targetJobNumber = '') {
+    if (!foremanName) return;
+    this.selectedForeman = foremanName;
+    this.viewMode = 'book';
+    this.currentPageIndex = 0;
+    const opts = { reuseCache: true };
+    if (targetJobNumber) {
+      opts.preservePage = true;
+      opts.targetPageId = `job:${targetJobNumber}`;
+    }
+    this.renderWorkspace(opts);
+  }
+
+  onCardsSearchInput(val) {
+    this.searchQuery = String(val || '');
+    const model = this.cachedModel || this.buildDataModel();
+    const gridBody = document.getElementById('frc-cards-grid-body');
+    if (gridBody) {
+      const visible = this.getFilteredForemen(model);
+      gridBody.innerHTML = this.renderForemanCardsGridBodyHtml(model, visible);
+    } else {
+      this.renderWorkspace({ reuseCache: true });
+    }
+  }
+
+  onCardsSortChange(val) {
+    this.cardSortBy = val || 'role';
+    const model = this.cachedModel || this.buildDataModel();
+    const gridBody = document.getElementById('frc-cards-grid-body');
+    if (gridBody) {
+      const visible = this.getFilteredForemen(model);
+      gridBody.innerHTML = this.renderForemanCardsGridBodyHtml(model, visible);
+    } else {
+      this.renderWorkspace({ reuseCache: true });
     }
   }
 
@@ -2395,6 +2769,7 @@ class ForemanReportCardEngine {
   jumpToForemanJob(targetForeman, targetJobNumber = '', fallbackCalendarYear = null) {
     if (!targetForeman) return;
     this.roleFilter = 'all';
+    this.viewMode = 'book';
     let model = this.cachedModel || this.buildDataModel();
 
     // If the target foreman only ran weeks outside the current period (e.g. Cody Lund on 011-26 while in FY27),
@@ -2422,7 +2797,13 @@ class ForemanReportCardEngine {
   }
 
   onForemanChange(foremanName) {
+    if (!foremanName) {
+      this.viewMode = 'cards';
+      this.renderWorkspace({ reuseCache: true });
+      return;
+    }
     this.selectedForeman = foremanName;
+    this.viewMode = 'book';
     this.currentPageIndex = 0;
     this.renderWorkspace({ reuseCache: true });
   }
@@ -2477,12 +2858,17 @@ class ForemanReportCardEngine {
       if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA' || activeEl.tagName === 'SELECT')) {
         return;
       }
-      // Don't hijack arrows when any modal overlay is open
+      // Don't hijack arrows/Escape when any modal overlay is open
       if (document.querySelector('#frc-job-status-modal, #job-lifecycle-sheet-modal, .modal-overlay.active')) {
         return;
       }
 
-      if (e.key === 'ArrowLeft' || e.key === 'PageUp') {
+      if (this.viewMode !== 'book') return;
+
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        this.setViewMode('cards');
+      } else if (e.key === 'ArrowLeft' || e.key === 'PageUp') {
         e.preventDefault();
         this.turnPage(-1);
       } else if (e.key === 'ArrowRight' || e.key === 'PageDown') {
@@ -3668,9 +4054,13 @@ class ForemanReportCardEngine {
       });
     };
 
-    if (scope === 'all') {
+    const effectiveScope = (scope !== 'all' && (!this.selectedForeman || !model.foremenMap.has(this.selectedForeman)))
+      ? 'all'
+      : scope;
+
+    if (effectiveScope === 'all') {
       model.foremen.forEach(fm => appendForemanPages(fm, null));
-    } else if (scope === 'current') {
+    } else if (effectiveScope === 'current') {
       const fm = model.foremenMap.get(this.selectedForeman);
       if (fm) appendForemanPages(fm, this.currentPageIndex);
     } else {
@@ -3678,7 +4068,7 @@ class ForemanReportCardEngine {
       if (fm) appendForemanPages(fm, null);
     }
 
-    const docTitle = scope === 'all'
+    const docTitle = effectiveScope === 'all'
       ? `Mountain Power — All Foreman Report Cards (${model.period.shortLabel})`
       : `Mountain Power — Foreman Report Card: ${this.selectedForeman} (${model.period.shortLabel})`;
 
