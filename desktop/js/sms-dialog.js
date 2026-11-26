@@ -131,42 +131,129 @@ class SMSDialogEngine {
   }
 
   /**
-   * Resets safety missing SMS text message back to template
+   * Returns storage map for JHA Quality Failure SMS notifications (tracked separately from Missing Reports
+   * so Wednesday EcoOnline failures aren't hidden by Monday/Tuesday Missing Report texts)
    */
-  resetSafetyMissingMessage() {
-    if (!this.currentContext || this.currentContext.type !== 'safety_missing') return;
-    const textarea = document.getElementById('dt-sms-message-text');
-    if (textarea) {
-      textarea.value = this.currentContext.defaultMsg;
+  getJhaFailSmsNotifiedMap() {
+    try {
+      const raw = localStorage.getItem('sa_compliance_jha_fail_sms_notified');
+      return raw ? JSON.parse(raw) : {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  saveJhaFailSmsNotified(jobNum, weekVal, dateStr) {
+    try {
+      const map = this.getJhaFailSmsNotifiedMap();
+      const cleanJob = String(jobNum || '').trim();
+      const cleanWeek = String(weekVal || '').trim();
+      const key = `${cleanJob}_${cleanWeek}`;
+      map[key] = { jobNum: cleanJob, week: cleanWeek, date: dateStr, timestamp: Date.now() };
+      localStorage.setItem('sa_compliance_jha_fail_sms_notified', JSON.stringify(map));
+    } catch (e) {
+      console.error('Error saving JHA fail sms notified:', e);
+    }
+  }
+
+  getJhaFailSmsNotified(jobNum, weekVal) {
+    try {
+      const map = this.getJhaFailSmsNotifiedMap();
+      const cleanJob = String(jobNum || '').trim();
+      const cleanWeek = String(weekVal || '').trim();
+      const key = `${cleanJob}_${cleanWeek}`;
+      if (map[key]) return map[key].date;
+      const shortWeek = cleanWeek.replace(/\/20(\d\d)$/, '/$1');
+      const longWeek = cleanWeek.replace(/\/(\d\d)$/, '/20$1');
+      if (map[`${cleanJob}_${shortWeek}`]) return map[`${cleanJob}_${shortWeek}`].date;
+      if (map[`${cleanJob}_${longWeek}`]) return map[`${cleanJob}_${longWeek}`].date;
+      return null;
+    } catch (e) {
+      return null;
     }
   }
 
   /**
-   * Opens the SMS modal for missing safety compliance reports
+   * Builds the Safety Compliance SMS message dynamically based on Missing Reports + JHA Quality Fail toggles.
+   * App always wins for missing reports; EcoOnline JHA fail text is strictly quality-only.
    */
-  openSafetyMissingSms(foreman, jobNum, weekVal) {
+  buildSafetyComplianceSmsMessage(ctx, { includeMissing = true, includeJhaFail = false } = {}) {
+    const firstName = ctx.firstName || 'there';
+    const shortWeek = ctx.cleanWeek || ctx.weekVal || '';
+    const hasMissing = Boolean(includeMissing && ctx.hasMissing);
+    const hasFail = Boolean(includeJhaFail && ctx.hasJhaFail && ctx.jhaFail && ctx.jhaFail.qualityComments);
+    const failText = hasFail ? ctx.jhaFail.qualityComments : '';
+
+    if (hasMissing && hasFail) {
+      return `Hi ${firstName}, we did not receive the ${ctx.itemsStr} for the week of ${shortWeek} from your crew.
+
+Did you send it and I just didn't get it?
+Is it hung up in the app?
+Did you not work that day?
+Was there an issue turning it in that you need help with?
+
+Also, Field iD flagged a JHA quality fail for that week: ${failText}. Please make sure that is addressed on upcoming JHAs.
+
+Please let me know so we can get this updated. Thanks!`;
+    }
+
+    if (hasFail) {
+      return `Hi ${firstName}, thanks for getting your crew's JHAs turned in for the week of ${shortWeek}. Heads up — Field iD flagged a JHA quality fail for that week:
+
+• ${failText}
+
+Please make sure this is addressed on upcoming JHAs, and let me know if you need any help with it. Thanks!`;
+    }
+
+    return `Hi ${firstName}, we did not receive the ${ctx.itemsStr} for the week of ${shortWeek} from your crew.
+
+Did you send it and I just didn't get it?
+Is it hung up in the app?
+Did you not work that day?
+Was there an issue turning it in that you need help with?
+
+Please let me know so we can get this updated. Thanks!`;
+  }
+
+  /**
+   * Updates Safety Compliance SMS preview when the user toggles Missing Reports or JHA Quality Fail checkboxes
+   */
+  toggleSafetySmsOptions() {
+    const ctx = this.currentContext;
+    if (!ctx || ctx.type !== 'safety_missing') return;
+    const missCb = document.getElementById('dt-sms-include-missing');
+    const failCb = document.getElementById('dt-sms-include-jha-fail');
+    ctx.includeMissing = missCb ? missCb.checked : ctx.hasMissing;
+    ctx.includeJhaFail = failCb ? failCb.checked : false;
+    ctx.defaultMsg = this.buildSafetyComplianceSmsMessage(ctx, {
+      includeMissing: ctx.includeMissing,
+      includeJhaFail: ctx.includeJhaFail
+    });
+    const textarea = document.getElementById('dt-sms-message-text');
+    if (textarea) textarea.value = ctx.defaultMsg;
+  }
+
+  /**
+   * Resets safety missing SMS text message back to template
+   */
+  resetSafetyMissingMessage() {
+    if (!this.currentContext || this.currentContext.type !== 'safety_missing') return;
+    this.toggleSafetySmsOptions();
+  }
+
+  /**
+   * Opens the SMS modal for missing safety compliance reports and/or EcoOnline JHA quality fails
+   */
+  openSafetyMissingSms(foreman, jobNum, weekVal, options = {}) {
     const modal = document.getElementById('sms-notification-modal');
     const body = document.getElementById('sms-notification-modal-body');
     const titleEl = document.getElementById('sms-notification-modal-title');
     if (!modal || !body) return;
 
-    if (titleEl) {
-      titleEl.innerHTML = '<span style="font-size: 18px;">🛡️</span> <span style="font-weight: 700;">Missing Safety Reports SMS Reminder</span>';
-    }
-    const modalHeader = modal.querySelector('.modal-header');
-    if (modalHeader) {
-      modalHeader.style.background = 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)';
-    }
-    const markBtn = modal.querySelector('.modal-footer .btn-success');
-    if (markBtn) {
-      markBtn.innerHTML = '<span>✅</span> Mark as Notified';
-      markBtn.title = 'Mark foreman as notified for this week without opening messaging app';
-    }
-
     const cleanJob = String(jobNum || '').trim();
     const cleanWeek = String(weekVal || '').trim();
 
-    // Look up crew row in safety_compliance table
+    // Look up crew row in safety_compliance table (App is ALWAYS source of truth for missing reports)
     const snap = (this.db && typeof this.db.getSnapshot === 'function') ? this.db.getSnapshot() : (this.db ? this.db.snapshot : null);
     const scTable = snap && snap.tables ? (snap.tables['safety_compliance'] || snap.tables['Safety Compliance']) : null;
     let crewRow = null;
@@ -207,49 +294,80 @@ class SMSDialogEngine {
       }
     }
 
-    if (missingItems.length === 0) {
-      missingItems.push('Safety Reports');
-    }
+    const statusStr = crewRow ? String(crewRow['Status'] || '') : '';
+    const hasMissing = missingItems.length > 0 || statusStr.includes('Missing');
+
+    // Look up EcoOnline JHA Quality Fail (strictly quality issues; "No JHA <date>" already stripped)
+    const jhaFail = (window.safetyComplianceEngine && typeof window.safetyComplianceEngine.getQualityJhaFailForCrewWeek === 'function')
+      ? window.safetyComplianceEngine.getQualityJhaFailForCrewWeek(cleanJob, cleanWeek)
+      : null;
+    const hasJhaFail = Boolean(jhaFail && jhaFail.qualityComments);
+
+    const displayMissing = missingItems.length > 0 ? missingItems : (hasMissing ? ['Safety Reports'] : []);
 
     let itemsStr = '';
-    if (missingItems.length === 1) {
-      itemsStr = missingItems[0];
-    } else if (missingItems.length === 2) {
-      itemsStr = `${missingItems[0]} and ${missingItems[1]}`;
+    if (displayMissing.length === 1) {
+      itemsStr = displayMissing[0];
+    } else if (displayMissing.length === 2) {
+      itemsStr = `${displayMissing[0]} and ${displayMissing[1]}`;
+    } else if (displayMissing.length > 2) {
+      itemsStr = `${displayMissing.slice(0, -1).join(', ')}, and ${displayMissing[displayMissing.length - 1]}`;
     } else {
-      itemsStr = `${missingItems.slice(0, -1).join(', ')}, and ${missingItems[missingItems.length - 1]}`;
+      itemsStr = 'Safety Reports';
+    }
+
+    const includeMissing = hasMissing && !options.focusJhaFailOnly;
+    const includeJhaFail = hasJhaFail;
+
+    if (titleEl) {
+      if (includeMissing && includeJhaFail) {
+        titleEl.innerHTML = '<span style="font-size: 18px;">🛡️</span> <span style="font-weight: 700;">Missing Reports &amp; JHA Quality Fail SMS</span>';
+      } else if (!includeMissing && includeJhaFail) {
+        titleEl.innerHTML = '<span style="font-size: 18px;">⚠️</span> <span style="font-weight: 700;">Field iD JHA Quality Fail SMS</span>';
+      } else {
+        titleEl.innerHTML = '<span style="font-size: 18px;">🛡️</span> <span style="font-weight: 700;">Missing Safety Reports SMS Reminder</span>';
+      }
+    }
+    const modalHeader = modal.querySelector('.modal-header');
+    if (modalHeader) {
+      modalHeader.style.background = (!includeMissing && includeJhaFail)
+        ? 'linear-gradient(135deg, #d97706 0%, #b45309 100%)'
+        : 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)';
+    }
+    const markBtn = modal.querySelector('.modal-footer .btn-success');
+    if (markBtn) {
+      markBtn.innerHTML = '<span>✅</span> Mark as Notified';
+      markBtn.title = 'Mark foreman as notified for this week without opening messaging app';
     }
 
     const shortWeek = cleanWeek.replace(/\/20(\d\d)$/, '/$1');
     const firstName = String(foreman || '').trim().split(' ')[0] || 'there';
 
-    const defaultMsg = `Hi ${firstName}, we did not receive the ${itemsStr} for the week of ${shortWeek} from your crew.
-
-Did you send it and I just didn't get it?
-Is it hung up in the app?
-Did you not work that day?
-Was there an issue turning it in that you need help with?
-
-Please let me know so we can get this updated. Thanks!`;
-
     const phone = this.getEmployeePhone(foreman);
     let cleanPhone = phone.replace(/[^0-9]/g, '');
     if (cleanPhone.length === 10) cleanPhone = '1' + cleanPhone;
 
-    this.currentContext = {
+    const ctx = {
       type: 'safety_missing',
       foreman: foreman || 'Foreman',
       firstName,
       jobNum: cleanJob,
       weekVal: cleanWeek,
       cleanWeek: shortWeek,
-      missingItems,
+      missingItems: displayMissing,
       itemsStr,
+      hasMissing,
+      hasJhaFail,
+      jhaFail,
+      includeMissing,
+      includeJhaFail,
       phone,
       cleanPhone,
-      defaultMsg
+      defaultMsg: ''
     };
+    ctx.defaultMsg = this.buildSafetyComplianceSmsMessage(ctx, { includeMissing, includeJhaFail });
 
+    this.currentContext = ctx;
     this.renderModalUI(body);
     modal.classList.add('active');
   }
@@ -431,21 +549,58 @@ Please let me know so we can get this updated. Thanks!`;
           </div>
         </div>
 
-        <!-- Missing Reports List -->
-        <div style="background: var(--bg-secondary); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 8px; padding: 12px 14px; margin-bottom: 16px;">
-          <div style="font-size: 12px; font-weight: 700; color: #f87171; margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
-            <span>❌</span> Missing Report${(ctx.missingItems || []).length === 1 ? '' : 's'} for Week of ${this.escapeHtml(ctx.cleanWeek)}:
-          </div>
-          <div style="display: flex; flex-wrap: wrap; gap: 6px;">
-            ${(ctx.missingItems && ctx.missingItems.length > 0) ? ctx.missingItems.map(item => `
-              <span style="background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.4); color: #fca5a5; font-size: 12px; font-weight: 700; padding: 3px 8px; border-radius: 5px;">
-                ❌ ${this.escapeHtml(item)}
+        <!-- Missing Reports List (App Source of Truth) -->
+        ${ctx.hasMissing ? `
+          <div style="background: var(--bg-secondary); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 8px; padding: 12px 14px; margin-bottom: 12px;">
+            <div style="font-size: 12px; font-weight: 700; color: #f87171; margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;">
+              <span style="display: inline-flex; align-items: center; gap: 6px;">
+                <span>❌</span> Missing Report${(ctx.missingItems || []).length === 1 ? '' : 's'} for Week of ${this.escapeHtml(ctx.cleanWeek)}:
               </span>
-            `).join('') : `
-              <span style="color: var(--text-muted); font-size: 12px;">No specific missing items recorded (status marked as missing)</span>
-            `}
+              ${ctx.hasJhaFail ? `
+                <label style="display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: #e2e8f0; cursor: pointer; user-select: none;">
+                  <input type="checkbox" id="dt-sms-include-missing" ${ctx.includeMissing ? 'checked' : ''} onchange="window.smsDialogEngine.toggleSafetySmsOptions()" style="accent-color: #ef4444; width: 14px; height: 14px;">
+                  <span>Include Missing Reports</span>
+                </label>
+              ` : ''}
+            </div>
+            <div style="display: flex; flex-wrap: wrap; gap: 6px;">
+              ${(ctx.missingItems && ctx.missingItems.length > 0) ? ctx.missingItems.map(item => `
+                <span style="background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.4); color: #fca5a5; font-size: 12px; font-weight: 700; padding: 3px 8px; border-radius: 5px;">
+                  ❌ ${this.escapeHtml(item)}
+                </span>
+              `).join('') : `
+                <span style="color: var(--text-muted); font-size: 12px;">No specific missing items recorded (status marked as missing)</span>
+              `}
+            </div>
           </div>
-        </div>
+        ` : ''}
+
+        <!-- Field iD JHA Quality Fail (EcoOnline — Quality Only) -->
+        ${ctx.hasJhaFail && ctx.jhaFail ? `
+          <div style="background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.4); border-radius: 8px; padding: 12px 14px; margin-bottom: 14px;">
+            <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 6px;">
+              <label style="display: inline-flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 800; color: #fbbf24; cursor: pointer; user-select: none;">
+                <input type="checkbox" id="dt-sms-include-jha-fail" ${ctx.includeJhaFail ? 'checked' : ''} onchange="window.smsDialogEngine.toggleSafetySmsOptions()" style="accent-color: #f59e0b; width: 15px; height: 15px;">
+                <span>⚠️ Include Field iD JHA Quality Fail in SMS</span>
+              </label>
+              <div style="display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                ${(ctx.jhaFail.categories || []).map(cat => `
+                  <span style="font-size: 10.5px; font-weight: 700; padding: 1px 6px; border-radius: 4px; background: rgba(245, 158, 11, 0.18); border: 1px solid rgba(245, 158, 11, 0.45); color: #fde68a;">
+                    ${this.escapeHtml(cat)}
+                  </span>
+                `).join('')}
+                ${ctx.jhaFail.ecoLink ? `
+                  <a href="${this.escapeHtml(ctx.jhaFail.ecoLink)}" target="_blank" rel="noopener noreferrer" style="font-size: 10.5px; font-weight: 700; color: #60a5fa; text-decoration: underline;">
+                    Field iD ↗
+                  </a>
+                ` : ''}
+              </div>
+            </div>
+            <div style="font-size: 12.5px; color: #fef3c7; line-height: 1.4; background: rgba(15, 23, 42, 0.45); border: 1px solid rgba(245, 158, 11, 0.25); border-radius: 6px; padding: 7px 10px;">
+              ${this.escapeHtml(ctx.jhaFail.qualityComments)}
+            </div>
+          </div>
+        ` : ''}
 
         <!-- Message Editor Box -->
         <div style="margin-bottom: 16px;">
@@ -828,32 +983,45 @@ Please let me know so we can get this updated. Thanks!`;
     }
 
     if (ctx.type === 'safety_missing') {
-      // 1. Save to localStorage map
-      this.saveSafetyComplianceSmsNotified(ctx.jobNum, ctx.weekVal, todayStr);
+      const missCb = document.getElementById('dt-sms-include-missing');
+      const failCb = document.getElementById('dt-sms-include-jha-fail');
+      const sentMissing = missCb ? missCb.checked : Boolean(ctx.includeMissing !== false && ctx.hasMissing);
+      const sentJhaFail = failCb ? failCb.checked : Boolean(ctx.includeJhaFail && ctx.hasJhaFail);
 
-      // 2. Update snapshot table row if available
-      const snap = (this.db && typeof this.db.getSnapshot === 'function') ? this.db.getSnapshot() : (this.db ? this.db.snapshot : null);
-      const scTable = snap && snap.tables ? (snap.tables['safety_compliance'] || snap.tables['Safety Compliance']) : null;
-      if (scTable && scTable.rows) {
-        const cleanJob = String(ctx.jobNum || '').trim();
-        const cleanWeek = String(ctx.weekVal || '').trim();
-        const matchedRow = scTable.rows.find(r => {
-          const rJob = String(r['Job Number'] || r['Crew'] || '').trim();
-          const rWeek = String(r['Week Start'] || r['Week'] || '').trim();
-          return rJob.toLowerCase() === cleanJob.toLowerCase() &&
-                 (rWeek === cleanWeek || rWeek.startsWith(cleanWeek) || cleanWeek.startsWith(rWeek));
-        });
-        if (matchedRow) {
-          matchedRow['SMS Notified'] = todayStr;
-        }
-        if (this.db && typeof this.db.markTableDirty === 'function') {
-          this.db.markTableDirty('safety_compliance');
-        }
-        if (this.db && typeof this.db.persistSnapshot === 'function') {
-          try {
-            await this.db.persistSnapshot(snap);
-          } catch (err) {
-            console.warn('Could not persist snapshot for safety SMS:', err);
+      // 1. Save Missing Reports notification if included (or fallback if neither toggled)
+      if (sentMissing || !sentJhaFail) {
+        this.saveSafetyComplianceSmsNotified(ctx.jobNum, ctx.weekVal, todayStr);
+      }
+      // 1b. Save JHA Quality Fail notification separately so Wednesday fails track independently
+      if (sentJhaFail) {
+        this.saveJhaFailSmsNotified(ctx.jobNum, ctx.weekVal, todayStr);
+      }
+
+      // 2. Update snapshot table row if available (Missing Reports SMS Notified column)
+      if (sentMissing || !sentJhaFail) {
+        const snap = (this.db && typeof this.db.getSnapshot === 'function') ? this.db.getSnapshot() : (this.db ? this.db.snapshot : null);
+        const scTable = snap && snap.tables ? (snap.tables['safety_compliance'] || snap.tables['Safety Compliance']) : null;
+        if (scTable && scTable.rows) {
+          const cleanJob = String(ctx.jobNum || '').trim();
+          const cleanWeek = String(ctx.weekVal || '').trim();
+          const matchedRow = scTable.rows.find(r => {
+            const rJob = String(r['Job Number'] || r['Crew'] || '').trim();
+            const rWeek = String(r['Week Start'] || r['Week'] || '').trim();
+            return rJob.toLowerCase() === cleanJob.toLowerCase() &&
+                   (rWeek === cleanWeek || rWeek.startsWith(cleanWeek) || cleanWeek.startsWith(rWeek));
+          });
+          if (matchedRow) {
+            matchedRow['SMS Notified'] = todayStr;
+          }
+          if (this.db && typeof this.db.markTableDirty === 'function') {
+            this.db.markTableDirty('safety_compliance');
+          }
+          if (this.db && typeof this.db.persistSnapshot === 'function') {
+            try {
+              await this.db.persistSnapshot(snap);
+            } catch (err) {
+              console.warn('Could not persist snapshot for safety SMS:', err);
+            }
           }
         }
       }
@@ -865,7 +1033,10 @@ Please let me know so we can get this updated. Thanks!`;
 
       // 4. Toast notification
       if (typeof window.showToast === 'function') {
-        window.showToast(`💬 Recorded SMS reminder for Foreman ${ctx.foreman} (${ctx.jobNum})`, 'success');
+        const label = sentMissing && sentJhaFail
+          ? 'Missing Reports + JHA Fail SMS'
+          : (sentJhaFail ? 'JHA Quality Fail SMS' : 'SMS reminder');
+        window.showToast(`💬 Recorded ${label} for Foreman ${ctx.foreman} (${ctx.jobNum})`, 'success');
       }
 
       setTimeout(() => {

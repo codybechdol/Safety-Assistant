@@ -1970,13 +1970,30 @@ class SheetNavigator {
       return true;
     });
 
+    const weekJhaFailsMap = (window.safetyComplianceEngine && typeof window.safetyComplianceEngine.getQualityJhaFailsForWeek === 'function')
+      ? window.safetyComplianceEngine.getQualityJhaFailsForWeek(this.selectedComplianceWeek)
+      : new Map();
+    const getRowJhaFail = (r) => {
+      const rawJn = String(r['Job Number'] || r['Job #'] || r['Crew'] || '').trim();
+      const jm = rawJn.match(/^(\d{2,4}-\d{2})/);
+      const baseJn = jm ? jm[1] : rawJn.replace(/\s*\([^)]*\)/g, '').replace(/\.\d+.*$/, '').trim();
+      return weekJhaFailsMap.get(baseJn) || null;
+    };
+
     const totalCrews = weekRows.length;
     const compCount = weekRows.filter(r => String(r['Status'] || '').toLowerCase() === 'complete').length;
     const missingCount = weekRows.filter(r => String(r['Status'] || '').toLowerCase().includes('missing')).length;
     const pendingCount = weekRows.filter(r => String(r['Status'] || '').toLowerCase() === 'pending').length;
+    const jhaFailCount = weekRows.filter(r => Boolean(getRowJhaFail(r))).length;
     const notifiedCount = weekRows.filter(r => {
       const jn = String(r['Job Number'] || r['Crew'] || '').trim();
-      return Boolean(r['SMS Notified'] || (window.smsDialogEngine && window.smsDialogEngine.getSafetyComplianceSmsNotified(jn, this.selectedComplianceWeek)));
+      return Boolean(
+        r['SMS Notified'] ||
+        (window.smsDialogEngine && (
+          window.smsDialogEngine.getSafetyComplianceSmsNotified(jn, this.selectedComplianceWeek) ||
+          window.smsDialogEngine.getJhaFailSmsNotified(jn, this.selectedComplianceWeek)
+        ))
+      );
     }).length;
     const pct = totalCrews > 0 ? Math.round((compCount / totalCrews) * 100) : 0;
 
@@ -1989,7 +2006,9 @@ class SheetNavigator {
         const st = String(r['Status'] || '').toLowerCase();
         const meta = jobLocMap.get(String(r['Job Number'] || r['Crew'] || '').trim()) || {};
         const lc = (meta.loc || '').toLowerCase();
-        return jn.includes(sTerm) || fm.includes(sTerm) || st.includes(sTerm) || lc.includes(sTerm);
+        const jf = getRowJhaFail(r);
+        const jfText = jf ? `${jf.qualityComments} ${jf.categories.join(' ')}`.toLowerCase() : '';
+        return jn.includes(sTerm) || fm.includes(sTerm) || st.includes(sTerm) || lc.includes(sTerm) || jfText.includes(sTerm);
       });
     }
 
@@ -2011,12 +2030,20 @@ class SheetNavigator {
         const v = String(r['Monthly Checklist'] || '');
         return v.startsWith('❌') || v.includes('⏳');
       });
+    } else if (curFilter === 'jha_fails') {
+      filteredCrews = filteredCrews.filter(r => Boolean(getRowJhaFail(r)));
     } else if (curFilter === 'compliant') {
       filteredCrews = filteredCrews.filter(r => String(r['Status'] || '').toLowerCase() === 'complete');
     } else if (curFilter === 'sms_notified') {
       filteredCrews = filteredCrews.filter(r => {
         const jn = String(r['Job Number'] || r['Crew'] || '').trim();
-        return Boolean(r['SMS Notified'] || (window.smsDialogEngine && window.smsDialogEngine.getSafetyComplianceSmsNotified(jn, this.selectedComplianceWeek)));
+        return Boolean(
+          r['SMS Notified'] ||
+          (window.smsDialogEngine && (
+            window.smsDialogEngine.getSafetyComplianceSmsNotified(jn, this.selectedComplianceWeek) ||
+            window.smsDialogEngine.getJhaFailSmsNotified(jn, this.selectedComplianceWeek)
+          ))
+        );
       });
     }
 
@@ -2064,6 +2091,7 @@ class SheetNavigator {
             <span style="color: #4ade80; font-weight: 700;">✅ ${compCount} Compliant</span>
             ${missingCount > 0 ? `<span style="color: #f87171; font-weight: 700;">❌ ${missingCount} Missing</span>` : ''}
             ${pendingCount > 0 ? `<span style="color: #facc15; font-weight: 700;">⏳ ${pendingCount} Pending</span>` : ''}
+            ${jhaFailCount > 0 ? `<span style="color: #fbbf24; font-weight: 700;">⚠️ ${jhaFailCount} JHA Quality Fail${jhaFailCount === 1 ? '' : 's'}</span>` : ''}
             <span class="badge" style="background: ${pct >= 100 ? '#15803d' : (pct >= 80 ? '#0369a1' : '#b91c1c')}; color: #fff; padding: 3px 9px; border-radius: 4px; font-weight: 800; font-size: 11px;">
               ${pct}% Compliant
             </span>
@@ -2083,6 +2111,9 @@ class SheetNavigator {
             <div class="cards-filter-chip ${curFilter === 'missing_chk' ? 'active' : ''}" style="color: #facc15;" onclick="window.sheetNavigator.setComplianceCardFilter('missing_chk')">
               📝 Missing Monthly Checklist
             </div>
+            <div class="cards-filter-chip ${curFilter === 'jha_fails' ? 'active' : ''}" style="color: #fbbf24;" onclick="window.sheetNavigator.setComplianceCardFilter('jha_fails')">
+              ⚠️ JHA Quality Fails (${jhaFailCount})
+            </div>
             <div class="cards-filter-chip ${curFilter === 'compliant' ? 'active' : ''}" style="color: #4ade80;" onclick="window.sheetNavigator.setComplianceCardFilter('compliant')">
               ✅ 100% Compliant (${compCount})
             </div>
@@ -2099,7 +2130,7 @@ class SheetNavigator {
               <div style="font-size: 32px; margin-bottom: 8px;">🔍</div>
               <div style="font-size: 14px; font-weight: 600; color: var(--text-primary);">No crews match the current filter for this week</div>
             </div>
-          ` : filteredCrews.map(crewRow => this._renderComplianceCrewCard(crewRow, jobLocMap)).join('')}
+          ` : filteredCrews.map(crewRow => this._renderComplianceCrewCard(crewRow, jobLocMap, getRowJhaFail(crewRow))).join('')}
         </div>
       </div>
     `;
@@ -2110,7 +2141,7 @@ class SheetNavigator {
   /**
    * Helper that renders an individual Safety Compliance Crew Card.
    */
-  _renderComplianceCrewCard(crewRow, jobLocMap) {
+  _renderComplianceCrewCard(crewRow, jobLocMap, jhaFail = null) {
     const jobNum = String(crewRow['Job Number'] || crewRow['Job #'] || crewRow['Crew'] || '').trim();
     const foreman = String(crewRow['Foreman'] || '').trim();
     const status = String(crewRow['Status'] || '').trim();
@@ -2148,8 +2179,13 @@ class SheetNavigator {
     }
 
     const hasMissing = missingItems.length > 0 || status.includes('Missing');
+    const hasJhaFail = Boolean(jhaFail && jhaFail.qualityComments);
     const notifDate = crewRow['SMS Notified'] || (window.smsDialogEngine ? window.smsDialogEngine.getSafetyComplianceSmsNotified(jobNum, weekVal) : null);
     const cleanNotifDate = notifDate ? String(notifDate).replace(/\/20(\d\d)$/, '/$1') : '';
+    const jhaFailNotifDate = (hasJhaFail && window.smsDialogEngine && typeof window.smsDialogEngine.getJhaFailSmsNotified === 'function')
+      ? window.smsDialogEngine.getJhaFailSmsNotified(jobNum, weekVal)
+      : null;
+    const cleanJhaFailNotifDate = jhaFailNotifDate ? String(jhaFailNotifDate).replace(/\/20(\d\d)$/, '/$1') : '';
 
     let cardBorderClass = 'status-pending';
     let statusBadge = `<span class="badge" style="background: rgba(245, 158, 11, 0.15); color: #facc15; border: 1px solid rgba(245, 158, 11, 0.35); font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 4px;">⏳ Pending</span>`;
@@ -2226,9 +2262,17 @@ class SheetNavigator {
         icon = '—';
       }
 
+      // Highlight day pill with amber quality indicator if EcoOnline cited this specific day
+      const isQualityFailDay = Boolean(hasJhaFail && jhaFail.affectedDayKeys && jhaFail.affectedDayKeys.has(dayKey) && (canClickPdf || v.startsWith('⏳')));
+      if (isQualityFailDay) {
+        title += ` · ⚠️ Field iD Quality Fail: ${this.escapeHtml(jhaFail.qualityComments)}`;
+      }
+
       return `
         <div class="comp-day-pill ${pillClass}" title="${title}"
+             style="${isQualityFailDay ? 'position: relative; box-shadow: 0 0 0 1.5px #f59e0b; background: rgba(245, 158, 11, 0.14);' : ''}"
              ${canClickPdf ? `onclick="if(window.safetyComplianceEngine){window.safetyComplianceEngine.openPdfForComplianceCell('${this.escapeJs(jobNum)}', '${this.escapeJs(dayKey)}', '${this.escapeJs(weekVal)}', '${this.escapeJs(foreman)}');}"` : (isHolidayPill && activeHol ? `onclick="window.sheetNavigator.openFloatingHolidayModal('${this.escapeJs(activeHol.dateKey)}', '${this.escapeJs(jobNum)}');"` : '')}>
+          ${isQualityFailDay ? '<span style="position:absolute;top:-4px;right:-3px;font-size:8px;line-height:1;background:#f59e0b;color:#0f172a;font-weight:900;border-radius:50%;width:11px;height:11px;display:flex;align-items:center;justify-content:center;">!</span>' : ''}
           <span style="font-size: 9px; color: ${isHolidayPill ? '#a5b4fc; font-weight: 700;' : 'var(--text-muted);'} margin-bottom: 1px;">${label}</span>
           <span style="font-size: 13px; font-weight: 800; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0px;">${icon}</span>
         </div>
@@ -2293,6 +2337,11 @@ class SheetNavigator {
               <span class="badge" style="background: rgba(14, 165, 233, 0.15); color: #38bdf8; border: 1px solid rgba(14, 165, 233, 0.35); font-size: 9.5px; font-weight: 700; padding: 1px 5px; border-radius: 4px;">
                 ⚡ ${this.escapeHtml(discipline)}
               </span>
+              ${hasJhaFail ? `
+                <span class="badge" style="background: rgba(245, 158, 11, 0.18); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.45); font-size: 9.5px; font-weight: 800; padding: 1px 6px; border-radius: 4px;" title="Field iD JHA Quality Fail: ${this.escapeHtml(jhaFail.qualityComments)}">
+                  ⚠️ JHA Fail
+                </span>
+              ` : ''}
               ${(() => {
                 const fHols = this.getFloatingHolidaysForWeek(weekVal);
                 if (!fHols || fHols.length === 0) return '';
@@ -2355,26 +2404,116 @@ class SheetNavigator {
             ${renderMeetingPill('Monthly Checklist', 'Monthly Checklist')}
           </div>
 
-          <!-- SMS Action Bar for Missing Reports -->
-          ${hasMissing ? `
-            <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.06); display: flex; align-items: center; justify-content: space-between; gap: 8px;">
-              ${notifDate ? `
-                <span style="font-size: 11px; color: #34d399; font-weight: 700; display: flex; align-items: center; gap: 4px;">
-                  <span>✅</span> Notified on ${this.escapeHtml(cleanNotifDate)}
+          <!-- Field iD JHA Quality Fail Callout (EcoOnline — Quality Only) -->
+          ${hasJhaFail ? `
+            <div style="background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.4); border-radius: 6px; padding: 8px 10px; font-size: 11px;">
+              <div style="display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap; margin-bottom: 4px;">
+                <span style="font-weight: 800; color: #fbbf24; display: inline-flex; align-items: center; gap: 4px;">
+                  <span>⚠️</span> Field iD JHA Quality Fail
                 </span>
-                <button class="btn btn-secondary" style="padding: 3px 9px; font-size: 11px; font-weight: 700; color: #60a5fa; border-color: rgba(96, 165, 250, 0.4); background: rgba(96, 165, 250, 0.12); cursor: pointer; display: inline-flex; align-items: center; gap: 4px;"
-                        onclick="if(window.smsDialogEngine){window.smsDialogEngine.openSafetyMissingSms('${this.escapeJs(foreman)}', '${this.escapeJs(jobNum)}', '${this.escapeJs(weekVal)}');}" title="Send another SMS reminder to Foreman">
-                  <span>💬</span> Text Again
-                </button>
-              ` : `
-                <span style="font-size: 11px; color: #f87171; font-weight: 700; display: flex; align-items: center; gap: 4px;">
-                  <span>⚠️</span> ${missingItems.length} Missing Item${missingItems.length === 1 ? '' : 's'}
-                </span>
-                <button class="btn btn-secondary" style="padding: 3px 9px; font-size: 11px; font-weight: 700; color: #f87171; border-color: rgba(239, 68, 68, 0.4); background: rgba(239, 68, 68, 0.12); cursor: pointer; display: inline-flex; align-items: center; gap: 4px;"
-                        onclick="if(window.smsDialogEngine){window.smsDialogEngine.openSafetyMissingSms('${this.escapeJs(foreman)}', '${this.escapeJs(jobNum)}', '${this.escapeJs(weekVal)}');}" title="Send SMS reminder to Foreman about missing reports">
-                  <span>📱</span> Text Foreman (Missing Reports)
-                </button>
-              `}
+                <div style="display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap;">
+                  ${(jhaFail.categories || []).map(cat => `
+                    <span style="font-size: 9.5px; font-weight: 700; padding: 1px 5px; border-radius: 3px; background: rgba(245, 158, 11, 0.18); color: #fde68a; border: 1px solid rgba(245, 158, 11, 0.35);">
+                      ${this.escapeHtml(cat)}
+                    </span>
+                  `).join('')}
+                  ${jhaFail.ecoLink ? `
+                    <a href="${this.escapeHtml(jhaFail.ecoLink)}" target="_blank" rel="noopener noreferrer" style="font-size: 10px; font-weight: 700; color: #60a5fa; text-decoration: underline;" title="Open in EcoOnline Field iD">
+                      Field iD ↗
+                    </a>
+                  ` : ''}
+                </div>
+              </div>
+              <div style="color: #fef3c7; line-height: 1.35; font-weight: 600;">
+                ${this.escapeHtml(jhaFail.qualityComments)}
+              </div>
+            </div>
+          ` : ''}
+
+          <!-- SMS Action Bar for Missing Reports and/or JHA Quality Fail -->
+          ${(hasMissing || hasJhaFail) ? `
+            <div style="margin-top: 4px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.06); display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;">
+              ${(() => {
+                // Case 1: Both Missing Reports AND JHA Quality Fail
+                if (hasMissing && hasJhaFail) {
+                  if (notifDate && !jhaFailNotifDate) {
+                    // Missing text was sent Mon/Tue BEFORE Wednesday's JHA Fail arrived!
+                    return `
+                      <span style="font-size: 10.5px; color: #34d399; font-weight: 700; display: flex; align-items: center; gap: 4px;">
+                        <span>✅</span> Missing Notified ${this.escapeHtml(cleanNotifDate)}
+                      </span>
+                      <button class="btn btn-secondary" style="padding: 3px 9px; font-size: 11px; font-weight: 800; color: #fbbf24; border-color: rgba(245, 158, 11, 0.55); background: rgba(245, 158, 11, 0.16); cursor: pointer; display: inline-flex; align-items: center; gap: 4px;"
+                              onclick="if(window.smsDialogEngine){window.smsDialogEngine.openSafetyMissingSms('${this.escapeJs(foreman)}', '${this.escapeJs(jobNum)}', '${this.escapeJs(weekVal)}', { focusJhaFailOnly: true });}" title="Send follow-up SMS for Wednesday's Field iD JHA Quality Fail">
+                        <span>⚠️</span> Text JHA Fail
+                      </button>
+                    `;
+                  }
+                  if (notifDate && jhaFailNotifDate) {
+                    return `
+                      <span style="font-size: 10.5px; color: #34d399; font-weight: 700; display: flex; align-items: center; gap: 4px;">
+                        <span>✅</span> Notified ${this.escapeHtml(cleanJhaFailNotifDate || cleanNotifDate)}
+                      </span>
+                      <button class="btn btn-secondary" style="padding: 3px 9px; font-size: 11px; font-weight: 700; color: #60a5fa; border-color: rgba(96, 165, 250, 0.4); background: rgba(96, 165, 250, 0.12); cursor: pointer; display: inline-flex; align-items: center; gap: 4px;"
+                              onclick="if(window.smsDialogEngine){window.smsDialogEngine.openSafetyMissingSms('${this.escapeJs(foreman)}', '${this.escapeJs(jobNum)}', '${this.escapeJs(weekVal)}');}" title="Send another SMS reminder to Foreman">
+                        <span>💬</span> Text Again
+                      </button>
+                    `;
+                  }
+                  return `
+                    <span style="font-size: 10.5px; color: #f87171; font-weight: 700; display: flex; align-items: center; gap: 4px;">
+                      <span>⚠️</span> ${missingItems.length} Missing + JHA Fail
+                    </span>
+                    <button class="btn btn-secondary" style="padding: 3px 9px; font-size: 11px; font-weight: 700; color: #fbbf24; border-color: rgba(245, 158, 11, 0.5); background: rgba(239, 68, 68, 0.14); cursor: pointer; display: inline-flex; align-items: center; gap: 4px;"
+                            onclick="if(window.smsDialogEngine){window.smsDialogEngine.openSafetyMissingSms('${this.escapeJs(foreman)}', '${this.escapeJs(jobNum)}', '${this.escapeJs(weekVal)}');}" title="Send combined SMS for Missing Reports + Field iD JHA Quality Fail">
+                      <span>📱</span> Text Foreman (Missing + Fail)
+                    </button>
+                  `;
+                }
+                // Case 2: JHA Quality Fail ONLY (all reports submitted in App)
+                if (hasJhaFail) {
+                  if (jhaFailNotifDate) {
+                    return `
+                      <span style="font-size: 11px; color: #34d399; font-weight: 700; display: flex; align-items: center; gap: 4px;">
+                        <span>✅</span> JHA Fail Notified ${this.escapeHtml(cleanJhaFailNotifDate)}
+                      </span>
+                      <button class="btn btn-secondary" style="padding: 3px 9px; font-size: 11px; font-weight: 700; color: #60a5fa; border-color: rgba(96, 165, 250, 0.4); background: rgba(96, 165, 250, 0.12); cursor: pointer; display: inline-flex; align-items: center; gap: 4px;"
+                              onclick="if(window.smsDialogEngine){window.smsDialogEngine.openSafetyMissingSms('${this.escapeJs(foreman)}', '${this.escapeJs(jobNum)}', '${this.escapeJs(weekVal)}', { focusJhaFailOnly: true });}" title="Text Foreman again about JHA quality fail">
+                        <span>💬</span> Text Again
+                      </button>
+                    `;
+                  }
+                  return `
+                    <span style="font-size: 11px; color: #fbbf24; font-weight: 700; display: flex; align-items: center; gap: 4px;">
+                      <span>⚠️</span> JHA Quality Fail
+                    </span>
+                    <button class="btn btn-secondary" style="padding: 3px 9px; font-size: 11px; font-weight: 700; color: #fbbf24; border-color: rgba(245, 158, 11, 0.5); background: rgba(245, 158, 11, 0.14); cursor: pointer; display: inline-flex; align-items: center; gap: 4px;"
+                            onclick="if(window.smsDialogEngine){window.smsDialogEngine.openSafetyMissingSms('${this.escapeJs(foreman)}', '${this.escapeJs(jobNum)}', '${this.escapeJs(weekVal)}', { focusJhaFailOnly: true });}" title="Send SMS to Foreman about Field iD JHA quality fail">
+                      <span>📱</span> Text Foreman (JHA Fail)
+                    </button>
+                  `;
+                }
+                // Case 3: Missing Reports ONLY (exact original behavior)
+                if (notifDate) {
+                  return `
+                    <span style="font-size: 11px; color: #34d399; font-weight: 700; display: flex; align-items: center; gap: 4px;">
+                      <span>✅</span> Notified on ${this.escapeHtml(cleanNotifDate)}
+                    </span>
+                    <button class="btn btn-secondary" style="padding: 3px 9px; font-size: 11px; font-weight: 700; color: #60a5fa; border-color: rgba(96, 165, 250, 0.4); background: rgba(96, 165, 250, 0.12); cursor: pointer; display: inline-flex; align-items: center; gap: 4px;"
+                            onclick="if(window.smsDialogEngine){window.smsDialogEngine.openSafetyMissingSms('${this.escapeJs(foreman)}', '${this.escapeJs(jobNum)}', '${this.escapeJs(weekVal)}');}" title="Send another SMS reminder to Foreman">
+                      <span>💬</span> Text Again
+                    </button>
+                  `;
+                }
+                return `
+                  <span style="font-size: 11px; color: #f87171; font-weight: 700; display: flex; align-items: center; gap: 4px;">
+                    <span>⚠️</span> ${missingItems.length} Missing Item${missingItems.length === 1 ? '' : 's'}
+                  </span>
+                  <button class="btn btn-secondary" style="padding: 3px 9px; font-size: 11px; font-weight: 700; color: #f87171; border-color: rgba(239, 68, 68, 0.4); background: rgba(239, 68, 68, 0.12); cursor: pointer; display: inline-flex; align-items: center; gap: 4px;"
+                          onclick="if(window.smsDialogEngine){window.smsDialogEngine.openSafetyMissingSms('${this.escapeJs(foreman)}', '${this.escapeJs(jobNum)}', '${this.escapeJs(weekVal)}');}" title="Send SMS reminder to Foreman about missing reports">
+                    <span>📱</span> Text Foreman (Missing Reports)
+                  </button>
+                `;
+              })()}
             </div>
           ` : ''}
 

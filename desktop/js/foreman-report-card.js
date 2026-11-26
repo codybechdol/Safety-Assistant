@@ -385,6 +385,70 @@ class ForemanReportCardEngine {
     return aliasMap;
   }
 
+  /**
+   * Strips "No JHA <date(s)>" submission-absence clauses so EcoOnline Field iD
+   * is strictly a JHA Quality metric (App Safety Compliance always wins on missing JHAs).
+   */
+  parseJhaFailureComments(rawComments, refDate = null) {
+    const raw = String(rawComments || '').replace(/\s+/g, ' ').trim();
+    if (!raw) {
+      return { rawComments: '', qualityComments: '', hasQualityIssue: false, categories: [], affectedDates: [] };
+    }
+
+    let stripped = raw.replace(
+      /(?:^|[\s,;.-]+)(?:no|missing)\s+jha'?s?(?:\s+(?:submitted|received|turned\s+in|on|for))?(?:\s*(?:[:\-]\s*)?(?:(?:and|&)\s+)?\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?(?:\s*(?:,|&|and|\-|to)\s*\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)*)?(?=\s*(?:$|[,;.]|\b(?:no\s+(?:job|site|photo|pic|paperwork|sign|tailgate)|crew|missing|incomplete|hazard|ppe|signature|sign|blank|wrong|did|not|only|need|please|identify|photo|paperwork)\b|[A-Z]))/gi,
+      ' '
+    );
+    stripped = stripped
+      .replace(/^[,;:\-\s]+/, '')
+      .replace(/[,;:\-\s]+$/, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    const hasQualityIssue = stripped.length > 0;
+    const categories = [];
+    const addCat = (lbl) => { if (!categories.includes(lbl)) categories.push(lbl); };
+
+    if (hasQualityIssue) {
+      if (/photo|pic(?:ture)?|image/i.test(stripped)) addCat('Missing Photo');
+      if (/paperwork|attach|pdf|upload|doc(?:ument)?/i.test(stripped)) addCat('Missing Paperwork');
+      if (/dut(?:y|ies)|position|role|crew\s+member/i.test(stripped)) addCat('Crew Duties');
+      if (/sign(?:ature|ed|ing)?|initial/i.test(stripped)) addCat('Missing Signature');
+      if (/hazard|control|mitigat|ppe|tailgate|brief|incomplete|blank|detail|identify/i.test(stripped) && categories.length === 0) {
+        addCat('Incomplete / Quality');
+      }
+      if (categories.length === 0) addCat('Quality Issue');
+    } else {
+      addCat('No JHA Only');
+    }
+
+    const affectedDates = [];
+    if (hasQualityIssue) {
+      const refDt = refDate instanceof Date && !isNaN(refDate.getTime()) ? refDate : new Date();
+      const baseYear = refDt.getFullYear();
+      const refMonth = refDt.getMonth() + 1;
+      const dateRe = /\b(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?\b/g;
+      let dm;
+      while ((dm = dateRe.exec(stripped)) !== null) {
+        const mm = parseInt(dm[1], 10);
+        const dd = parseInt(dm[2], 10);
+        if (mm < 1 || mm > 12 || dd < 1 || dd > 31) continue;
+        let yy = baseYear;
+        if (dm[3]) {
+          yy = parseInt(dm[3], 10);
+          if (yy < 100) yy += 2000;
+        } else {
+          if (refMonth === 1 && mm === 12) yy = baseYear - 1;
+          else if (refMonth === 12 && mm === 1) yy = baseYear + 1;
+        }
+        const fmt = `${String(mm).padStart(2, '0')}/${String(dd).padStart(2, '0')}/${yy}`;
+        if (!affectedDates.includes(fmt)) affectedDates.push(fmt);
+      }
+    }
+
+    return { rawComments: raw, qualityComments: stripped, hasQualityIssue, categories, affectedDates };
+  }
+
   // =========================================================================
   // Period Calculation (Fiscal Year Oct 1–Sep 30 Default, Calendar Year Option)
   // =========================================================================
@@ -1373,6 +1437,73 @@ class ForemanReportCardEngine {
       }
     });
 
+    // 6c. Index EcoOnline Field iD JHA Quality Failures (Quality Only — strip "No JHA" clauses; App wins on missing JHAs)
+    const jhaFailsByJob = new Map();
+    const jhaFailsByForeman = new Map();
+    const jfTable = this.db ? this.db.getTable('jha_failures') : null;
+    const rawJhaFails = (jfTable && Array.isArray(jfTable.rows)) ? jfTable.rows : [];
+
+    rawJhaFails.forEach(jf => {
+      const weekDt = this.parseDate(jf['Week Start'] || jf['Week'] || '');
+      const dueDt = this.parseDate(jf['Due Date'] || '') || weekDt;
+      if (!weekDt && !dueDt) return;
+      const sundayDt = weekDt
+        ? new Date(weekDt.getFullYear(), weekDt.getMonth(), weekDt.getDate() - weekDt.getDay(), 12, 0, 0)
+        : new Date(dueDt.getFullYear(), dueDt.getMonth(), dueDt.getDate() - dueDt.getDay(), 12, 0, 0);
+      // Match period by Due Date (Monday of reviewed week) or Week Start
+      const checkDt = dueDt || sundayDt;
+      if (checkDt < period.start || checkDt > period.end) return;
+
+      const baseJob = this.getBaseJobNumber(jf['Job #'] || jf['Job Number'] || '');
+      const rawComments = String(jf['Raw Comments'] || jf['Comments'] || '').trim();
+      const parsed = this.parseJhaFailureComments(rawComments || jf['Quality Comments'] || '', dueDt || sundayDt);
+      const sheetFlag = String(jf['Has Quality Issue'] || '').trim().toLowerCase();
+      const qualityComments = parsed.qualityComments;
+      const hasQualityIssue = Boolean(qualityComments) && sheetFlag !== 'no' && sheetFlag !== 'false';
+      if (!hasQualityIssue) return;
+
+      const jt = baseJob ? (jtByBaseJob.get(baseJob) || findFySuccessor(baseJob)) : null;
+      const storedFm = this.resolveCanonicalName(jf['Foreman'] || '', aliasMap);
+      const jobForeman = baseJob ? resolveJobForemanOnDate(baseJob, dueDt || sundayDt) : '';
+      const foreman = jobForeman || storedFm;
+
+      const rawCats = String(jf['Failure Categories'] || '').trim();
+      const categories = rawCats && rawCats.toLowerCase() !== 'no jha only'
+        ? rawCats.split(',').map(s => s.trim()).filter(Boolean)
+        : parsed.categories;
+      const affectedDates = parsed.affectedDates.length > 0
+        ? parsed.affectedDates
+        : String(jf['Affected Dates'] || '').split(',').map(s => s.trim()).filter(Boolean);
+
+      const item = {
+        weekStart: sundayDt,
+        weekStartStr: this.formatDateUs(sundayDt),
+        dueDateStr: dueDt ? this.formatDateUs(dueDt) : this.formatDateUs(sundayDt),
+        date: dueDt || sundayDt,
+        dateStr: this.formatDateUs(sundayDt),
+        jobNumber: baseJob,
+        jobName: String((jt && jt.jobName) || jf['Job Name'] || '').trim(),
+        location: String((jt && jt.location) || jf['Location'] || '').trim(),
+        foreman,
+        rawComments,
+        qualityComments,
+        hadNoJhaStripped: rawComments.toLowerCase() !== qualityComments.toLowerCase(),
+        categories,
+        affectedDates,
+        ecoLink: String(jf['EcoOnline Link'] || '').trim(),
+        emailDate: String(jf['Email Date'] || '').trim(),
+        emailId: String(jf['Email ID'] || '').trim()
+      };
+
+      if (baseJob) {
+        if (!jhaFailsByJob.has(baseJob)) jhaFailsByJob.set(baseJob, []);
+        jhaFailsByJob.get(baseJob).push(item);
+      } else if (foreman) {
+        if (!jhaFailsByForeman.has(foreman)) jhaFailsByForeman.set(foreman, []);
+        jhaFailsByForeman.get(foreman).push(item);
+      }
+    });
+
     // -----------------------------------------------------------------------
     // 7. Assemble Per-Foreman, Per-Job Report Cards inside Selected Period
     // -----------------------------------------------------------------------
@@ -1553,6 +1684,7 @@ class ForemanReportCardEngine {
     };
     ensureJobsFromRecords(incidentsByJob);
     ensureJobsFromRecords(auditsByJob);
+    ensureJobsFromRecords(jhaFailsByJob);
 
     // -----------------------------------------------------------------------
     // 8. Index All 9 Equipment Tables & Swap Pick Lists + 60-Day Expiring Certs
@@ -1757,6 +1889,31 @@ class ForemanReportCardEngine {
           }
         });
         const jobIncidents = Array.from(dedupJobIncMap.values());
+        const rawJobJhaFails = (jhaFailsByJob.get(acc.jobNumber) || []).filter(jf => !jf.foreman || jf.foreman === foremanName);
+        const dedupJobFailMap = new Map();
+        rawJobJhaFails.forEach(jf => {
+          const fk = `${jf.weekStartStr}|${jf.jobNumber}`;
+          const prev = dedupJobFailMap.get(fk);
+          if (!prev || (jf.qualityComments || '').length > (prev.qualityComments || '').length) {
+            dedupJobFailMap.set(fk, jf);
+          }
+        });
+        const jobJhaFailures = Array.from(dedupJobFailMap.values()).sort((a, b) => b.weekStart.getTime() - a.weekStart.getTime());
+        const jhaFailByWeekStr = new Map(jobJhaFailures.map(jf => [jf.weekStartStr, jf]));
+
+        // Finalized weeks where Daily JHAs were scheduled/finalized (excludes weekly-only 005-* crews)
+        const finalizedJhaWeeks = acc.weeks.filter(w =>
+          DAYS.some(d => w.days[d] === 'onTime' || w.days[d] === 'late' || w.days[d] === 'missing')
+        ).length;
+        const jhaEvalWeeks = Math.max(finalizedJhaWeeks, jobJhaFailures.length);
+        const jhaPassedWeeks = Math.max(0, jhaEvalWeeks - jobJhaFailures.length);
+        const jhaQuality = {
+          evaluatedWeeks: jhaEvalWeeks,
+          passedWeeks: jhaPassedWeeks,
+          failedWeeks: jobJhaFailures.length,
+          passRatePct: jhaEvalWeeks > 0 ? Math.round((jhaPassedWeeks / jhaEvalWeeks) * 100) : null
+        };
+
         jobAudits.sort((a, b) => b.date.getTime() - a.date.getTime());
         jobIncidents.sort((a, b) => b.date.getTime() - a.date.getTime());
 
@@ -1769,7 +1926,10 @@ class ForemanReportCardEngine {
           monthly,
           siteAudits: jobAudits,
           siteAuditCorrections: jobAudits.filter(a => a.hasCorrections).length,
-          incidents: jobIncidents
+          incidents: jobIncidents,
+          jhaFailures: jobJhaFailures,
+          jhaFailByWeekStr,
+          jhaQuality
         });
       });
 
@@ -1798,7 +1958,8 @@ class ForemanReportCardEngine {
         monthlyOnTime: 0, monthlyLate: 0, monthlyMissing: 0, monthlyPending: 0, monthlyExempt: 0,
         siteAuditsCount: 0,
         siteAuditCorrectionsCount: 0,
-        incidentsCount: 0
+        incidentsCount: 0,
+        jhaFailsCount: 0
       };
 
       jobs.forEach(j => {
@@ -1853,6 +2014,42 @@ class ForemanReportCardEngine {
       (incidentsByForeman.get(foremanName) || []).forEach(addInc);
       const foremanIncidents = Array.from(seenIncMap.values());
       totals.incidentsCount = foremanIncidents.length;
+
+      const seenJhaFailMap = new Map();
+      const addJhaFail = (jf) => {
+        const k = `${jf.weekStartStr}|${jf.jobNumber}`;
+        const prev = seenJhaFailMap.get(k);
+        if (!prev || (jf.qualityComments || '').length > (prev.qualityComments || '').length) {
+          seenJhaFailMap.set(k, jf);
+        }
+      };
+      jobs.forEach(j => (j.jhaFailures || []).forEach(addJhaFail));
+      (jhaFailsByForeman.get(foremanName) || []).forEach(addJhaFail);
+      const foremanJhaFailures = Array.from(seenJhaFailMap.values())
+        .sort((a, b) => b.weekStart.getTime() - a.weekStart.getTime());
+      totals.jhaFailsCount = foremanJhaFailures.length;
+
+      const catCountMap = new Map();
+      foremanJhaFailures.forEach(jf => {
+        (jf.categories || []).forEach(cat => {
+          catCountMap.set(cat, (catCountMap.get(cat) || 0) + 1);
+        });
+      });
+      const jhaFailCategories = Array.from(catCountMap.entries())
+        .map(([label, count]) => ({ label, count }))
+        .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+
+      const fmEvalWeeks = Math.max(
+        jobs.reduce((s, j) => s + (j.jhaQuality ? j.jhaQuality.evaluatedWeeks : 0), 0),
+        foremanJhaFailures.length
+      );
+      const fmPassedWeeks = Math.max(0, fmEvalWeeks - foremanJhaFailures.length);
+      const jhaQuality = {
+        evaluatedWeeks: fmEvalWeeks,
+        passedWeeks: fmPassedWeeks,
+        failedWeeks: foremanJhaFailures.length,
+        passRatePct: fmEvalWeeks > 0 ? Math.round((fmPassedWeeks / fmEvalWeeks) * 100) : null
+      };
 
       const ytdJha = this.computeMetricStats(totals.jhaOnTime, totals.jhaLate, totals.jhaMissing, totals.jhaPending);
       const ytdWeekly = this.computeMetricStats(totals.weeklyOnTime, totals.weeklyLate, totals.weeklyMissing, totals.weeklyPending);
@@ -2013,6 +2210,9 @@ class ForemanReportCardEngine {
         jobs,
         siteAudits: foremanAudits,
         incidents: foremanIncidents,
+        jhaFailures: foremanJhaFailures,
+        jhaFailCategories,
+        jhaQuality,
         totals,
         ytdJha,
         ytdWeekly,
@@ -2217,6 +2417,7 @@ class ForemanReportCardEngine {
     let coMoOT = 0, coMoL = 0, coMoM = 0, coMoP = 0, coMoEx = 0;
     let coDaysSum = 0, coDaysForemen = 0;
     let coJobsSum = 0, coAuditsSum = 0, coIncSum = 0;
+    let coJhaFailsSum = 0, coJhaEvalWeeksSum = 0;
 
     foremen.forEach(f => {
       coJhaOT += f.totals.jhaOnTime;
@@ -2242,10 +2443,13 @@ class ForemanReportCardEngine {
       coJobsSum += f.totals.totalJobs;
       coAuditsSum += f.totals.siteAuditsCount;
       coIncSum += f.totals.incidentsCount;
+      coJhaFailsSum += (f.totals.jhaFailsCount || 0);
+      coJhaEvalWeeksSum += (f.jhaQuality ? f.jhaQuality.evaluatedWeeks : 0);
     });
 
     const round1 = (v) => Math.round(v * 10) / 10;
     const fmCount = foremen.length || 1;
+    const jhaFailDenom = coDaysForemen > 0 ? coDaysForemen : fmCount;
     const companyAverages = {
       foremenCount: foremen.length,
       fieldForemenCount: coDaysForemen,
@@ -2255,7 +2459,10 @@ class ForemanReportCardEngine {
       avgDaysWorked: coDaysForemen > 0 ? Math.round(coDaysSum / coDaysForemen) : 0,
       avgJobsWorked: foremen.length > 0 ? round1(coJobsSum / fmCount) : 0,
       avgSiteAudits: foremen.length > 0 ? round1(coAuditsSum / fmCount) : 0,
-      avgIncidents: foremen.length > 0 ? round1(coIncSum / fmCount) : 0
+      avgIncidents: foremen.length > 0 ? round1(coIncSum / fmCount) : 0,
+      totalJhaFails: coJhaFailsSum,
+      avgJhaFails: foremen.length > 0 ? round1(coJhaFailsSum / jhaFailDenom) : 0,
+      jhaQualityPassPct: coJhaEvalWeeksSum > 0 ? Math.round((Math.max(0, coJhaEvalWeeksSum - coJhaFailsSum) / coJhaEvalWeeksSum) * 100) : null
     };
 
     const model = {
@@ -2589,6 +2796,52 @@ class ForemanReportCardEngine {
             ${renderMiniMetric('Daily JHA', fm.ytdJha, 'd', co ? co.jha : null)}
             ${renderMiniMetric('Weekly Safety', fm.ytdWeekly, 'w', co ? co.weekly : null)}
             ${renderMiniMetric('Monthly Inspection', fm.ytdMonthly, 'mo', co ? co.monthly : null)}
+            ${(() => {
+              const jq = fm.jhaQuality;
+              const hasQ = Boolean(jq && jq.evaluatedWeeks > 0 && !isWeeklyOnly);
+              const hasCoQ = Boolean(co && co.jhaQualityPassPct !== null);
+              const coQ = hasCoQ ? Math.max(0, Math.min(100, co.jhaQualityPassPct)) : null;
+              const topReason = (fm.jhaFailCategories && fm.jhaFailCategories[0]) ? fm.jhaFailCategories[0].label : '';
+              const failCount = t.jhaFailsCount || 0;
+              if (!hasQ) {
+                return `
+                  <div class="frc-card-metric-row" style="opacity:0.75;">
+                    <div class="frc-card-metric-top">
+                      <span class="frc-card-metric-lbl">JHA Quality (Field iD)</span>
+                      <span class="frc-card-metric-pct" style="color:#64748b;font-weight:700;font-size:10.5px;">N/A</span>
+                    </div>
+                  </div>
+                `;
+              }
+              const qPct = jq.passRatePct;
+              const qColor = failCount === 0 ? '#4ade80' : (qPct >= 75 ? '#fbbf24' : '#f87171');
+              const delta = hasCoQ ? (qPct - coQ) : null;
+              const deltaHtml = delta !== null
+                ? `<span style="color:${delta > 0 ? '#4ade80' : (delta < 0 ? '#f87171' : '#94a3b8')};font-weight:800;margin-left:4px;">${delta > 0 ? `+${delta}%` : (delta < 0 ? `${delta}%` : 'avg')}</span>`
+                : '';
+              const qTitle = `Field iD JHA Quality: ${jq.passedWeeks}/${jq.evaluatedWeeks} clean weeks (${failCount} quality fail${failCount === 1 ? '' : 's'}). Click to view failure list.`;
+              return `
+                <div class="frc-card-metric-row" style="cursor:pointer;"
+                     onclick="event.stopPropagation(); window.foremanReportCardEngine.openRecordsModal('jha_failures', '${this.escapeJs(fm.name)}')"
+                     title="${this.escapeHtml(qTitle)}">
+                  <div class="frc-card-metric-top">
+                    <span class="frc-card-metric-lbl">JHA Quality <span style="color:#fbbf24;font-weight:700;">${failCount > 0 ? `(${failCount} fail${failCount === 1 ? '' : 's'})` : ''}</span></span>
+                    <span class="frc-card-metric-pct" style="color:${qColor};">${qPct}% <span style="font-size:9.5px;font-weight:600;color:#94a3b8;">clean</span>${deltaHtml}</span>
+                  </div>
+                  <div class="frc-card-bar-wrap">
+                    <div class="frc-card-bar">
+                      ${qPct > 0 ? `<div style="width:${qPct}%;background:#16a34a;"></div>` : ''}
+                      ${qPct < 100 ? `<div style="width:${100 - qPct}%;background:#f59e0b;"></div>` : ''}
+                    </div>
+                    ${hasCoQ ? `<div class="frc-card-avg-pin" style="left:${coQ}%;" title="Company Avg JHA Quality: ${coQ}% clean weeks (Avg ${co.avgJhaFails} fails)"></div>` : ''}
+                  </div>
+                  <div class="frc-card-metric-detail">
+                    <span style="color:${failCount > 0 ? '#fde68a' : '#86efac'};">${failCount === 0 ? '✓ Zero quality fails' : `🚩 ${this.escapeHtml(topReason || 'Quality fail')}${fm.jhaFailCategories.length > 1 ? ` +${fm.jhaFailCategories.length - 1}` : ''} · <span style="text-decoration:underline;">View →</span>`}</span>
+                    <span>${jq.passedWeeks}/${jq.evaluatedWeeks} w${hasCoQ ? ` · <span style="color:#7dd3fc;">◆ ${coQ}%</span>` : ''}</span>
+                  </div>
+                </div>
+              `;
+            })()}
           </div>
         </div>
 
@@ -2616,6 +2869,7 @@ class ForemanReportCardEngine {
           <span class="frc-company-avg-pill">Daily JHA: ${fmtPct(co.jha)}</span>
           <span class="frc-company-avg-pill">Weekly Safety: ${fmtPct(co.weekly)}</span>
           <span class="frc-company-avg-pill">Monthly Insp.: ${fmtPct(co.monthly)}</span>
+          ${co.jhaQualityPassPct !== null ? `<span class="frc-company-avg-pill">JHA Quality: <strong style="color:#fbbf24;">${co.jhaQualityPassPct}%</strong> <span style="color:#94a3b8;font-weight:600;">(Avg ${co.avgJhaFails} fails)</span></span>` : ''}
           <span class="frc-company-avg-pill">Days: <strong style="color:#f8fafc;">${co.avgDaysWorked}</strong></span>
           <span class="frc-company-avg-pill">Audits: <strong style="color:#38bdf8;">${co.avgSiteAudits}</strong></span>
           <span class="frc-company-avg-pill">Incidents: <strong style="color:#fca5a5;">${co.avgIncidents}</strong></span>
@@ -3630,36 +3884,46 @@ class ForemanReportCardEngine {
       </div>
 
       <!-- YTD KPI Summary Strip -->
-      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px;">
-        <div style="border:1.5px solid #cbd5e1;border-radius:6px;padding:10px 12px;background:#ffffff;text-align:center;">
-          <div style="font-size:10px;font-weight:800;text-transform:uppercase;color:#64748b;">${t.daysWorked === 0 && foreman.ytdWeekly.expected > 0 ? 'Weeks Tracked' : 'Total Days Worked'}</div>
-          <div style="font-size:22px;font-weight:900;color:#0f172a;margin:2px 0;">${t.daysWorked === 0 && foreman.ytdWeekly.expected > 0 ? foreman.ytdWeekly.expected : t.daysWorked}</div>
-          <div style="font-size:10px;color:#475569;font-weight:600;">${t.daysWorked === 0 && foreman.ytdWeekly.expected > 0 ? `Weekly-only (${this.escapeHtml(period.shortLabel)})` : `Scheduled workdays (${this.escapeHtml(period.shortLabel)})`}</div>
+      <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:9px;margin-bottom:16px;">
+        <div style="border:1.5px solid #cbd5e1;border-radius:6px;padding:10px 10px;background:#ffffff;text-align:center;">
+          <div style="font-size:9.5px;font-weight:800;text-transform:uppercase;color:#64748b;">${t.daysWorked === 0 && foreman.ytdWeekly.expected > 0 ? 'Weeks Tracked' : 'Days Worked'}</div>
+          <div style="font-size:21px;font-weight:900;color:#0f172a;margin:2px 0;">${t.daysWorked === 0 && foreman.ytdWeekly.expected > 0 ? foreman.ytdWeekly.expected : t.daysWorked}</div>
+          <div style="font-size:9.5px;color:#475569;font-weight:600;">${t.daysWorked === 0 && foreman.ytdWeekly.expected > 0 ? `Weekly-only` : `Workdays (${this.escapeHtml(period.shortLabel)})`}</div>
           ${coAvg && coAvg.avgDaysWorked > 0 && !(t.daysWorked === 0 && foreman.ytdWeekly.expected > 0) ? `<div style="font-size:9px;color:#0369a1;font-weight:700;margin-top:3px;">◆ Co. avg: ${coAvg.avgDaysWorked}d</div>` : ''}
         </div>
-        <div style="border:1.5px solid #cbd5e1;border-radius:6px;padding:10px 12px;background:#ffffff;text-align:center;">
-          <div style="font-size:10px;font-weight:800;text-transform:uppercase;color:#64748b;">Jobs Worked</div>
-          <div style="font-size:22px;font-weight:900;color:#1d4ed8;margin:2px 0;">${t.totalJobs}</div>
-          <div style="font-size:10px;color:#475569;font-weight:600;">${this.escapeHtml(statusMix)}</div>
+        <div style="border:1.5px solid #cbd5e1;border-radius:6px;padding:10px 10px;background:#ffffff;text-align:center;">
+          <div style="font-size:9.5px;font-weight:800;text-transform:uppercase;color:#64748b;">Jobs Worked</div>
+          <div style="font-size:21px;font-weight:900;color:#1d4ed8;margin:2px 0;">${t.totalJobs}</div>
+          <div style="font-size:9.5px;color:#475569;font-weight:600;">${this.escapeHtml(statusMix)}</div>
           ${coAvg && coAvg.avgJobsWorked > 0 ? `<div style="font-size:9px;color:#0369a1;font-weight:700;margin-top:3px;">◆ Co. avg: ${coAvg.avgJobsWorked}</div>` : ''}
         </div>
         <div class="${!isPrint ? 'frc-paper-clickable-kpi' : ''}"
+             ${!isPrint ? `onclick="window.foremanReportCardEngine.openRecordsModal('jha_failures', '${this.escapeJs(foreman.name)}')" title="Click to view Field iD JHA Quality Fails in ${this.escapeHtml(period.shortLabel)}"` : ''}
+             style="border:1.5px solid ${(t.jhaFailsCount || 0) > 0 ? '#fcd34d' : '#cbd5e1'};border-radius:6px;padding:10px 10px;background:${(t.jhaFailsCount || 0) > 0 ? '#fffbeb' : '#ffffff'};text-align:center;">
+          <div style="font-size:9.5px;font-weight:800;text-transform:uppercase;color:#64748b;">JHA Quality Fails</div>
+          <div style="font-size:21px;font-weight:900;color:${(t.jhaFailsCount || 0) > 0 ? '#b45309' : '#15803d'};margin:2px 0;">${t.jhaFailsCount || 0}</div>
+          <div style="font-size:9.5px;color:${(t.jhaFailsCount || 0) > 0 ? '#b45309' : '#15803d'};font-weight:700;">
+            ${(t.jhaFailsCount || 0) === 0 ? (foreman.jhaQuality && foreman.jhaQuality.evaluatedWeeks > 0 ? '100% clean ✓' : 'None logged') : `${foreman.jhaQuality && foreman.jhaQuality.passRatePct !== null ? `${foreman.jhaQuality.passRatePct}% clean` : 'Field iD'}`}${!isPrint && (t.jhaFailsCount || 0) > 0 ? ' · <span style="color:#b45309;text-decoration:underline;">View →</span>' : ''}
+          </div>
+          ${coAvg && coAvg.jhaQualityPassPct !== null ? `<div style="font-size:9px;color:#0369a1;font-weight:700;margin-top:3px;">◆ Avg: ${coAvg.avgJhaFails} (${coAvg.jhaQualityPassPct}%)</div>` : ''}
+        </div>
+        <div class="${!isPrint ? 'frc-paper-clickable-kpi' : ''}"
              ${!isPrint ? `onclick="window.foremanReportCardEngine.openRecordsModal('audits', '${this.escapeJs(foreman.name)}')" title="Click to view site audits logged in ${this.escapeHtml(period.shortLabel)}"` : ''}
-             style="border:1.5px solid #cbd5e1;border-radius:6px;padding:10px 12px;background:#ffffff;text-align:center;">
-          <div style="font-size:10px;font-weight:800;text-transform:uppercase;color:#64748b;">Site Audits (${this.escapeHtml(period.shortLabel)})</div>
-          <div style="font-size:22px;font-weight:900;color:#0369a1;margin:2px 0;">${t.siteAuditsCount}</div>
-          <div style="font-size:10px;color:${t.siteAuditCorrectionsCount > 0 ? '#b45309' : '#15803d'};font-weight:700;">
-            ${t.siteAuditsCount === 0 ? 'None logged' : (t.siteAuditCorrectionsCount > 0 ? `${t.siteAuditCorrectionsCount} w/ corrections` : 'All clean ✓')}${!isPrint && t.siteAuditsCount > 0 ? ' · <span style="color:#2563eb;text-decoration:underline;">View →</span>' : ''}
+             style="border:1.5px solid #cbd5e1;border-radius:6px;padding:10px 10px;background:#ffffff;text-align:center;">
+          <div style="font-size:9.5px;font-weight:800;text-transform:uppercase;color:#64748b;">Site Audits</div>
+          <div style="font-size:21px;font-weight:900;color:#0369a1;margin:2px 0;">${t.siteAuditsCount}</div>
+          <div style="font-size:9.5px;color:${t.siteAuditCorrectionsCount > 0 ? '#b45309' : '#15803d'};font-weight:700;">
+            ${t.siteAuditsCount === 0 ? 'None logged' : (t.siteAuditCorrectionsCount > 0 ? `${t.siteAuditCorrectionsCount} w/ corr.` : 'All clean ✓')}${!isPrint && t.siteAuditsCount > 0 ? ' · <span style="color:#2563eb;text-decoration:underline;">View →</span>' : ''}
           </div>
           ${coAvg ? `<div style="font-size:9px;color:#0369a1;font-weight:700;margin-top:3px;">◆ Co. avg: ${coAvg.avgSiteAudits}</div>` : ''}
         </div>
         <div class="${!isPrint ? 'frc-paper-clickable-kpi is-incident' : ''}"
              ${!isPrint ? `onclick="window.foremanReportCardEngine.openRecordsModal('incidents', '${this.escapeJs(foreman.name)}')" title="Click to view incident reports logged in ${this.escapeHtml(period.shortLabel)}"` : ''}
-             style="border:1.5px solid ${t.incidentsCount > 0 ? '#fca5a5' : '#cbd5e1'};border-radius:6px;padding:10px 12px;background:${t.incidentsCount > 0 ? '#fff5f5' : '#ffffff'};text-align:center;">
-          <div style="font-size:10px;font-weight:800;text-transform:uppercase;color:#64748b;">Incident Reports</div>
-          <div style="font-size:22px;font-weight:900;color:${t.incidentsCount > 0 ? '#b91c1c' : '#15803d'};margin:2px 0;">${t.incidentsCount}</div>
-          <div style="font-size:10px;color:${t.incidentsCount > 0 ? '#b91c1c' : '#15803d'};font-weight:700;">
-            ${t.incidentsCount === 0 ? 'Clean record ✓' : `Logged in ${this.escapeHtml(period.shortLabel)}`}${!isPrint && t.incidentsCount > 0 ? ' · <span style="color:#b91c1c;text-decoration:underline;">View list →</span>' : ''}
+             style="border:1.5px solid ${t.incidentsCount > 0 ? '#fca5a5' : '#cbd5e1'};border-radius:6px;padding:10px 10px;background:${t.incidentsCount > 0 ? '#fff5f5' : '#ffffff'};text-align:center;">
+          <div style="font-size:9.5px;font-weight:800;text-transform:uppercase;color:#64748b;">Incident Reports</div>
+          <div style="font-size:21px;font-weight:900;color:${t.incidentsCount > 0 ? '#b91c1c' : '#15803d'};margin:2px 0;">${t.incidentsCount}</div>
+          <div style="font-size:9.5px;color:${t.incidentsCount > 0 ? '#b91c1c' : '#15803d'};font-weight:700;">
+            ${t.incidentsCount === 0 ? 'Clean record ✓' : `In ${this.escapeHtml(period.shortLabel)}`}${!isPrint && t.incidentsCount > 0 ? ' · <span style="color:#b91c1c;text-decoration:underline;">View →</span>' : ''}
           </div>
           ${coAvg ? `<div style="font-size:9px;color:#0369a1;font-weight:700;margin-top:3px;">◆ Co. avg: ${coAvg.avgIncidents}</div>` : ''}
         </div>
@@ -3670,11 +3934,28 @@ class ForemanReportCardEngine {
         <span>1. Foreman Overall Compliance Report Card (${this.escapeHtml(period.shortLabel)} Weighted Totals)</span>
         <span style="font-size:10px;font-weight:600;color:#64748b;text-transform:none;"><strong style="color:#0369a1;">◆ = Co. Avg</strong> &nbsp;·&nbsp; On-Time % + Late % + Missing % = 100%</span>
       </div>
-      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:18px;">
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:${(foreman.jhaFailures && foreman.jhaFailures.length > 0) ? '10px' : '18px'};">
         ${this.renderMetricCardHtml('Daily JHA Compliance', 'day', 'days', foreman.ytdJha, 'Weighted by scheduled days worked', coAvg ? coAvg.jha : null)}
         ${this.renderMetricCardHtml('Weekly Safety Meeting', 'week', 'weeks', foreman.ytdWeekly, 'Weighted by active crew weeks', coAvg ? coAvg.weekly : null)}
         ${this.renderMetricCardHtml('Monthly Inspection', 'month', 'months', foreman.ytdMonthly, '≥4 consec. wks · On-time thru 7th of next mo', coAvg ? coAvg.monthly : null)}
       </div>
+
+      ${foreman.jhaFailures && foreman.jhaFailures.length > 0 ? `
+        <!-- Field iD JHA Quality Summary Strip (Separate Quality Metric) -->
+        <div class="${!isPrint ? 'frc-paper-clickable-kpi' : ''}"
+             ${!isPrint ? `onclick="window.foremanReportCardEngine.openRecordsModal('jha_failures', '${this.escapeJs(foreman.name)}')" title="Click to view all Field iD JHA quality failure details"` : ''}
+             style="border:1.5px solid #fcd34d;background:#fffbeb;border-radius:6px;padding:8px 12px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+          <div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap;font-size:11px;color:#78350f;">
+            <strong style="color:#92400e;">🚩 Field iD JHA Quality (${foreman.jhaQuality.passRatePct !== null ? `${foreman.jhaQuality.passRatePct}% Clean · ` : ''}${foreman.jhaFailures.length} Fail${foreman.jhaFailures.length === 1 ? '' : 's'}):</strong>
+            ${(foreman.jhaFailCategories || []).map(c => `
+              <span style="display:inline-flex;align-items:center;gap:3px;padding:1px 7px;border-radius:10px;background:#fef3c7;border:1px solid #f59e0b;color:#92400e;font-size:10px;font-weight:800;">
+                ${this.escapeHtml(c.label)} (${c.count})
+              </span>
+            `).join('')}
+          </div>
+          ${!isPrint ? '<span style="font-size:10.5px;font-weight:800;color:#b45309;text-decoration:underline;white-space:nowrap;">View fail details →</span>' : ''}
+        </div>
+      ` : ''}
 
       <!-- Quick Callout to Page 2 Current State if Active or On-Hold Fallback -->
       ${foreman.currentState && pages.some(p => p.type === 'current_state') && !isPrint ? `
@@ -3712,7 +3993,7 @@ class ForemanReportCardEngine {
               <th style="border:1px solid #0f172a;padding:6px 7px;text-align:center;font-weight:800;">JHA</th>
               <th style="border:1px solid #0f172a;padding:6px 7px;text-align:center;font-weight:800;">Weekly</th>
               <th style="border:1px solid #0f172a;padding:6px 7px;text-align:center;font-weight:800;">Monthly</th>
-              <th style="border:1px solid #0f172a;padding:6px 7px;text-align:center;font-weight:800;">Audits / Inc</th>
+              <th style="border:1px solid #0f172a;padding:6px 7px;text-align:center;font-weight:800;">Audits / Inc / Fails</th>
               ${canEdit ? '<th style="border:1px solid #0f172a;padding:6px 7px;text-align:center;font-weight:800;" class="frc-no-print">Manage</th>' : ''}
             </tr>
           </thead>
@@ -3763,10 +4044,12 @@ class ForemanReportCardEngine {
                   <td style="border:1px solid #cbd5e1;padding:6px 6px;text-align:center;">
                     ${this.renderCompactPctCell(j.monthly)}
                   </td>
-                  <td style="border:1px solid #cbd5e1;padding:6px 6px;text-align:center;font-size:10.5px;font-weight:700;">
+                  <td style="border:1px solid #cbd5e1;padding:6px 6px;text-align:center;font-size:10.5px;font-weight:700;white-space:nowrap;">
                     <span ${!isPrint && j.siteAudits.length > 0 ? `onclick="event.stopPropagation(); window.foremanReportCardEngine.openRecordsModal('audits', '${this.escapeJs(foreman.name)}', '${this.escapeJs(j.jobNumber)}')" style="color:#0369a1;cursor:pointer;text-decoration:underline dotted;" title="Click to view ${j.siteAudits.length} site audit(s) on ${this.escapeHtml(j.jobNumber)}"` : `title="Site Audits" style="color:#0369a1;"`}>📋 ${j.siteAudits.length}</span>
                     &nbsp;/&nbsp;
                     <span ${!isPrint && j.incidents.length > 0 ? `onclick="event.stopPropagation(); window.foremanReportCardEngine.openRecordsModal('incidents', '${this.escapeJs(foreman.name)}', '${this.escapeJs(j.jobNumber)}')" style="color:#b91c1c;cursor:pointer;text-decoration:underline dotted;" title="Click to view ${j.incidents.length} incident report(s) on ${this.escapeHtml(j.jobNumber)}"` : `title="Incident Reports" style="color:${j.incidents.length > 0 ? '#b91c1c' : '#64748b'};"`}>⚠️ ${j.incidents.length}</span>
+                    &nbsp;/&nbsp;
+                    <span ${!isPrint && (j.jhaFailures || []).length > 0 ? `onclick="event.stopPropagation(); window.foremanReportCardEngine.openRecordsModal('jha_failures', '${this.escapeJs(foreman.name)}', '${this.escapeJs(j.jobNumber)}')" style="color:#b45309;cursor:pointer;text-decoration:underline dotted;" title="Click to view ${j.jhaFailures.length} Field iD JHA quality fail(s) on ${this.escapeHtml(j.jobNumber)}"` : `title="Field iD JHA Quality Fails" style="color:${(j.jhaFailures || []).length > 0 ? '#b45309' : '#64748b'};"`}>🚩 ${(j.jhaFailures || []).length}</span>
                   </td>
                   ${canEdit ? `
                     <td style="border:1px solid #cbd5e1;padding:6px 6px;text-align:center;" class="frc-no-print" onclick="event.stopPropagation();">
@@ -4173,8 +4456,8 @@ class ForemanReportCardEngine {
         ${this.renderMetricCardHtml('Monthly Inspection', 'month', 'months', job.monthly, '≥4 consec. wks · Due by 7th of next mo', coAvg ? coAvg.monthly : null)}
       </div>
 
-      <!-- Job Site Audits & Incident Reports Strip -->
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px;">
+      <!-- Job Site Audits, Incident Reports & Field iD JHA Quality Fails Strip -->
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px;">
         <div class="${!isPrint ? 'frc-paper-clickable-kpi' : ''}"
              ${!isPrint ? `onclick="window.foremanReportCardEngine.openRecordsModal('audits', '${this.escapeJs(foreman.name)}', '${this.escapeJs(job.jobNumber)}')" title="Click to view site audits for Job ${this.escapeHtml(job.jobNumber)}"` : ''}
              style="border:1px solid #cbd5e1;border-radius:5px;padding:8px 11px;background:#f8fafc;">
@@ -4217,6 +4500,27 @@ class ForemanReportCardEngine {
             </div>
           `}
         </div>
+
+        <div class="${!isPrint ? 'frc-paper-clickable-kpi' : ''}"
+             ${!isPrint ? `onclick="window.foremanReportCardEngine.openRecordsModal('jha_failures', '${this.escapeJs(foreman.name)}', '${this.escapeJs(job.jobNumber)}')" title="Click to view Field iD JHA quality fails for Job ${this.escapeHtml(job.jobNumber)}"` : ''}
+             style="border:1px solid ${(job.jhaFailures || []).length > 0 ? '#fcd34d' : '#cbd5e1'};border-radius:5px;padding:8px 11px;background:${(job.jhaFailures || []).length > 0 ? '#fffbeb' : '#f8fafc'};">
+          <div style="font-size:10.5px;font-weight:800;color:${(job.jhaFailures || []).length > 0 ? '#b45309' : '#15803d'};text-transform:uppercase;display:flex;justify-content:space-between;align-items:center;">
+            <span>🚩 JHA Quality Fails</span>
+            <span>${(job.jhaFailures || []).length}${!isPrint && (job.jhaFailures || []).length > 0 ? ' · <span style="font-size:9.5px;color:#b45309;text-transform:none;text-decoration:underline;">View →</span>' : ''}</span>
+          </div>
+          ${(job.jhaFailures || []).length === 0 ? `
+            <div style="font-size:10.5px;color:#166534;font-weight:600;margin-top:4px;">${job.jhaQuality && job.jhaQuality.evaluatedWeeks > 0 ? `✓ 100% clean (${job.jhaQuality.evaluatedWeeks} wk${job.jhaQuality.evaluatedWeeks === 1 ? '' : 's'}) in Field iD.` : 'No JHA quality fails logged.'}</div>
+          ` : `
+            <div style="margin-top:5px;display:flex;flex-direction:column;gap:3px;">
+              ${job.jhaFailures.slice(0, 3).map(jf => `
+                <div style="font-size:10px;color:#78350f;">
+                  <strong>Wk ${this.escapeHtml(jf.weekStartStr.slice(0, 5))}</strong>: ${this.escapeHtml(jf.qualityComments.slice(0, 72))}${jf.qualityComments.length > 72 ? '…' : ''}
+                </div>
+              `).join('')}
+              ${job.jhaFailures.length > 3 ? `<div style="font-size:9.5px;color:#92400e;">+ ${job.jhaFailures.length - 3} more</div>` : ''}
+            </div>
+          `}
+        </div>
       </div>
 
       <!-- Monthly Inspection Breakdown Strip -->
@@ -4253,17 +4557,26 @@ class ForemanReportCardEngine {
             ${job.weeks.map(w => {
               const hasMiss = DAYS.some(d => w.days[d] === 'missing') || w.weekly === 'missing';
               const hasLate = DAYS.some(d => w.days[d] === 'late') || w.weekly === 'late';
-              const rowBg = hasMiss ? '#fef2f2' : (hasLate ? '#fffbeb' : '#ffffff');
+              const wkFail = job.jhaFailByWeekStr ? job.jhaFailByWeekStr.get(w.weekStartStr) : null;
+              const rowBg = hasMiss ? '#fef2f2' : ((hasLate || wkFail) ? '#fffbeb' : '#ffffff');
               return `
                 <tr style="background:${rowBg};">
                   <td style="border:1px solid #cbd5e1;padding:4px 7px;font-weight:700;white-space:nowrap;">
                     ${this.escapeHtml(w.weekStartStr)}
                     ${w.reattributedFrom ? `<span title="Foreman verified via JHA Log (Safety Compliance listed ${this.escapeHtml(w.reattributedFrom)})" style="margin-left:4px;font-size:9px;font-weight:700;background:#e0e7ff;color:#3730a3;border:1px solid #c7d2fe;border-radius:4px;padding:0 4px;">JHA Log</span>` : ''}
+                    ${wkFail ? `<span title="Field iD JHA Quality Fail: ${this.escapeHtml(wkFail.qualityComments)}" style="margin-left:4px;font-size:9px;font-weight:800;background:#fef3c7;color:#92400e;border:1px solid #f59e0b;border-radius:4px;padding:0 4px;">🚩 Fail</span>` : ''}
                   </td>
                   ${DAYS.map(d => `<td style="border:1px solid #cbd5e1;padding:4px 4px;text-align:center;">${renderDayIconCell(w.days[d])}</td>`).join('')}
                   <td style="border:1px solid #cbd5e1;padding:4px 6px;text-align:center;">${renderDayIconCell(w.weekly)}</td>
                   <td style="border:1px solid #cbd5e1;padding:4px 7px;text-align:right;font-weight:700;color:#334155;">${this.escapeHtml(w.jhaSummary)}</td>
                 </tr>
+                ${wkFail ? `
+                  <tr style="background:#fffbeb;">
+                    <td colspan="10" style="border:1px solid #fcd34d;border-top:none;padding:3px 9px;font-size:9.5px;color:#92400e;font-weight:600;">
+                      ↳ <strong>Field iD JHA Quality Fail</strong> (${this.escapeHtml((wkFail.categories || []).join(', '))}): ${this.escapeHtml(wkFail.qualityComments)}
+                    </td>
+                  </tr>
+                ` : ''}
               `;
             }).join('')}
           </tbody>
@@ -4282,16 +4595,19 @@ class ForemanReportCardEngine {
   // =========================================================================
 
   buildRecordsModalHtml(recordType, foreman, period, jobNumber = '') {
-    const isIncidents = recordType !== 'audits';
+    const isJhaFails = recordType === 'jha_failures';
+    const isIncidents = !isJhaFails && recordType !== 'audits';
     const targetJob = jobNumber ? foreman.jobs.find(j => j.jobNumber === jobNumber) : null;
-    const records = isIncidents
-      ? (targetJob ? targetJob.incidents : (foreman.incidents || []))
-      : (targetJob ? targetJob.siteAudits : (foreman.siteAudits || []));
+    const records = isJhaFails
+      ? (targetJob ? (targetJob.jhaFailures || []) : (foreman.jhaFailures || []))
+      : (isIncidents
+          ? (targetJob ? targetJob.incidents : (foreman.incidents || []))
+          : (targetJob ? targetJob.siteAudits : (foreman.siteAudits || [])));
     const foremanJobSet = new Set(foreman.jobs.map(j => j.jobNumber));
 
-    const accentColor = isIncidents ? '#f87171' : '#38bdf8';
-    const titleIcon = isIncidents ? '⚠️' : '📋';
-    const titleNoun = isIncidents ? 'Incident Reports' : 'Site Audits';
+    const accentColor = isJhaFails ? '#fbbf24' : (isIncidents ? '#f87171' : '#38bdf8');
+    const titleIcon = isJhaFails ? '🚩' : (isIncidents ? '⚠️' : '📋');
+    const titleNoun = isJhaFails ? 'Field iD JHA Quality Fails' : (isIncidents ? 'Incident Reports' : 'Site Audits');
     const scopeLabel = targetJob
       ? `Job ${targetJob.jobNumber}${targetJob.jobName ? ` (${targetJob.jobName})` : ''} · ${foreman.name}`
       : `${foreman.name} · All Crew / Attributed ${period.shortLabel}`;
@@ -4299,16 +4615,51 @@ class ForemanReportCardEngine {
     const bodyHtml = records.length === 0
       ? `
         <div style="text-align:center;padding:38px 20px;color:#94a3b8;">
-          <div style="font-size:34px;margin-bottom:8px;">${isIncidents ? '✅' : '📋'}</div>
+          <div style="font-size:34px;margin-bottom:8px;">${isJhaFails ? '✅' : (isIncidents ? '✅' : '📋')}</div>
           <div style="font-size:14px;font-weight:800;color:#e2e8f0;margin-bottom:4px;">
-            ${isIncidents ? 'Zero Incident Reports Logged' : 'No Site Audits Logged'}
+            ${isJhaFails ? 'Zero JHA Quality Fails Logged' : (isIncidents ? 'Zero Incident Reports Logged' : 'No Site Audits Logged')}
           </div>
           <div style="font-size:12px;">
-            No ${isIncidents ? 'incidents' : 'site audits'} were recorded for <strong>${this.escapeHtml(scopeLabel)}</strong> during ${this.escapeHtml(period.displayRangeStr)}.
+            No ${isJhaFails ? 'Field iD JHA quality failures' : (isIncidents ? 'incidents' : 'site audits')} were recorded for <strong>${this.escapeHtml(scopeLabel)}</strong> during ${this.escapeHtml(period.displayRangeStr)}.
           </div>
         </div>
       `
       : records.map((rec, idx) => {
+          if (isJhaFails) {
+            return `
+              <div style="border:1px solid rgba(251,191,36,0.38);border-left:4px solid #f59e0b;border-radius:8px;background:rgba(15,23,42,0.72);padding:13px 15px;display:flex;flex-direction:column;gap:8px;">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap;">
+                  <div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap;">
+                    <span style="font-size:12px;font-weight:900;color:#f8fafc;">#${idx + 1} · Week of ${this.escapeHtml(rec.weekStartStr)}</span>
+                    ${rec.jobNumber ? `<span style="font-family:monospace;font-size:11.5px;font-weight:800;color:#93c5fd;background:rgba(37,99,235,0.2);border:1px solid rgba(96,165,250,0.4);border-radius:4px;padding:1px 6px;">Job ${this.escapeHtml(rec.jobNumber)}${rec.jobName ? ` · ${this.escapeHtml(rec.jobName)}` : ''}</span>` : ''}
+                    ${(rec.categories || []).map(cat => `<span style="font-size:10.5px;font-weight:800;color:#fde68a;background:rgba(245,158,11,0.18);border:1px solid rgba(251,191,36,0.45);border-radius:12px;padding:1px 8px;">${this.escapeHtml(cat)}</span>`).join('')}
+                  </div>
+                  ${rec.ecoLink ? `
+                    <a href="${this.escapeHtml(rec.ecoLink)}" target="_blank" rel="noopener noreferrer"
+                       class="btn btn-secondary"
+                       style="font-size:11px;font-weight:700;padding:4px 10px;border-color:rgba(245,158,11,0.45);color:#fde68a;background:rgba(245,158,11,0.14);border-radius:5px;text-decoration:none;display:inline-flex;align-items:center;gap:4px;">
+                      <span>🔗</span> Open in Field iD ↗
+                    </a>
+                  ` : ''}
+                </div>
+                <div style="display:flex;flex-wrap:wrap;gap:10px 16px;font-size:11.5px;color:#cbd5e1;">
+                  ${rec.foreman ? `<span><strong style="color:#94a3b8;">👑 Crew Foreman:</strong> ${this.escapeHtml(rec.foreman)}</span>` : ''}
+                  ${rec.location ? `<span><strong style="color:#94a3b8;">📍 Location:</strong> ${this.escapeHtml(rec.location)}</span>` : ''}
+                  ${rec.affectedDates && rec.affectedDates.length > 0 ? `<span><strong style="color:#94a3b8;">📅 Affected Dates:</strong> ${this.escapeHtml(rec.affectedDates.join(', '))}</span>` : ''}
+                  ${rec.emailDate ? `<span><strong style="color:#94a3b8;">📬 Email Date:</strong> ${this.escapeHtml(rec.emailDate)}</span>` : ''}
+                </div>
+                <div style="font-size:12px;line-height:1.48;color:#fef3c7;background:rgba(245,158,11,0.1);border:1px solid rgba(245,158,11,0.28);border-radius:6px;padding:8px 10px;">
+                  <div style="font-size:10px;font-weight:800;text-transform:uppercase;color:#fbbf24;margin-bottom:3px;">JHA Quality Failure Reason</div>
+                  ${this.escapeHtml(rec.qualityComments)}
+                </div>
+                ${rec.hadNoJhaStripped ? `
+                  <div style="font-size:10.5px;color:#94a3b8;font-style:italic;">
+                    ℹ️ EcoOnline's raw note also mentioned a missing JHA, which is excluded here — Safety Assistant's compliance records remain the sole source of truth for submitted vs. missing JHAs.
+                  </div>
+                ` : ''}
+              </div>
+            `;
+          }
           if (isIncidents) {
             const isOtherCrewJob = Boolean(!targetJob && rec.jobNumber && !foremanJobSet.has(rec.jobNumber));
             const statusColor = /closed|resolved|complete/i.test(rec.status || '')
@@ -4408,8 +4759,8 @@ class ForemanReportCardEngine {
           `;
         }).join('');
 
-    const navTargetView = isIncidents ? 'incident-reports-view' : 'site-audits-view';
-    const navTargetLabel = isIncidents ? 'Open Incident Reports Tab →' : 'Open Site Audits Tab →';
+    const navTargetView = isJhaFails ? 'safety-compliance-view' : (isIncidents ? 'incident-reports-view' : 'site-audits-view');
+    const navTargetLabel = isJhaFails ? 'Open Safety Compliance Tab →' : (isIncidents ? 'Open Incident Reports Tab →' : 'Open Site Audits Tab →');
 
     return `
       <div style="background:var(--bg-secondary,#1e293b);border:1px solid var(--border-color,#334155);border-radius:10px;width:100%;max-width:780px;max-height:86vh;display:flex;flex-direction:column;color:var(--text-primary,#f8fafc);box-shadow:0 22px 55px rgba(0,0,0,0.65);overflow:hidden;">

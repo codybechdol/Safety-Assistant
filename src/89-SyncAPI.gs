@@ -131,6 +131,26 @@ function ensureRecommendedCompanionSheetsExist(ss) {
       color: '#0369a1'
     },
     {
+      name: typeof SHEET_JHA_FAILURES !== 'undefined' ? SHEET_JHA_FAILURES : 'JHA Failures',
+      headers: [
+        'Week Start',
+        'Due Date',
+        'Job #',
+        'Job Name',
+        'Foreman',
+        'Location',
+        'Raw Comments',
+        'Quality Comments',
+        'Has Quality Issue',
+        'Failure Categories',
+        'Affected Dates',
+        'EcoOnline Link',
+        'Email Date',
+        'Email ID'
+      ],
+      color: '#b45309'
+    },
+    {
       name: typeof SHEET_FIRE_EXTINGUISHERS !== 'undefined' ? SHEET_FIRE_EXTINGUISHERS : 'Fire Extinguishers',
       headers: ['Vehicle / Equipment #', 'Size', 'Test Date', 'Date Verified', 'Location', 'Status', 'Assigned To', 'Job #', 'Change Out Date', 'Notes'],
       color: '#b91c1c'
@@ -353,7 +373,8 @@ function exportFullDatabaseSnapshot(tableKeysFilter) {
     { key: 'daily_accomplishments', name: typeof SHEET_DAILY_ACCOMPLISHMENTS !== 'undefined' ? SHEET_DAILY_ACCOMPLISHMENTS : 'Daily Accomplishments' },
     { key: 'system_config', name: typeof SHEET_SYSTEM_CONFIG !== 'undefined' ? SHEET_SYSTEM_CONFIG : 'System Config' },
     { key: 'incident_reports', name: typeof SHEET_INCIDENT_REPORTS !== 'undefined' ? SHEET_INCIDENT_REPORTS : 'Incident Reports' },
-    { key: 'site_audits', name: typeof SHEET_SITE_AUDITS !== 'undefined' ? SHEET_SITE_AUDITS : 'Site Audits' }
+    { key: 'site_audits', name: typeof SHEET_SITE_AUDITS !== 'undefined' ? SHEET_SITE_AUDITS : 'Site Audits' },
+    { key: 'jha_failures', name: typeof SHEET_JHA_FAILURES !== 'undefined' ? SHEET_JHA_FAILURES : 'JHA Failures' }
   ];
 
   var tables = {};
@@ -1372,7 +1393,8 @@ function patchSyncSnapshotInDrive(sheetsModified, configsModified, extraConfigs,
       'daily accomplishments': 'daily_accomplishments',
       'system config': 'system_config',
       'incident reports': 'incident_reports',
-      'site audits': 'site_audits'
+      'site audits': 'site_audits',
+      'jha failures': 'jha_failures'
     };
 
     function fastDateStr(d) {
@@ -6706,6 +6728,472 @@ function scanSiteAuditEmails(options) {
     };
   } catch (err) {
     Logger.log('scanSiteAuditEmails error: ' + err);
+    return { success: false, error: err.toString() };
+  }
+}
+
+/**
+ * Decodes common HTML entities and strips tags from an EcoOnline HTML cell.
+ */
+function _cleanEcoHtmlCell(cellHtml) {
+  var s = String(cellHtml || '');
+  s = s.replace(/<br\s*\/?>/gi, ' ');
+  s = s.replace(/<[^>]+>/g, ' ');
+  s = s.replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&#x27;|&apos;/gi, "'")
+    .replace(/&#(\d+);/g, function(_, num) {
+      var code = parseInt(num, 10);
+      return isNaN(code) ? '' : String.fromCharCode(code);
+    });
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Strips "No JHA <date(s)>" submission-absence clauses so EcoOnline is used strictly
+ * for JHA quality tracking (App Safety Compliance always wins on missing vs. submitted JHAs).
+ * Categorizes remaining quality reasons and extracts affected quality dates.
+ */
+function _parseJhaFailureComments(rawComments, refDate) {
+  var raw = String(rawComments || '').replace(/\s+/g, ' ').trim();
+  if (!raw) {
+    return {
+      rawComments: '',
+      qualityComments: '',
+      hasQualityIssue: false,
+      categories: [],
+      affectedDates: []
+    };
+  }
+
+  // Remove "No JHA <date(s)>" / "Missing JHA <date(s)>" clauses without eating subsequent quality notes
+  var stripped = raw.replace(
+    /(?:^|[\s,;.-]+)(?:no|missing)\s+jha'?s?(?:\s+(?:submitted|received|turned\s+in|on|for))?(?:\s*(?:[:\-]\s*)?(?:(?:and|&)\s+)?\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?(?:\s*(?:,|&|and|\-|to)\s*\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)*)?(?=\s*(?:$|[,;.]|\b(?:no\s+(?:job|site|photo|pic|paperwork|sign|tailgate)|crew|missing|incomplete|hazard|ppe|signature|sign|blank|wrong|did|not|only|need|please|identify|photo|paperwork)\b|[A-Z]))/gi,
+    ' '
+  );
+  stripped = stripped
+    .replace(/^[,;:\-\s]+/, '')
+    .replace(/[,;:\-\s]+$/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  var hasQualityIssue = stripped.length > 0;
+  var categories = [];
+  var catSeen = {};
+  var addCat = function(lbl) {
+    if (!catSeen[lbl]) {
+      catSeen[lbl] = true;
+      categories.push(lbl);
+    }
+  };
+
+  if (hasQualityIssue) {
+    if (/photo|pic(?:ture)?|image/i.test(stripped)) addCat('Missing Photo');
+    if (/paperwork|attach|pdf|upload|doc(?:ument)?/i.test(stripped)) addCat('Missing Paperwork');
+    if (/dut(?:y|ies)|position|role|crew\s+member/i.test(stripped)) addCat('Crew Duties');
+    if (/sign(?:ature|ed|ing)?|initial/i.test(stripped)) addCat('Missing Signature');
+    if (/hazard|control|mitigat|ppe|tailgate|brief|incomplete|blank|detail|identify/i.test(stripped) && categories.length === 0) {
+      addCat('Incomplete / Quality');
+    }
+    if (categories.length === 0) addCat('Quality Issue');
+  } else {
+    addCat('No JHA Only');
+  }
+
+  // Extract affected dates ONLY from the quality portion (never from stripped "No JHA" clauses)
+  var affectedDates = [];
+  var dateSeen = {};
+  if (hasQualityIssue) {
+    var baseYear = (refDate instanceof Date && !isNaN(refDate.getTime())) ? refDate.getFullYear() : new Date().getFullYear();
+    var refMonth = (refDate instanceof Date && !isNaN(refDate.getTime())) ? (refDate.getMonth() + 1) : (new Date().getMonth() + 1);
+    var dateRe = /\b(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?\b/g;
+    var dm;
+    while ((dm = dateRe.exec(stripped)) !== null) {
+      var mm = parseInt(dm[1], 10);
+      var dd = parseInt(dm[2], 10);
+      if (mm < 1 || mm > 12 || dd < 1 || dd > 31) continue;
+      var yy = baseYear;
+      if (dm[3]) {
+        yy = parseInt(dm[3], 10);
+        if (yy < 100) yy += 2000;
+      } else {
+        // Handle Dec/Jan year rollover cleanly
+        if (refMonth === 1 && mm === 12) yy = baseYear - 1;
+        else if (refMonth === 12 && mm === 1) yy = baseYear + 1;
+      }
+      var formatted = (mm < 10 ? '0' + mm : String(mm)) + '/' + (dd < 10 ? '0' + dd : String(dd)) + '/' + yy;
+      if (!dateSeen[formatted]) {
+        dateSeen[formatted] = true;
+        affectedDates.push(formatted);
+      }
+    }
+  }
+
+  return {
+    rawComments: raw,
+    qualityComments: stripped,
+    hasQualityIssue: hasQualityIssue,
+    categories: categories,
+    affectedDates: affectedDates
+  };
+}
+
+/**
+ * Parses an EcoOnline "JHA Completed w Failure Last Week" HTML email body into structured row objects.
+ */
+function _parseJhaFailureEmailHtml(htmlBody) {
+  var results = [];
+  var html = String(htmlBody || '');
+  if (!html) return results;
+
+  var trRe = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+  var tdRe = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
+  var colDue = -1, colId = -1, colComments = -1, colResult = -1;
+  var trMatch;
+
+  while ((trMatch = trRe.exec(html)) !== null) {
+    var rowHtml = trMatch[1];
+    var rawCells = [];
+    var cleanCells = [];
+    var tdMatch;
+    tdRe.lastIndex = 0;
+    while ((tdMatch = tdRe.exec(rowHtml)) !== null) {
+      rawCells.push(tdMatch[1]);
+      cleanCells.push(_cleanEcoHtmlCell(tdMatch[1]));
+    }
+    if (cleanCells.length < 3) continue;
+
+    // Detect table header row dynamically
+    var lowCells = cleanCells.map(function(c) { return c.toLowerCase(); });
+    if (colDue === -1) {
+      var dIdx = -1, iIdx = -1, cIdx = -1, rIdx = -1;
+      for (var h = 0; h < lowCells.length; h++) {
+        if (lowCells[h].indexOf('due date') !== -1) dIdx = h;
+        else if (lowCells[h].indexOf('id number') !== -1) iIdx = h;
+        else if (lowCells[h].indexOf('comment') !== -1) cIdx = h;
+        else if (lowCells[h].indexOf('result') !== -1) rIdx = h;
+      }
+      if (dIdx !== -1 && iIdx !== -1 && cIdx !== -1) {
+        colDue = dIdx;
+        colId = iIdx;
+        colComments = cIdx;
+        colResult = rIdx;
+      }
+      continue;
+    }
+
+    var dueRaw = cleanCells[colDue] || '';
+    var idText = cleanCells[colId] || '';
+    var idRawHtml = rawCells[colId] || '';
+    var commentsRaw = cleanCells[colComments] || '';
+    var resultText = colResult !== -1 ? (cleanCells[colResult] || '') : 'Fail';
+
+    if (!dueRaw || !idText) continue;
+    if (resultText && resultText.toLowerCase().indexOf('pass') !== -1) continue;
+
+    // Extract base Job # (e.g. "011-27" from "011-27 Hamilton Transmission Dock")
+    var jobMatch = idText.match(/^(?:job\s*#?\s*)?(\d{2,4}-\d{2})(?:\.\d+)?\b(.*)$/i);
+    if (!jobMatch) continue;
+    var baseJob = jobMatch[1].trim();
+    var emailJobName = String(jobMatch[2] || '').replace(/^[\s\-:]+/, '').trim();
+
+    // Extract clickable EcoOnline URL if present
+    var hrefMatch = idRawHtml.match(/href\s*=\s*["']([^"']+)["']/i);
+    var ecoLink = hrefMatch ? hrefMatch[1].replace(/&amp;/gi, '&').trim() : '';
+
+    // Parse Due Date (e.g. "11/16/26 9:00 AM" or "11/16/2026")
+    var dm = dueRaw.match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
+    if (!dm) continue;
+    var mm = parseInt(dm[1], 10);
+    var dd = parseInt(dm[2], 10);
+    var yy = parseInt(dm[3], 10);
+    if (yy < 100) yy += 2000;
+    var dueDateObj = new Date(yy, mm - 1, dd, 12, 0, 0);
+    if (isNaN(dueDateObj.getTime())) continue;
+
+    // Week Start = Sunday of the Due Date's week (matches Safety Compliance Week Start)
+    var weekStartObj = new Date(dueDateObj.getFullYear(), dueDateObj.getMonth(), dueDateObj.getDate() - dueDateObj.getDay(), 12, 0, 0);
+
+    var fmtUs = function(d) {
+      var mStr = (d.getMonth() + 1) < 10 ? '0' + (d.getMonth() + 1) : String(d.getMonth() + 1);
+      var dStr = d.getDate() < 10 ? '0' + d.getDate() : String(d.getDate());
+      return mStr + '/' + dStr + '/' + d.getFullYear();
+    };
+
+    var parsedComment = _parseJhaFailureComments(commentsRaw, dueDateObj);
+
+    results.push({
+      weekStartStr: fmtUs(weekStartObj),
+      weekStartMs: weekStartObj.getTime(),
+      dueDateStr: fmtUs(dueDateObj),
+      jobNumber: baseJob,
+      emailJobName: emailJobName,
+      ecoLink: ecoLink,
+      rawComments: parsedComment.rawComments,
+      qualityComments: parsedComment.qualityComments,
+      hasQualityIssue: parsedComment.hasQualityIssue,
+      categoriesStr: parsedComment.categories.join(', '),
+      affectedDatesStr: parsedComment.affectedDates.join(', ')
+    });
+  }
+
+  return results;
+}
+
+/**
+ * Scans Gmail for EcoOnline Field iD weekly "JHA Completed w Failure Last Week" emails,
+ * parses the HTML table, strips "No JHA <date>" submission-only clauses (Quality Only),
+ * attributes each row by Job # + Week Start to the crew foreman, and logs to "JHA Failures".
+ *
+ * @param {Object} [options] - { daysBack: number, allHistory: boolean, rescan: boolean, maxThreads: number }
+ * @return {Object} Scanning statistics and refreshed jha_failures table payload
+ */
+function scanJhaFailureEmails(options) {
+  try {
+    options = options || {};
+    var startTime = Date.now();
+    var ss = typeof getActiveSpreadsheetSafe === 'function' ? getActiveSpreadsheetSafe() : SpreadsheetApp.getActiveSpreadsheet();
+    if (!ss) return { success: false, error: 'Active spreadsheet not accessible' };
+
+    ensureRecommendedCompanionSheetsExist(ss);
+
+    var sheetName = typeof SHEET_JHA_FAILURES !== 'undefined' ? SHEET_JHA_FAILURES : 'JHA Failures';
+    var sheet = ss.getSheetByName(sheetName);
+    if (!sheet) return { success: false, error: 'JHA Failures sheet could not be created' };
+
+    var lastRow = sheet.getLastRow();
+    if (options.rescan === true && lastRow > 1) {
+      sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn()).clearContent();
+      lastRow = 1;
+    }
+
+    // Index existing rows for idempotent deduplication (by Week Start + Job # AND Email ID + Job #)
+    var existingJobWeek = {};
+    var existingEmailJob = {};
+    var normalizeWeekKey = function(val) {
+      if (val instanceof Date && !isNaN(val.getTime())) {
+        var m = val.getMonth() + 1;
+        var d = val.getDate();
+        return (m < 10 ? '0' + m : String(m)) + '/' + (d < 10 ? '0' + d : String(d)) + '/' + val.getFullYear();
+      }
+      var s = String(val || '').trim();
+      var mt = s.match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
+      if (!mt) return s;
+      var mm = parseInt(mt[1], 10);
+      var dd = parseInt(mt[2], 10);
+      var yy = parseInt(mt[3], 10);
+      if (yy < 100) yy += 2000;
+      return (mm < 10 ? '0' + mm : String(mm)) + '/' + (dd < 10 ? '0' + dd : String(dd)) + '/' + yy;
+    };
+
+    if (lastRow > 1) {
+      var existingVals = sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn()).getValues();
+      for (var e = 0; e < existingVals.length; e++) {
+        var exW = normalizeWeekKey(existingVals[e][0]);
+        var exJ = String(existingVals[e][2] || '').trim();
+        var exEid = String(existingVals[e][13] || '').trim();
+        if (exW && exJ) existingJobWeek[exJ + '|' + exW] = true;
+        if (exEid && exJ) existingEmailJob[exEid + '|' + exJ] = true;
+      }
+    }
+
+    // Build Safety Compliance (Job # + Week -> Foreman) and Job Tracking lookups for Job-#-first attribution
+    var scByJobWeek = {};
+    var scWeeksByJob = {};
+    var scSheet = ss.getSheetByName(typeof SHEET_SAFETY_COMPLIANCE !== 'undefined' ? SHEET_SAFETY_COMPLIANCE : 'Safety Compliance');
+    if (scSheet && scSheet.getLastRow() > 1) {
+      var scData = scSheet.getDataRange().getValues();
+      var scHdrs = scData[0].map(function(h) { return String(h || '').trim().toLowerCase(); });
+      var cWeek = scHdrs.indexOf('week start') !== -1 ? scHdrs.indexOf('week start') : scHdrs.indexOf('week');
+      var cJob = scHdrs.indexOf('job number') !== -1 ? scHdrs.indexOf('job number') : (scHdrs.indexOf('job #') !== -1 ? scHdrs.indexOf('job #') : scHdrs.indexOf('crew'));
+      var cFm = scHdrs.indexOf('foreman');
+      if (cWeek !== -1 && cJob !== -1 && cFm !== -1) {
+        for (var sr = 1; sr < scData.length; sr++) {
+          var sJobRaw = String(scData[sr][cJob] || '').trim();
+          var sJobMatch = sJobRaw.match(/^(\d{2,4}-\d{2})/);
+          if (!sJobMatch) continue;
+          var sJob = sJobMatch[1];
+          var sWeek = normalizeWeekKey(scData[sr][cWeek]);
+          var sFm = String(scData[sr][cFm] || '').trim();
+          if (!sWeek || !sFm) continue;
+          scByJobWeek[sJob + '|' + sWeek] = sFm;
+          if (!scWeeksByJob[sJob]) scWeeksByJob[sJob] = [];
+          var wp = sWeek.split('/');
+          var wMs = wp.length === 3 ? new Date(parseInt(wp[2], 10), parseInt(wp[0], 10) - 1, parseInt(wp[1], 10), 12, 0, 0).getTime() : 0;
+          scWeeksByJob[sJob].push({ weekMs: wMs, foreman: sFm });
+        }
+      }
+    }
+
+    var jtByJob = {};
+    var jtSheet = ss.getSheetByName(typeof SHEET_JOB_TRACKING !== 'undefined' ? SHEET_JOB_TRACKING : 'Job Tracking');
+    if (jtSheet && jtSheet.getLastRow() > 1) {
+      var jtData = jtSheet.getDataRange().getValues();
+      var jtHdrs = jtData[0].map(function(h) { return String(h || '').trim().toLowerCase(); });
+      var jColJob = jtHdrs.indexOf('job number') !== -1 ? jtHdrs.indexOf('job number') : (jtHdrs.indexOf('job #') !== -1 ? jtHdrs.indexOf('job #') : 0);
+      var jColFm = jtHdrs.indexOf('foreman') !== -1 ? jtHdrs.indexOf('foreman') : (jtHdrs.indexOf('crew lead') !== -1 ? jtHdrs.indexOf('crew lead') : 1);
+      var jColLoc = jtHdrs.indexOf('location') !== -1 ? jtHdrs.indexOf('location') : jtHdrs.indexOf('job location');
+      var jColName = jtHdrs.indexOf('job name');
+      for (var jr = 1; jr < jtData.length; jr++) {
+        var jRaw = String(jtData[jr][jColJob] || '').trim();
+        var jMatch = jRaw.match(/^(\d{2,4}-\d{2})/);
+        if (!jMatch) continue;
+        var jBase = jMatch[1];
+        var jFm = String(jtData[jr][jColFm] || '').trim();
+        var jLoc = jColLoc !== -1 ? String(jtData[jr][jColLoc] || '').trim() : '';
+        if (jLoc && typeof getPhysicalLocation === 'function') {
+          var phys = getPhysicalLocation(jLoc);
+          if (typeof isStatusLocation === 'function' && isStatusLocation(jLoc) && !phys) jLoc = '';
+          else if (phys) jLoc = phys;
+        }
+        var jName = jColName !== -1 ? String(jtData[jr][jColName] || '').trim() : '';
+        jtByJob[jBase] = { foreman: jFm, location: jLoc, jobName: jName };
+      }
+    }
+
+    var resolveForemanForJobWeek = function(jobNum, weekStr, weekMs) {
+      if (scByJobWeek[jobNum + '|' + weekStr]) return scByJobWeek[jobNum + '|' + weekStr];
+      var list = scWeeksByJob[jobNum];
+      if (list && list.length > 0 && weekMs) {
+        var bestFm = '';
+        var bestDiff = Number.MAX_SAFE_INTEGER;
+        for (var i = 0; i < list.length; i++) {
+          var diff = Math.abs(list[i].weekMs - weekMs);
+          if (diff < bestDiff) {
+            bestDiff = diff;
+            bestFm = list[i].foreman;
+          }
+        }
+        if (bestFm) return bestFm;
+      }
+      if (jtByJob[jobNum] && jtByJob[jobNum].foreman) return jtByJob[jobNum].foreman;
+      return '';
+    };
+
+    var allHistory = options.allHistory === true || options.rescan === true;
+    var daysBack = parseInt(options.daysBack, 10) || 30;
+    var maxThreads = parseInt(options.maxThreads, 10) || 150;
+    var dateFilter = allHistory ? '' : (' newer_than:' + daysBack + 'd');
+    var query = 'from:noreply@ecompliance.com ("JHA Completed w Failure" OR "JHA received but Failure")' + dateFilter;
+
+    var threads = GmailApp.search(query, 0, maxThreads) || [];
+    threads.sort(function(a, b) {
+      var da = a.getLastMessageDate() ? a.getLastMessageDate().getTime() : 0;
+      var db = b.getLastMessageDate() ? b.getLastMessageDate().getTime() : 0;
+      return db - da;
+    });
+
+    var tz = Session.getScriptTimeZone() || 'America/Denver';
+    var newRows = [];
+    var newCount = 0;
+    var qualityCount = 0;
+    var skippedCount = 0;
+    var hasMore = false;
+
+    for (var t = 0; t < threads.length; t++) {
+      if (Date.now() - startTime > 22000) {
+        hasMore = true;
+        Logger.log('scanJhaFailureEmails: Approaching 22s Web App limit; saving ' + newRows.length + ' new rows.');
+        break;
+      }
+      var msgs = threads[t].getMessages();
+      for (var m = 0; m < msgs.length; m++) {
+        var msg = msgs[m];
+        var msgId = msg.getId();
+        var emailDt = msg.getDate();
+        var emailDateStr = emailDt ? Utilities.formatDate(emailDt, tz, 'MM/dd/yyyy') : '';
+        var parsedRows = _parseJhaFailureEmailHtml(msg.getBody());
+
+        for (var p = 0; p < parsedRows.length; p++) {
+          var item = parsedRows[p];
+          var jwKey = item.jobNumber + '|' + item.weekStartStr;
+          var ejKey = msgId + '|' + item.jobNumber;
+          if (existingJobWeek[jwKey] || existingEmailJob[ejKey]) {
+            skippedCount++;
+            continue;
+          }
+
+          var jtInfo = jtByJob[item.jobNumber] || {};
+          var foreman = resolveForemanForJobWeek(item.jobNumber, item.weekStartStr, item.weekStartMs);
+          var location = jtInfo.location || '';
+          var jobName = jtInfo.jobName || item.emailJobName || '';
+
+          newRows.push([
+            item.weekStartStr,
+            item.dueDateStr,
+            item.jobNumber,
+            jobName,
+            foreman,
+            location,
+            item.rawComments,
+            item.qualityComments,
+            item.hasQualityIssue ? 'Yes' : 'No',
+            item.categoriesStr,
+            item.affectedDatesStr,
+            item.ecoLink,
+            emailDateStr,
+            msgId
+          ]);
+
+          existingJobWeek[jwKey] = true;
+          existingEmailJob[ejKey] = true;
+          newCount++;
+          if (item.hasQualityIssue) qualityCount++;
+        }
+      }
+    }
+
+    if (newRows.length > 0) {
+      sheet.getRange(sheet.getLastRow() + 1, 1, newRows.length, newRows[0].length).setValues(newRows);
+      Logger.log('scanJhaFailureEmails: Added ' + newRows.length + ' rows (' + qualityCount + ' quality fails) to ' + sheetName);
+    }
+
+    if ((newRows.length > 0 || options.rescan === true) && typeof patchSyncSnapshotInDrive === 'function') {
+      try {
+        var modMap = {};
+        modMap[sheetName] = true;
+        patchSyncSnapshotInDrive(modMap, false);
+      } catch (snapErr) {
+        Logger.log('scanJhaFailureEmails Drive snapshot patch warning: ' + snapErr);
+      }
+    }
+
+    // Return refreshed table payload for instant desktop localDB update
+    var fullData = sheet.getDataRange().getValues();
+    var tableHeaders = fullData.length > 0 ? fullData[0] : [];
+    var tableRows = [];
+    for (var r = 1; r < fullData.length; r++) {
+      var rObj = { _rowIdx: r + 1 };
+      for (var c = 0; c < tableHeaders.length; c++) {
+        var cellVal = fullData[r][c];
+        if (cellVal instanceof Date && !isNaN(cellVal.getTime())) {
+          cellVal = Utilities.formatDate(cellVal, tz, 'MM/dd/yyyy');
+        }
+        rObj[tableHeaders[c]] = cellVal;
+      }
+      tableRows.push(rObj);
+    }
+
+    return {
+      success: true,
+      newCount: newCount,
+      qualityCount: qualityCount,
+      skippedCount: skippedCount,
+      hasMore: hasMore,
+      threadsScanned: threads.length,
+      totalInSheet: Math.max(0, fullData.length - 1),
+      table: {
+        name: sheetName,
+        headers: tableHeaders,
+        rows: tableRows,
+        rowCount: tableRows.length
+      }
+    };
+  } catch (err) {
+    Logger.log('scanJhaFailureEmails error: ' + err);
     return { success: false, error: err.toString() };
   }
 }

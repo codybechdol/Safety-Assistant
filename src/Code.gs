@@ -68562,6 +68562,18 @@ function doGet(e) {
 
         .setMimeType(ContentService.MimeType.JSON);
 
+    } else if (action === 'scanJhaFailureEmails') {
+
+      var scanJfRes = (typeof scanJhaFailureEmails === 'function')
+
+        ? scanJhaFailureEmails({ daysBack: parseInt(e.parameter.daysBack || '30', 10), allHistory: e.parameter.allHistory === 'true', rescan: e.parameter.rescan === 'true' })
+
+        : { success: false, error: 'scanJhaFailureEmails function not found in backend' };
+
+      return ContentService.createTextOutput(JSON.stringify(scanJfRes))
+
+        .setMimeType(ContentService.MimeType.JSON);
+
     } else if (action === 'scanCertEmails') {
 
       var scanCertRes = (typeof scanCertRenewalEmails === 'function')
@@ -69037,6 +69049,22 @@ function doPost(e) {
         : { success: false, error: 'scanSiteAuditEmails function not found in backend' };
 
       return ContentService.createTextOutput(JSON.stringify(scanSaResult))
+
+        .setMimeType(ContentService.MimeType.JSON);
+
+    }
+
+
+
+    if (action === 'scanJhaFailureEmails') {
+
+      var scanJfResult = (typeof scanJhaFailureEmails === 'function')
+
+        ? scanJhaFailureEmails(payload)
+
+        : { success: false, error: 'scanJhaFailureEmails function not found in backend' };
+
+      return ContentService.createTextOutput(JSON.stringify(scanJfResult))
 
         .setMimeType(ContentService.MimeType.JSON);
 

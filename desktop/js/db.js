@@ -2610,6 +2610,8 @@ class LocalDatabase {
       'incident_reports': 'incident_reports',
       'site audits': 'site_audits',
       'site_audits': 'site_audits',
+      'jha failures': 'jha_failures',
+      'jha_failures': 'jha_failures',
       'expiring certs': 'expiring_certs',
       'expiring_certs': 'expiring_certs',
       'training tracking': 'training_tracking',
@@ -2687,7 +2689,9 @@ class LocalDatabase {
       'incident_reports': 'Incident Reports',
       'incident reports': 'Incident Reports',
       'site_audits': 'Site Audits',
-      'site audits': 'Site Audits'
+      'site audits': 'Site Audits',
+      'jha_failures': 'JHA Failures',
+      'jha failures': 'JHA Failures'
     };
     if (map[clean]) return map[clean];
     if (this.snapshot && this.snapshot.tables && this.snapshot.tables[clean]) {

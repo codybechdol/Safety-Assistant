@@ -466,6 +466,9 @@
             <button class="btn btn-secondary" id="btn-recalculate-compliance" style="font-size: 12px; font-weight: 600; display: flex; align-items: center; gap: 6px;" onclick="window.safetyComplianceEngine.runRecalculateCompliance()" title="Recalculate Safety Compliance matrix from logged data and refresh view">
               <span>🔄</span> Recalculate
             </button>
+            <button class="btn btn-secondary" id="btn-scan-jha-failures" style="font-size: 12px; font-weight: 700; border-color: rgba(245, 158, 11, 0.55); color: #fcd34d; background: rgba(245, 158, 11, 0.1); display: flex; align-items: center; gap: 6px;" onclick="window.safetyComplianceEngine.scanJhaFailureEmails({ allHistory: event.shiftKey })" title="Scan Gmail for EcoOnline Field iD weekly JHA Failure emails (auto-backfills on first run; hold Shift + click to force full archive scan)">
+              <span>⚠️</span> JHA Fails
+            </button>
             <button class="btn btn-primary" id="btn-process-safety-emails" style="font-size: 12px; font-weight: 700; background: linear-gradient(135deg, #10b981 0%, #059669 100%); border: none; display: flex; align-items: center; gap: 6px; box-shadow: 0 2px 6px rgba(16, 185, 129, 0.3);" onclick="window.safetyComplianceEngine.openProcessEmailsModal()">
               <span>📥</span> Process Safety Emails
             </button>
@@ -4579,6 +4582,24 @@
               });
             } catch (saErr) {
               console.warn('[Startup Scans] Site audits email scan error:', saErr);
+            }
+          }
+
+          // Polite 500ms stagger before scanning EcoOnline weekly JHA Quality Failures
+          await new Promise(r => setTimeout(r, 500));
+
+          // 4. Start Scan Gmail For EcoOnline Field iD JHA Quality Failures (auto-backfills on first run)
+          if (window.safetyComplianceEngine && typeof window.safetyComplianceEngine.scanJhaFailureEmails === 'function') {
+            try {
+              console.log('[Startup Scans] Starting EcoOnline JHA Quality Failures scan in background...');
+              window.safetyComplianceEngine.scanJhaFailureEmails({
+                daysBack: 30,
+                silent: true
+              }).catch(jfErr => {
+                console.warn('[Startup Scans] JHA failures email scan error:', jfErr);
+              });
+            } catch (jfErr) {
+              console.warn('[Startup Scans] JHA failures email scan error:', jfErr);
             }
           }
         } catch (err) {

@@ -1249,6 +1249,13 @@ class SafetyEmailsEngine {
         console.warn('Auto-recalculate compliance after email scanning warning:', autoRecalcErr);
       }
 
+      // Automatically scan EcoOnline Field iD weekly JHA Quality Failures after safety email sync
+      try {
+        await this.scanJhaFailureEmails({ daysBack: 30, silent: true });
+      } catch (jhaFailErr) {
+        console.warn('Auto-scan JHA Failures after safety emails warning:', jhaFailErr);
+      }
+
       // Re-render Safety Compliance view immediately so user sees the new week and updated checks
       if (window.sheetNavigator) {
         window.sheetNavigator.renderSafetyCompliance();
@@ -4421,6 +4428,266 @@ class SafetyEmailsEngine {
       if (btn && !silent) {
         btn.disabled = false;
         btn.innerHTML = '🔄 Fetch Latest from Sheets';
+      }
+    }
+  }
+
+  /**
+   * Strips "No JHA <date(s)>" submission-absence clauses so EcoOnline Field iD emails
+   * are used strictly for JHA Quality tracking (App Safety Compliance always wins on missing JHAs).
+   */
+  parseJhaFailureComments(rawComments, refDate = null) {
+    const raw = String(rawComments || '').replace(/\s+/g, ' ').trim();
+    if (!raw) {
+      return { rawComments: '', qualityComments: '', hasQualityIssue: false, categories: [], affectedDates: [] };
+    }
+
+    let stripped = raw.replace(
+      /(?:^|[\s,;.-]+)(?:no|missing)\s+jha'?s?(?:\s+(?:submitted|received|turned\s+in|on|for))?(?:\s*(?:[:\-]\s*)?(?:(?:and|&)\s+)?\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?(?:\s*(?:,|&|and|\-|to)\s*\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)*)?(?=\s*(?:$|[,;.]|\b(?:no\s+(?:job|site|photo|pic|paperwork|sign|tailgate)|crew|missing|incomplete|hazard|ppe|signature|sign|blank|wrong|did|not|only|need|please|identify|photo|paperwork)\b|[A-Z]))/gi,
+      ' '
+    );
+    stripped = stripped
+      .replace(/^[,;:\-\s]+/, '')
+      .replace(/[,;:\-\s]+$/, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    const hasQualityIssue = stripped.length > 0;
+    const categories = [];
+    const addCat = (lbl) => { if (!categories.includes(lbl)) categories.push(lbl); };
+
+    if (hasQualityIssue) {
+      if (/photo|pic(?:ture)?|image/i.test(stripped)) addCat('Missing Photo');
+      if (/paperwork|attach|pdf|upload|doc(?:ument)?/i.test(stripped)) addCat('Missing Paperwork');
+      if (/dut(?:y|ies)|position|role|crew\s+member/i.test(stripped)) addCat('Crew Duties');
+      if (/sign(?:ature|ed|ing)?|initial/i.test(stripped)) addCat('Missing Signature');
+      if (/hazard|control|mitigat|ppe|tailgate|brief|incomplete|blank|detail|identify/i.test(stripped) && categories.length === 0) {
+        addCat('Incomplete / Quality');
+      }
+      if (categories.length === 0) addCat('Quality Issue');
+    } else {
+      addCat('No JHA Only');
+    }
+
+    const affectedDates = [];
+    if (hasQualityIssue) {
+      const refDt = refDate instanceof Date && !isNaN(refDate.getTime()) ? refDate : new Date();
+      const baseYear = refDt.getFullYear();
+      const refMonth = refDt.getMonth() + 1;
+      const dateRe = /\b(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?\b/g;
+      let dm;
+      while ((dm = dateRe.exec(stripped)) !== null) {
+        const mm = parseInt(dm[1], 10);
+        const dd = parseInt(dm[2], 10);
+        if (mm < 1 || mm > 12 || dd < 1 || dd > 31) continue;
+        let yy = baseYear;
+        if (dm[3]) {
+          yy = parseInt(dm[3], 10);
+          if (yy < 100) yy += 2000;
+        } else {
+          if (refMonth === 1 && mm === 12) yy = baseYear - 1;
+          else if (refMonth === 12 && mm === 1) yy = baseYear + 1;
+        }
+        const fmt = `${String(mm).padStart(2, '0')}/${String(dd).padStart(2, '0')}/${yy}`;
+        if (!affectedDates.includes(fmt)) affectedDates.push(fmt);
+      }
+    }
+
+    return { rawComments: raw, qualityComments: stripped, hasQualityIssue, categories, affectedDates };
+  }
+
+  /**
+   * Normalizes a JHA Failures sheet row into a canonical Quality Fail object.
+   * Returns null if the row has no quality defect (e.g. "No JHA <date>" only).
+   */
+  _normalizeJhaFailureRow(row) {
+    if (!row) return null;
+    const rawJob = String(row['Job #'] || row['Job Number'] || '').trim();
+    const jobMatch = rawJob.match(/^(\d{2,4}-\d{2})/);
+    const baseJob = jobMatch ? jobMatch[1] : rawJob.replace(/\s*\([^)]*\)/g, '').replace(/\.\d+.*$/, '').trim();
+    if (!baseJob) return null;
+
+    const weekDt = this.parseDate(row['Week Start'] || row['Week'] || '');
+    const dueDt = this.parseDate(row['Due Date'] || '') || weekDt;
+    if (!weekDt && !dueDt) return null;
+
+    const sundayDt = weekDt
+      ? new Date(weekDt.getFullYear(), weekDt.getMonth(), weekDt.getDate() - weekDt.getDay(), 12, 0, 0)
+      : new Date(dueDt.getFullYear(), dueDt.getMonth(), dueDt.getDate() - dueDt.getDay(), 12, 0, 0);
+    const weekKey = `${String(sundayDt.getMonth() + 1).padStart(2, '0')}/${String(sundayDt.getDate()).padStart(2, '0')}/${sundayDt.getFullYear()}`;
+
+    const rawComments = String(row['Raw Comments'] || row['Comments'] || '').trim();
+    const parsed = this.parseJhaFailureComments(rawComments || row['Quality Comments'] || '', dueDt || sundayDt);
+    const sheetFlag = String(row['Has Quality Issue'] || '').trim().toLowerCase();
+    // Always re-verify via stripped qualityComments so "No JHA"-only rows never leak into quality counts
+    const qualityComments = parsed.qualityComments;
+    const hasQualityIssue = Boolean(qualityComments) && sheetFlag !== 'no' && sheetFlag !== 'false';
+    if (!hasQualityIssue) return null;
+
+    const rawCats = String(row['Failure Categories'] || '').trim();
+    const categories = rawCats && rawCats.toLowerCase() !== 'no jha only'
+      ? rawCats.split(',').map(s => s.trim()).filter(Boolean)
+      : parsed.categories;
+
+    const affectedDates = parsed.affectedDates.length > 0
+      ? parsed.affectedDates
+      : String(row['Affected Dates'] || '').split(',').map(s => s.trim()).filter(Boolean);
+
+    const DAY_KEYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const affectedDayKeys = new Set();
+    affectedDates.forEach(ds => {
+      const dt = this.parseDate(ds);
+      if (dt) {
+        const diff = Math.round((dt.getTime() - sundayDt.getTime()) / 86400000);
+        if (diff >= 0 && diff <= 6) {
+          affectedDayKeys.add(DAY_KEYS[dt.getDay()]);
+        }
+      }
+    });
+
+    return {
+      weekStart: weekKey,
+      weekStartDate: sundayDt,
+      dueDate: String(row['Due Date'] || '').trim(),
+      jobNumber: baseJob,
+      jobName: String(row['Job Name'] || '').trim(),
+      foreman: String(row['Foreman'] || '').trim(),
+      location: String(row['Location'] || '').trim(),
+      rawComments,
+      qualityComments,
+      hasQualityIssue: true,
+      categories,
+      affectedDates,
+      affectedDayKeys,
+      ecoLink: String(row['EcoOnline Link'] || '').trim(),
+      emailDate: String(row['Email Date'] || '').trim(),
+      emailId: String(row['Email ID'] || '').trim()
+    };
+  }
+
+  /**
+   * Returns Map(baseJob -> normalized Quality JHA Fail) for the specified Safety Compliance week.
+   */
+  getQualityJhaFailsForWeek(weekVal) {
+    const map = new Map();
+    const targetDt = this.parseDate(weekVal);
+    if (!targetDt) return map;
+    const targetSun = new Date(targetDt.getFullYear(), targetDt.getMonth(), targetDt.getDate() - targetDt.getDay(), 12, 0, 0);
+    const targetKey = `${String(targetSun.getMonth() + 1).padStart(2, '0')}/${String(targetSun.getDate()).padStart(2, '0')}/${targetSun.getFullYear()}`;
+
+    const snap = (this.db && typeof this.db.getSnapshot === 'function') ? this.db.getSnapshot() : (this.db ? this.db.snapshot : null);
+    const tbl = (snap && snap.tables && (snap.tables['jha_failures'] || snap.tables['JHA Failures'])) || (this.db && typeof this.db.getTable === 'function' ? this.db.getTable('jha_failures') : null);
+    if (!tbl || !Array.isArray(tbl.rows)) return map;
+
+    tbl.rows.forEach(r => {
+      const item = this._normalizeJhaFailureRow(r);
+      if (!item || item.weekStart !== targetKey) return;
+      if (!map.has(item.jobNumber)) {
+        map.set(item.jobNumber, item);
+      }
+    });
+    return map;
+  }
+
+  /**
+   * Looks up a single crew's Quality JHA Fail for a given job number & week start.
+   */
+  getQualityJhaFailForCrewWeek(jobNum, weekVal) {
+    const rawJob = String(jobNum || '').trim();
+    const m = rawJob.match(/^(\d{2,4}-\d{2})/);
+    const baseJob = m ? m[1] : rawJob.replace(/\s*\([^)]*\)/g, '').replace(/\.\d+.*$/, '').trim();
+    if (!baseJob) return null;
+    return this.getQualityJhaFailsForWeek(weekVal).get(baseJob) || null;
+  }
+
+  /**
+   * Scans Gmail for EcoOnline Field iD "JHA Completed w Failure Last Week" emails via Apps Script,
+   * updates localDB.tables.jha_failures, and refreshes Safety Compliance & Foreman Report Cards.
+   */
+  async scanJhaFailureEmails({ daysBack = 30, allHistory = false, rescan = false, silent = false } = {}) {
+    if (this._isScanningJhaFailures) return { success: false, skipped: true };
+    if (window.currentRoleMode === 'view_only') return { success: false, error: 'View only mode' };
+
+    const syncUrl = window.syncEngine ? window.syncEngine.getSyncUrl() : '';
+    if (!syncUrl) {
+      if (!silent && typeof window.showToast === 'function') {
+        window.showToast('⚠️ Configure Sync URL in Settings before scanning Gmail.', 'warning');
+      }
+      return { success: false, error: 'No Sync URL configured' };
+    }
+
+    // Automatically run full historical backfill the first time JHA Failures is empty
+    const snap = (this.db && typeof this.db.getSnapshot === 'function') ? this.db.getSnapshot() : (this.db ? this.db.snapshot : null);
+    const existingTbl = snap && snap.tables ? snap.tables['jha_failures'] : null;
+    const isFirstBackfill = !existingTbl || !Array.isArray(existingTbl.rows) || existingTbl.rows.length === 0;
+    const effectiveAllHistory = Boolean(allHistory || rescan || isFirstBackfill);
+
+    const btn = !silent ? document.getElementById('btn-scan-jha-failures') : null;
+    const origBtnHtml = btn ? btn.innerHTML : '';
+    if (btn) {
+      btn.disabled = true;
+      btn.innerHTML = effectiveAllHistory ? '⏳ Backfilling JHA Fails…' : '⏳ Scanning JHA Fails…';
+    }
+
+    this._isScanningJhaFailures = true;
+    try {
+      const response = await window.syncEngine.executeNetworkRequest(syncUrl, 'POST', {
+        action: 'scanJhaFailureEmails',
+        daysBack,
+        allHistory: effectiveAllHistory,
+        rescan
+      }, 90000);
+
+      if (response && response.success) {
+        if (response.table && snap && snap.tables) {
+          snap.tables['jha_failures'] = response.table;
+          if (this.db && typeof this.db.setSnapshot === 'function') {
+            await this.db.setSnapshot(snap);
+          } else if (this.db && typeof this.db.persistSnapshot === 'function') {
+            await this.db.persistSnapshot(snap);
+          }
+        }
+
+        if (window.sheetNavigator && typeof window.sheetNavigator.renderSafetyCompliance === 'function') {
+          const scView = document.getElementById('safety-compliance-view');
+          if (scView && scView.classList.contains('active')) {
+            window.sheetNavigator.renderSafetyCompliance();
+          }
+        }
+        if (window.foremanReportCardEngine) {
+          window.foremanReportCardEngine.cachedModel = null;
+          if (window.foremanReportCardEngine.isWorkspaceVisible && window.foremanReportCardEngine.isWorkspaceVisible()) {
+            window.foremanReportCardEngine.renderWorkspace({ preservePage: true });
+          }
+        }
+
+        const newCount = response.newCount || 0;
+        const qualCount = response.qualityCount || 0;
+        if ((!silent || newCount > 0) && typeof window.showToast === 'function') {
+          if (newCount > 0) {
+            window.showToast(`⚠️ JHA Fails synced: ${newCount} new row${newCount === 1 ? '' : 's'} (${qualCount} quality fail${qualCount === 1 ? '' : 's'})`, 'success');
+          } else if (!silent) {
+            window.showToast(`✅ JHA Fails up to date (${response.totalInSheet || 0} logged)`, 'info');
+          }
+        }
+        return response;
+      }
+
+      if (!silent && typeof window.showToast === 'function') {
+        window.showToast(`⚠️ JHA Fails scan failed: ${(response && response.error) || 'Unknown error'}`, 'error');
+      }
+      return response || { success: false };
+    } catch (err) {
+      console.warn('[JHA Failures Scan] Error:', err);
+      if (!silent && typeof window.showToast === 'function') {
+        window.showToast(`⚠️ JHA Fails scan error: ${err.message}`, 'error');
+      }
+      return { success: false, error: err.message };
+    } finally {
+      this._isScanningJhaFailures = false;
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = origBtnHtml;
       }
     }
   }

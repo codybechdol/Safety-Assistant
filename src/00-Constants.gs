@@ -71,6 +71,7 @@ var SHEET_DAILY_ACCOMPLISHMENTS = 'Daily Accomplishments';
 var SHEET_SYSTEM_CONFIG = 'System Config';
 var SHEET_INCIDENT_REPORTS = 'Incident Reports';
 var SHEET_SITE_AUDITS = 'Site Audits';
+var SHEET_JHA_FAILURES = 'JHA Failures';
 
 // =============================================================================
 // VISUAL CONSTANTS
