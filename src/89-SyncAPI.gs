@@ -6769,9 +6769,9 @@ function _parseJhaFailureComments(rawComments, refDate) {
     };
   }
 
-  // Remove "No JHA <date(s)>" / "Missing JHA <date(s)>" clauses without eating subsequent quality notes
+  // Remove "No JHA <date(s)>" / "Missing JHA <date(s)>" clauses (including optional parenthesized notes) without eating subsequent quality notes
   var stripped = raw.replace(
-    /(?:^|[\s,;.-]+)(?:no|missing)\s+jha'?s?(?:\s+(?:submitted|received|turned\s+in|on|for))?(?:\s*(?:[:\-]\s*)?(?:(?:and|&)\s+)?\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?(?:\s*(?:,|&|and|\-|to)\s*\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)*)?(?=\s*(?:$|[,;.]|\b(?:no\s+(?:job|site|photo|pic|paperwork|sign|tailgate)|crew|missing|incomplete|hazard|ppe|signature|sign|blank|wrong|did|not|only|need|please|identify|photo|paperwork)\b|[A-Z]))/gi,
+    /(?:^|[\s,;.-]+)(?:no|missing)\s+jha'?s?(?:\s+(?:submitted|received|turned\s+in|on|for))?(?:\s*(?:[:\-]\s*)?(?:(?:and|&)\s+)?\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?(?:\s*(?:,|&|and|\-|to)\s*\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)*)?(?:\s*\([^)]*\))?(?=\s*(?:$|[,;.]|\b(?:no\s+(?:job|site|photo|pic|paperwork|sign|tailgate|ems)|crew|missing|incomplete|hazard|ppe|signature|sign|blank|wrong|did|not|only|need|please|identify|photo|paperwork)\b|[A-Z]))/gi,
     ' '
   );
   stripped = stripped
@@ -6795,6 +6795,7 @@ function _parseJhaFailureComments(rawComments, refDate) {
     if (/paperwork|attach|pdf|upload|doc(?:ument)?/i.test(stripped)) addCat('Missing Paperwork');
     if (/dut(?:y|ies)|position|role|crew\s+member/i.test(stripped)) addCat('Crew Duties');
     if (/sign(?:ature|ed|ing)?|initial/i.test(stripped)) addCat('Missing Signature');
+    if (/\bems\b|emergency|ph(?:one)?\s*#/i.test(stripped)) addCat('Missing EMS Info');
     if (/hazard|control|mitigat|ppe|tailgate|brief|incomplete|blank|detail|identify/i.test(stripped) && categories.length === 0) {
       addCat('Incomplete / Quality');
     }
@@ -7054,23 +7055,52 @@ function scanJhaFailureEmails(options) {
       }
     }
 
+    var getFySiblings = function(jobNum) {
+      var m = String(jobNum || '').match(/^(\d{2,4})-(\d{2})$/);
+      if (!m) return [];
+      var yy = parseInt(m[2], 10);
+      var plus = m[1] + '-' + (yy + 1 < 10 ? '0' + (yy + 1) : String(yy + 1));
+      var minus = yy > 0 ? (m[1] + '-' + (yy - 1 < 10 ? '0' + (yy - 1) : String(yy - 1))) : '';
+      return minus ? [plus, minus] : [plus];
+    };
+
     var resolveForemanForJobWeek = function(jobNum, weekStr, weekMs) {
-      if (scByJobWeek[jobNum + '|' + weekStr]) return scByJobWeek[jobNum + '|' + weekStr];
-      var list = scWeeksByJob[jobNum];
-      if (list && list.length > 0 && weekMs) {
-        var bestFm = '';
-        var bestDiff = Number.MAX_SAFE_INTEGER;
-        for (var i = 0; i < list.length; i++) {
-          var diff = Math.abs(list[i].weekMs - weekMs);
-          if (diff < bestDiff) {
-            bestDiff = diff;
-            bestFm = list[i].foreman;
+      var lookupOne = function(jn) {
+        if (scByJobWeek[jn + '|' + weekStr]) return scByJobWeek[jn + '|' + weekStr];
+        var list = scWeeksByJob[jn];
+        if (list && list.length > 0 && weekMs) {
+          var bestFm = '';
+          var bestDiff = Number.MAX_SAFE_INTEGER;
+          for (var i = 0; i < list.length; i++) {
+            var diff = Math.abs(list[i].weekMs - weekMs);
+            if (diff < bestDiff) {
+              bestDiff = diff;
+              bestFm = list[i].foreman;
+            }
           }
+          if (bestFm) return bestFm;
         }
-        if (bestFm) return bestFm;
+        if (jtByJob[jn] && jtByJob[jn].foreman) return jtByJob[jn].foreman;
+        return '';
+      };
+
+      var direct = lookupOne(jobNum);
+      if (direct) return direct;
+      var sibs = getFySiblings(jobNum);
+      for (var s = 0; s < sibs.length; s++) {
+        var sibFm = lookupOne(sibs[s]);
+        if (sibFm) return sibFm;
       }
-      if (jtByJob[jobNum] && jtByJob[jobNum].foreman) return jtByJob[jobNum].foreman;
       return '';
+    };
+
+    var resolveJtInfoForJob = function(jobNum) {
+      if (jtByJob[jobNum]) return jtByJob[jobNum];
+      var sibs = getFySiblings(jobNum);
+      for (var s = 0; s < sibs.length; s++) {
+        if (jtByJob[sibs[s]]) return jtByJob[sibs[s]];
+      }
+      return {};
     };
 
     var allHistory = options.allHistory === true || options.rescan === true;
@@ -7116,7 +7146,7 @@ function scanJhaFailureEmails(options) {
             continue;
           }
 
-          var jtInfo = jtByJob[item.jobNumber] || {};
+          var jtInfo = resolveJtInfoForJob(item.jobNumber);
           var foreman = resolveForemanForJobWeek(item.jobNumber, item.weekStartStr, item.weekStartMs);
           var location = jtInfo.location || '';
           var jobName = jtInfo.jobName || item.emailJobName || '';

@@ -4443,7 +4443,7 @@ class SafetyEmailsEngine {
     }
 
     let stripped = raw.replace(
-      /(?:^|[\s,;.-]+)(?:no|missing)\s+jha'?s?(?:\s+(?:submitted|received|turned\s+in|on|for))?(?:\s*(?:[:\-]\s*)?(?:(?:and|&)\s+)?\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?(?:\s*(?:,|&|and|\-|to)\s*\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)*)?(?=\s*(?:$|[,;.]|\b(?:no\s+(?:job|site|photo|pic|paperwork|sign|tailgate)|crew|missing|incomplete|hazard|ppe|signature|sign|blank|wrong|did|not|only|need|please|identify|photo|paperwork)\b|[A-Z]))/gi,
+      /(?:^|[\s,;.-]+)(?:no|missing)\s+jha'?s?(?:\s+(?:submitted|received|turned\s+in|on|for))?(?:\s*(?:[:\-]\s*)?(?:(?:and|&)\s+)?\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?(?:\s*(?:,|&|and|\-|to)\s*\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)*)?(?:\s*\([^)]*\))?(?=\s*(?:$|[,;.]|\b(?:no\s+(?:job|site|photo|pic|paperwork|sign|tailgate|ems)|crew|missing|incomplete|hazard|ppe|signature|sign|blank|wrong|did|not|only|need|please|identify|photo|paperwork)\b|[A-Z]))/gi,
       ' '
     );
     stripped = stripped
@@ -4461,6 +4461,7 @@ class SafetyEmailsEngine {
       if (/paperwork|attach|pdf|upload|doc(?:ument)?/i.test(stripped)) addCat('Missing Paperwork');
       if (/dut(?:y|ies)|position|role|crew\s+member/i.test(stripped)) addCat('Crew Duties');
       if (/sign(?:ature|ed|ing)?|initial/i.test(stripped)) addCat('Missing Signature');
+      if (/\bems\b|emergency|ph(?:one)?\s*#/i.test(stripped)) addCat('Missing EMS Info');
       if (/hazard|control|mitigat|ppe|tailgate|brief|incomplete|blank|detail|identify/i.test(stripped) && categories.length === 0) {
         addCat('Incomplete / Quality');
       }
@@ -4525,9 +4526,11 @@ class SafetyEmailsEngine {
     if (!hasQualityIssue) return null;
 
     const rawCats = String(row['Failure Categories'] || '').trim();
-    const categories = rawCats && rawCats.toLowerCase() !== 'no jha only'
-      ? rawCats.split(',').map(s => s.trim()).filter(Boolean)
-      : parsed.categories;
+    const categories = (parsed.categories && parsed.categories.length > 0 && parsed.categories[0] !== 'No JHA Only')
+      ? parsed.categories
+      : (rawCats && rawCats.toLowerCase() !== 'no jha only'
+          ? rawCats.split(',').map(s => s.trim()).filter(Boolean)
+          : ['Quality Issue']);
 
     const affectedDates = parsed.affectedDates.length > 0
       ? parsed.affectedDates
@@ -4566,6 +4569,36 @@ class SafetyEmailsEngine {
   }
 
   /**
+   * Resolves a base job number against a weekly JHA Fails Map, with safe FY-adjacent fallback
+   * (e.g. Safety Compliance lists 036-26 while EcoOnline lists 036-27, or 010-27 vs 010-26 on FY rollover).
+   * Only uses a sibling when that sibling is not already its own active crew in the week.
+   */
+  findQualityJhaFailInMap(weekMap, jobNum, activeBaseJobsInWeek = null) {
+    if (!weekMap || weekMap.size === 0) return null;
+    const rawJob = String(jobNum || '').trim();
+    const jm = rawJob.match(/^(\d{2,4}-\d{2})/);
+    const baseJob = jm ? jm[1] : rawJob.replace(/\s*\([^)]*\)/g, '').replace(/\.\d+.*$/, '').trim();
+    if (!baseJob) return null;
+    if (weekMap.has(baseJob)) return weekMap.get(baseJob);
+
+    const parts = baseJob.match(/^(\d{2,4})-(\d{2})$/);
+    if (parts) {
+      const prefix = parts[1];
+      const yy = parseInt(parts[2], 10);
+      const candidates = [
+        `${prefix}-${String(yy + 1).padStart(2, '0')}`,
+        `${prefix}-${String(Math.max(0, yy - 1)).padStart(2, '0')}`
+      ];
+      for (const sib of candidates) {
+        if (weekMap.has(sib) && (!activeBaseJobsInWeek || !activeBaseJobsInWeek.has(sib))) {
+          return weekMap.get(sib);
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
    * Returns Map(baseJob -> normalized Quality JHA Fail) for the specified Safety Compliance week.
    */
   getQualityJhaFailsForWeek(weekVal) {
@@ -4593,19 +4626,43 @@ class SafetyEmailsEngine {
    * Looks up a single crew's Quality JHA Fail for a given job number & week start.
    */
   getQualityJhaFailForCrewWeek(jobNum, weekVal) {
-    const rawJob = String(jobNum || '').trim();
-    const m = rawJob.match(/^(\d{2,4}-\d{2})/);
-    const baseJob = m ? m[1] : rawJob.replace(/\s*\([^)]*\)/g, '').replace(/\.\d+.*$/, '').trim();
-    if (!baseJob) return null;
-    return this.getQualityJhaFailsForWeek(weekVal).get(baseJob) || null;
+    const weekMap = this.getQualityJhaFailsForWeek(weekVal);
+    if (weekMap.size === 0) return null;
+    // Build active jobs set for the week so FY-sibling fallback never steals another active crew's fail
+    let activeJobs = null;
+    const scTbl = (this.db && typeof this.db.getTable === 'function') ? this.db.getTable('safety_compliance') : null;
+    const targetDt = this.parseDate(weekVal);
+    if (scTbl && Array.isArray(scTbl.rows) && targetDt) {
+      const targetSun = new Date(targetDt.getFullYear(), targetDt.getMonth(), targetDt.getDate() - targetDt.getDay(), 12, 0, 0);
+      const targetKey = `${String(targetSun.getMonth() + 1).padStart(2, '0')}/${String(targetSun.getDate()).padStart(2, '0')}/${targetSun.getFullYear()}`;
+      activeJobs = new Set();
+      scTbl.rows.forEach(r => {
+        const rd = this.parseDate(r['Week Start'] || r['Week'] || '');
+        if (!rd) return;
+        const rSun = new Date(rd.getFullYear(), rd.getMonth(), rd.getDate() - rd.getDay(), 12, 0, 0);
+        const rKey = `${String(rSun.getMonth() + 1).padStart(2, '0')}/${String(rSun.getDate()).padStart(2, '0')}/${rSun.getFullYear()}`;
+        if (rKey !== targetKey) return;
+        const rawJn = String(r['Job Number'] || r['Job #'] || r['Crew'] || '').trim();
+        const jm = rawJn.match(/^(\d{2,4}-\d{2})/);
+        const bj = jm ? jm[1] : rawJn.replace(/\s*\([^)]*\)/g, '').replace(/\.\d+.*$/, '').trim();
+        if (bj) activeJobs.add(bj);
+      });
+    }
+    return this.findQualityJhaFailInMap(weekMap, jobNum, activeJobs);
   }
 
   /**
    * Scans Gmail for EcoOnline Field iD "JHA Completed w Failure Last Week" emails via Apps Script,
-   * updates localDB.tables.jha_failures, and refreshes Safety Compliance & Foreman Report Cards.
+   * updates localDB.tables.jha_failures safely in-place (without overwriting concurrent edits),
+   * and refreshes Safety Compliance & Foreman Report Cards.
    */
-  async scanJhaFailureEmails({ daysBack = 30, allHistory = false, rescan = false, silent = false } = {}) {
-    if (this._isScanningJhaFailures) return { success: false, skipped: true };
+  async scanJhaFailureEmails({ daysBack = 30, allHistory = false, rescan = false, silent = false, _depth = 0 } = {}) {
+    if (this._isScanningJhaFailures && _depth === 0) {
+      if (!silent && typeof window.showToast === 'function') {
+        window.showToast('⏳ JHA Fails scan is already running in the background…', 'info');
+      }
+      return { success: false, skipped: true };
+    }
     if (window.currentRoleMode === 'view_only') return { success: false, error: 'View only mode' };
 
     const syncUrl = window.syncEngine ? window.syncEngine.getSyncUrl() : '';
@@ -4617,42 +4674,72 @@ class SafetyEmailsEngine {
     }
 
     // Automatically run full historical backfill the first time JHA Failures is empty
-    const snap = (this.db && typeof this.db.getSnapshot === 'function') ? this.db.getSnapshot() : (this.db ? this.db.snapshot : null);
-    const existingTbl = snap && snap.tables ? snap.tables['jha_failures'] : null;
+    const preSnap = (this.db && typeof this.db.getSnapshot === 'function') ? this.db.getSnapshot() : (this.db ? this.db.snapshot : null);
+    const existingTbl = preSnap && preSnap.tables ? preSnap.tables['jha_failures'] : null;
     const isFirstBackfill = !existingTbl || !Array.isArray(existingTbl.rows) || existingTbl.rows.length === 0;
     const effectiveAllHistory = Boolean(allHistory || rescan || isFirstBackfill);
 
-    const btn = !silent ? document.getElementById('btn-scan-jha-failures') : null;
-    const origBtnHtml = btn ? btn.innerHTML : '';
-    if (btn) {
+    // Always reflect active scan state on the toolbar button (even during startup background scan)
+    const btn = document.getElementById('btn-scan-jha-failures');
+    if (btn && _depth === 0) {
+      if (!btn.dataset.origHtml) btn.dataset.origHtml = btn.innerHTML;
       btn.disabled = true;
       btn.innerHTML = effectiveAllHistory ? '⏳ Backfilling JHA Fails…' : '⏳ Scanning JHA Fails…';
     }
 
     this._isScanningJhaFailures = true;
+    // Update Safety Compliance filter chip to indicate an active scan if currently visible with 0 loaded
+    if (_depth === 0 && isFirstBackfill && window.sheetNavigator && typeof window.sheetNavigator.renderSafetyCompliance === 'function') {
+      const scView = document.getElementById('safety-compliance-view');
+      if (scView && scView.classList.contains('active')) {
+        window.sheetNavigator.renderSafetyCompliance();
+      }
+    }
+
     try {
       const response = await window.syncEngine.executeNetworkRequest(syncUrl, 'POST', {
         action: 'scanJhaFailureEmails',
         daysBack,
         allHistory: effectiveAllHistory,
-        rescan
+        rescan: Boolean(rescan && _depth === 0)
       }, 90000);
 
       if (response && response.success) {
-        if (response.table && snap && snap.tables) {
-          snap.tables['jha_failures'] = response.table;
-          if (this.db && typeof this.db.setSnapshot === 'function') {
-            await this.db.setSnapshot(snap);
-          } else if (this.db && typeof this.db.persistSnapshot === 'function') {
-            await this.db.persistSnapshot(snap);
+        // Grab the CURRENT snapshot after the async call so we never clobber concurrent edits/scans
+        const liveSnap = (this.db && typeof this.db.getSnapshot === 'function') ? this.db.getSnapshot() : (this.db ? this.db.snapshot : null);
+        if (response.table && liveSnap) {
+          if (!liveSnap.tables) liveSnap.tables = {};
+          liveSnap.tables['jha_failures'] = response.table;
+          if (typeof this.db.markTableDirty === 'function') {
+            this.db.markTableDirty('jha_failures');
+          }
+          if (typeof this.db._invalidateIndices === 'function') {
+            this.db._invalidateIndices();
+          }
+          if (typeof this.db.persistSnapshot === 'function') {
+            await this.db.persistSnapshot(liveSnap);
+          }
+          if (typeof this.db.notify === 'function') {
+            this.db.notify();
           }
         }
 
-        if (window.sheetNavigator && typeof window.sheetNavigator.renderSafetyCompliance === 'function') {
-          const scView = document.getElementById('safety-compliance-view');
-          if (scView && scView.classList.contains('active')) {
+        // Auto-continue if Apps Script hit its 22s circuit breaker during initial historical backfill
+        if (response.hasMore && (response.newCount || 0) > 0 && _depth < 3) {
+          if (window.sheetNavigator && typeof window.sheetNavigator.renderSafetyCompliance === 'function') {
             window.sheetNavigator.renderSafetyCompliance();
           }
+          return await this.scanJhaFailureEmails({
+            daysBack,
+            allHistory: true,
+            rescan: false,
+            silent,
+            _depth: _depth + 1
+          });
+        }
+
+        if (window.sheetNavigator && typeof window.sheetNavigator.renderSafetyCompliance === 'function') {
+          window.sheetNavigator.renderSafetyCompliance();
         }
         if (window.foremanReportCardEngine) {
           window.foremanReportCardEngine.cachedModel = null;
@@ -4684,10 +4771,19 @@ class SafetyEmailsEngine {
       }
       return { success: false, error: err.message };
     } finally {
-      this._isScanningJhaFailures = false;
-      if (btn) {
-        btn.disabled = false;
-        btn.innerHTML = origBtnHtml;
+      if (_depth === 0) {
+        this._isScanningJhaFailures = false;
+        const curBtn = document.getElementById('btn-scan-jha-failures');
+        if (curBtn) {
+          curBtn.disabled = false;
+          curBtn.innerHTML = curBtn.dataset.origHtml || '<span>⚠️</span> JHA Fails';
+        }
+        if (window.sheetNavigator && typeof window.sheetNavigator.renderSafetyCompliance === 'function') {
+          const scView = document.getElementById('safety-compliance-view');
+          if (scView && scView.classList.contains('active')) {
+            window.sheetNavigator.renderSafetyCompliance();
+          }
+        }
       }
     }
   }

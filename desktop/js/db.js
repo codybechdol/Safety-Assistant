@@ -378,11 +378,12 @@ class LocalDatabase {
         }
         snapshot = this.snapshot;
       } else if (this.snapshot && this.snapshot.tables && snapshot.tables) {
-        // Protect local history from being wiped out if incoming snapshot is missing history tables
+        // Protect local history & scanned Gmail tables from being wiped out if incoming snapshot is missing them
         const historyTableKeys = [
           'gloves_history', 'sleeves_history', 'blankets_history', 'macks_history',
           'hv_testers_history', 'phasing_sets_history', 'aed_history', 'grounds_history',
-          'hot_sticks_history', 'employee_history'
+          'hot_sticks_history', 'employee_history',
+          'jha_failures', 'site_audits', 'incident_reports'
         ];
 
         historyTableKeys.forEach(histKey => {

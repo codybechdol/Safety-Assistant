@@ -4895,19 +4895,23 @@ class TripPlannerApp {
     return false;
   }
 
-  showToast(msg, isError = false) {
+  showToast(msg, typeOrIsError = false) {
     const existing = document.getElementById('app-toast');
     if (existing) {
       if (typeof existing.remove === 'function') existing.remove();
       else if (existing.parentNode) existing.parentNode.removeChild(existing);
     }
+    let bg = '#10b981';
+    if (typeOrIsError === true || typeOrIsError === 'error') bg = '#ef4444';
+    else if (typeOrIsError === 'warning') bg = '#d97706';
+    else if (typeOrIsError === 'info') bg = '#2563eb';
     const toast = document.createElement('div');
     toast.id = 'app-toast';
     toast.style.cssText = `
       position: fixed;
       bottom: 24px;
       right: 24px;
-      background: ${isError ? '#ef4444' : '#10b981'};
+      background: ${bg};
       color: #ffffff;
       padding: 10px 18px;
       border-radius: 8px;

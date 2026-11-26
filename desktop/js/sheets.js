@@ -1973,8 +1973,19 @@ class SheetNavigator {
     const weekJhaFailsMap = (window.safetyComplianceEngine && typeof window.safetyComplianceEngine.getQualityJhaFailsForWeek === 'function')
       ? window.safetyComplianceEngine.getQualityJhaFailsForWeek(this.selectedComplianceWeek)
       : new Map();
+    const isScanningJhaFails = Boolean(window.safetyComplianceEngine && window.safetyComplianceEngine._isScanningJhaFailures);
+    const activeBaseJobsInWeek = new Set();
+    weekRows.forEach(r => {
+      const rawJn = String(r['Job Number'] || r['Job #'] || r['Crew'] || '').trim();
+      const jm = rawJn.match(/^(\d{2,4}-\d{2})/);
+      const bj = jm ? jm[1] : rawJn.replace(/\s*\([^)]*\)/g, '').replace(/\.\d+.*$/, '').trim();
+      if (bj) activeBaseJobsInWeek.add(bj);
+    });
     const getRowJhaFail = (r) => {
       const rawJn = String(r['Job Number'] || r['Job #'] || r['Crew'] || '').trim();
+      if (window.safetyComplianceEngine && typeof window.safetyComplianceEngine.findQualityJhaFailInMap === 'function') {
+        return window.safetyComplianceEngine.findQualityJhaFailInMap(weekJhaFailsMap, rawJn, activeBaseJobsInWeek);
+      }
       const jm = rawJn.match(/^(\d{2,4}-\d{2})/);
       const baseJn = jm ? jm[1] : rawJn.replace(/\s*\([^)]*\)/g, '').replace(/\.\d+.*$/, '').trim();
       return weekJhaFailsMap.get(baseJn) || null;
@@ -2112,7 +2123,7 @@ class SheetNavigator {
               📝 Missing Monthly Checklist
             </div>
             <div class="cards-filter-chip ${curFilter === 'jha_fails' ? 'active' : ''}" style="color: #fbbf24;" onclick="window.sheetNavigator.setComplianceCardFilter('jha_fails')">
-              ⚠️ JHA Quality Fails (${jhaFailCount})
+              ${isScanningJhaFails && jhaFailCount === 0 ? '⏳ Scanning JHA Fails…' : `⚠️ JHA Quality Fails (${jhaFailCount})`}
             </div>
             <div class="cards-filter-chip ${curFilter === 'compliant' ? 'active' : ''}" style="color: #4ade80;" onclick="window.sheetNavigator.setComplianceCardFilter('compliant')">
               ✅ 100% Compliant (${compCount})

@@ -396,7 +396,7 @@ class ForemanReportCardEngine {
     }
 
     let stripped = raw.replace(
-      /(?:^|[\s,;.-]+)(?:no|missing)\s+jha'?s?(?:\s+(?:submitted|received|turned\s+in|on|for))?(?:\s*(?:[:\-]\s*)?(?:(?:and|&)\s+)?\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?(?:\s*(?:,|&|and|\-|to)\s*\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)*)?(?=\s*(?:$|[,;.]|\b(?:no\s+(?:job|site|photo|pic|paperwork|sign|tailgate)|crew|missing|incomplete|hazard|ppe|signature|sign|blank|wrong|did|not|only|need|please|identify|photo|paperwork)\b|[A-Z]))/gi,
+      /(?:^|[\s,;.-]+)(?:no|missing)\s+jha'?s?(?:\s+(?:submitted|received|turned\s+in|on|for))?(?:\s*(?:[:\-]\s*)?(?:(?:and|&)\s+)?\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?(?:\s*(?:,|&|and|\-|to)\s*\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)*)?(?:\s*\([^)]*\))?(?=\s*(?:$|[,;.]|\b(?:no\s+(?:job|site|photo|pic|paperwork|sign|tailgate|ems)|crew|missing|incomplete|hazard|ppe|signature|sign|blank|wrong|did|not|only|need|please|identify|photo|paperwork)\b|[A-Z]))/gi,
       ' '
     );
     stripped = stripped
@@ -414,6 +414,7 @@ class ForemanReportCardEngine {
       if (/paperwork|attach|pdf|upload|doc(?:ument)?/i.test(stripped)) addCat('Missing Paperwork');
       if (/dut(?:y|ies)|position|role|crew\s+member/i.test(stripped)) addCat('Crew Duties');
       if (/sign(?:ature|ed|ing)?|initial/i.test(stripped)) addCat('Missing Signature');
+      if (/\bems\b|emergency|ph(?:one)?\s*#/i.test(stripped)) addCat('Missing EMS Info');
       if (/hazard|control|mitigat|ppe|tailgate|brief|incomplete|blank|detail|identify/i.test(stripped) && categories.length === 0) {
         addCat('Incomplete / Quality');
       }
@@ -730,7 +731,9 @@ class ForemanReportCardEngine {
           secondaryJobRank,
           classification,
           classRank: CLASS_RANK[classification.toUpperCase()] || 50,
-          isCrewLead
+          isCrewLead,
+          hireDate: this.parseDate(r['Hire Date']),
+          lastDay: this.parseDate(r['Last Day'])
         };
         empByCanonical.set(canonical, info);
 
@@ -750,6 +753,7 @@ class ForemanReportCardEngine {
     // never create phantom foreman report cards or trigger false Handed Off badges.
     const validPeopleSet = new Set(empByCanonical.keys());
     const prevPeopleSet = new Set();
+    const prevEmpMeta = new Map(); // canonical -> { hireDate, lastDay, primaryJob }
     empByCanonical.forEach((info, canonical) => {
       if (!info.isActive) prevPeopleSet.add(canonical);
     });
@@ -763,6 +767,13 @@ class ForemanReportCardEngine {
         if (canonical && !this.isNonForemanLabel(canonical)) {
           validPeopleSet.add(canonical);
           if (!empByCanonical.has(canonical)) prevPeopleSet.add(canonical);
+          if (tblKey === 'previous_employees') {
+            prevEmpMeta.set(canonical, {
+              hireDate: this.parseDate(r['Hire Date']),
+              lastDay: this.parseDate(r['Last Day']),
+              primaryJob: this.getBaseJobNumber(r['Job Number'] || r['Job #'] || '')
+            });
+          }
         }
       });
     });
@@ -1454,7 +1465,7 @@ class ForemanReportCardEngine {
       const checkDt = dueDt || sundayDt;
       if (checkDt < period.start || checkDt > period.end) return;
 
-      const baseJob = this.getBaseJobNumber(jf['Job #'] || jf['Job Number'] || '');
+      let baseJob = this.getBaseJobNumber(jf['Job #'] || jf['Job Number'] || '');
       const rawComments = String(jf['Raw Comments'] || jf['Comments'] || '').trim();
       const parsed = this.parseJhaFailureComments(rawComments || jf['Quality Comments'] || '', dueDt || sundayDt);
       const sheetFlag = String(jf['Has Quality Issue'] || '').trim().toLowerCase();
@@ -1462,15 +1473,38 @@ class ForemanReportCardEngine {
       const hasQualityIssue = Boolean(qualityComments) && sheetFlag !== 'no' && sheetFlag !== 'false';
       if (!hasQualityIssue) return;
 
+      // Resolve FY-adjacent job number if EcoOnline used -27 while SC/JT still uses -26 (e.g. 036-27 -> 036-26)
+      // or EcoOnline used -26 during FY rollover week while SC already rolled to -27 (e.g. 010-26 -> 010-27)
+      const wsKeyCheck = this.dateKey(sundayDt);
+      const jobHasExactScWeek = (jn) => {
+        const wks = scWeeksByJobForLookup.get(jn);
+        return Boolean(wks && wks.some(w => w.weekStartKey === wsKeyCheck));
+      };
+      if (baseJob && !jobHasExactScWeek(baseJob)) {
+        const jp = baseJob.match(/^(\d{2,4})-(\d{2})$/);
+        if (jp) {
+          const yy = parseInt(jp[2], 10);
+          const sibs = [
+            `${jp[1]}-${String(yy + 1).padStart(2, '0')}`,
+            `${jp[1]}-${String(Math.max(0, yy - 1)).padStart(2, '0')}`
+          ];
+          const matchedSib = sibs.find(s => jobHasExactScWeek(s))
+            || (!jtByBaseJob.has(baseJob) && !scWeeksByJobForLookup.has(baseJob) ? sibs.find(s => jtByBaseJob.has(s) || scWeeksByJobForLookup.has(s)) : null);
+          if (matchedSib) baseJob = matchedSib;
+        }
+      }
+
       const jt = baseJob ? (jtByBaseJob.get(baseJob) || findFySuccessor(baseJob)) : null;
       const storedFm = this.resolveCanonicalName(jf['Foreman'] || '', aliasMap);
       const jobForeman = baseJob ? resolveJobForemanOnDate(baseJob, dueDt || sundayDt) : '';
       const foreman = jobForeman || storedFm;
 
       const rawCats = String(jf['Failure Categories'] || '').trim();
-      const categories = rawCats && rawCats.toLowerCase() !== 'no jha only'
-        ? rawCats.split(',').map(s => s.trim()).filter(Boolean)
-        : parsed.categories;
+      const categories = (parsed.categories && parsed.categories.length > 0 && parsed.categories[0] !== 'No JHA Only')
+        ? parsed.categories
+        : (rawCats && rawCats.toLowerCase() !== 'no jha only'
+            ? rawCats.split(',').map(s => s.trim()).filter(Boolean)
+            : ['Quality Issue']);
       const affectedDates = parsed.affectedDates.length > 0
         ? parsed.affectedDates
         : String(jf['Affected Dates'] || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -1838,6 +1872,234 @@ class ForemanReportCardEngine {
     }
 
     // -----------------------------------------------------------------------
+    // 8b. Index All-Roles Workday History (Crew Roster Snapshots + Employee History + SC)
+    //     Allows showing both "Days as Foreman" (matching JHA denominator) AND a secondary
+    //     "All roles: XXXd" count across Foreman + Journeyman/Operator/Apprentice roles.
+    // -----------------------------------------------------------------------
+    const scDaysByJobWeek = new Map(); // `${baseJob}|${wsKey}` -> { Sun..Sat: 'worked'|'holiday' }
+    const allScWeeksMap = new Map();   // wsKey -> Date(Sunday noon)
+    if (scTable && Array.isArray(scTable.rows)) {
+      scTable.rows.forEach(r => {
+        const ws = this.parseDate(r['Week Start'] || r['Week']);
+        if (!ws) return;
+        const sun = new Date(ws.getFullYear(), ws.getMonth(), ws.getDate() - ws.getDay(), 12, 0, 0);
+        const wsKey = this.dateKey(sun);
+        if (!allScWeeksMap.has(wsKey)) allScWeeksMap.set(wsKey, sun);
+        const bj = this.getBaseJobNumber(r['Job Number'] || r['Crew'] || r['Job #'] || '');
+        if (!bj) return;
+        const k = `${bj}|${wsKey}`;
+        if (!scDaysByJobWeek.has(k)) scDaysByJobWeek.set(k, {});
+        const entry = scDaysByJobWeek.get(k);
+        DAYS.forEach(d => {
+          const st = this.classifyDayCell(r[d]);
+          if (st === 'onTime' || st === 'late' || st === 'missing') entry[d] = 'worked';
+          else if (!entry[d] && st === 'holiday') entry[d] = 'holiday';
+        });
+      });
+    }
+    const periodScWeeks = Array.from(allScWeeksMap.entries())
+      .filter(([, sun]) => {
+        const sat = new Date(sun.getTime() + 6 * 86400000);
+        return sat >= period.start && sun <= period.end;
+      })
+      .sort((a, b) => a[1].getTime() - b[1].getTime());
+
+    const snapshotObj = this.db
+      ? (typeof this.db.getSnapshot === 'function' ? this.db.getSnapshot() : this.db.snapshot)
+      : null;
+
+    const holidaysDateSet = new Set();
+    const rawHols = (snapshotObj && snapshotObj.configs && snapshotObj.configs.holidays) || [];
+    if (Array.isArray(rawHols)) {
+      rawHols.forEach(h => {
+        const d = this.parseDate((h && typeof h === 'object') ? h.date : h);
+        if (d) holidaysDateSet.add(this.dateKey(d));
+      });
+    }
+
+    // Index Job Tracking skip-day schedules for fallback when a field job predates SC rows
+    const jtSkipByJob = new Map();
+    const DEFAULT_WORKWEEK_SKIP = { Sun: true, Mon: false, Tue: false, Wed: false, Thu: false, Fri: true, Sat: true };
+    if (jtTable && Array.isArray(jtTable.rows)) {
+      jtTable.rows.forEach(r => {
+        const bj = this.getBaseJobNumber(r['Job Number'] || r['Job #'] || '');
+        if (!bj) return;
+        const skipMap = {};
+        DAYS.forEach(d => {
+          const v = r[`Skip ${d}`];
+          skipMap[d] = v === true || String(v || '').toLowerCase() === 'true';
+        });
+        if (Object.values(skipMap).some(Boolean)) jtSkipByJob.set(bj, skipMap);
+      });
+    }
+
+    // Index Crew Roster History weekly snapshots (when present for a week)
+    // wsKey -> Map(canonicalName -> { job, isOff, skipMap })
+    const rosterByWeek = new Map();
+    const rawRosterHist = (snapshotObj && snapshotObj.configs && snapshotObj.configs.crew_roster_history) || null;
+    if (rawRosterHist && typeof rawRosterHist === 'object') {
+      Object.entries(rawRosterHist).forEach(([wkRaw, wkData]) => {
+        if (!wkData || typeof wkData !== 'object') return;
+        const wd = this.parseDate(wkData.weekDate || wkRaw);
+        if (!wd) return;
+        const sun = new Date(wd.getFullYear(), wd.getMonth(), wd.getDate() - wd.getDay(), 12, 0, 0);
+        const wsKey = this.dateKey(sun);
+        const empMap = new Map();
+        if (Array.isArray(wkData.crews)) {
+          wkData.crews.forEach(c => {
+            const bj = this.getBaseJobNumber(c.jobNumber || '');
+            const cSkip = {
+              Sun: Boolean(c.isSkipSun), Mon: Boolean(c.isSkipMon), Tue: Boolean(c.isSkipTue),
+              Wed: Boolean(c.isSkipWed), Thu: Boolean(c.isSkipThu), Fri: Boolean(c.isSkipFri), Sat: Boolean(c.isSkipSat)
+            };
+            const hasSkip = Object.values(cSkip).some(Boolean);
+            (c.members || []).forEach(m => {
+              const nm = this.resolveCanonicalName(m && m.name ? m.name : '', aliasMap);
+              if (!nm) return;
+              empMap.set(nm, { job: bj, isOff: false, skipMap: hasSkip ? cSkip : null });
+            });
+          });
+        }
+        if (wkData.sidePane && typeof wkData.sidePane === 'object') {
+          const offBuckets = ['vacation', 'leave', 'quit', 'terminated', 'medical', 'workersComp'];
+          offBuckets.forEach(bk => {
+            const arr = wkData.sidePane[bk];
+            if (!Array.isArray(arr)) return;
+            arr.forEach(m => {
+              const nm = this.resolveCanonicalName(typeof m === 'string' ? m : (m && m.name ? m.name : ''), aliasMap);
+              if (nm && !empMap.has(nm)) empMap.set(nm, { job: '', isOff: true, skipMap: null });
+            });
+          });
+        }
+        if (empMap.size > 0) rosterByWeek.set(wsKey, empMap);
+      });
+    }
+
+    // Index Employee History chronological events per canonical employee
+    const OFF_LOC_RE = /\b(vacation|leave|medical|worker'?s?\s*comp|previous\s*employee|terminated|quit|layoff|laid\s*off|inactive)\b/i;
+    const OFF_EVT_RE = /\b(vacation|time\s*off|terminated|termination|quit|layoff|laid\s*off)\b/i;
+    const empHistByCanonical = new Map();
+    const ehTable = this.db ? this.db.getTable('employee_history') : null;
+    if (ehTable && Array.isArray(ehTable.rows)) {
+      ehTable.rows.forEach(r => {
+        const nm = this.resolveCanonicalName(r['Employee Name'] || r['Name'] || '', aliasMap);
+        const dt = this.parseDate(r['Date']);
+        if (!nm || !dt) return;
+        if (!empHistByCanonical.has(nm)) empHistByCanonical.set(nm, []);
+        empHistByCanonical.get(nm).push({
+          date: dt,
+          rowIdx: r._rowIdx || 0,
+          job: this.getBaseJobNumber(r['Job Number'] || r['Job #'] || ''),
+          loc: String(r['Location'] || '').trim(),
+          evt: String(r['Event Type'] || '').trim()
+        });
+      });
+      empHistByCanonical.forEach(list => list.sort((a, b) => (a.date.getTime() - b.date.getTime()) || (a.rowIdx - b.rowIdx)));
+    }
+
+    const computeAllRolesDaysForForeman = (foremanName, jobsList, empInfoObj) => {
+      const foremanDateSet = new Set();
+      const foremanWeekSet = new Set();
+      jobsList.forEach(j => {
+        (j.weeks || []).forEach(w => {
+          const wsKey = this.dateKey(w.weekStart);
+          DAYS.forEach((d, idx) => {
+            const st = w.days && w.days[d];
+            if (st === 'onTime' || st === 'late' || st === 'missing') {
+              const dDt = new Date(w.weekStart.getTime() + idx * 86400000);
+              foremanDateSet.add(this.dateKey(dDt));
+              foremanWeekSet.add(wsKey);
+            }
+          });
+        });
+      });
+
+      const allRoleDates = new Set(foremanDateSet);
+      const prevMeta = prevEmpMeta.get(foremanName);
+      const rawHire = (empInfoObj && empInfoObj.hireDate) || (prevMeta && prevMeta.hireDate) || null;
+      const lastDayDt = (empInfoObj && empInfoObj.lastDay) || (prevMeta && prevMeta.lastDay) || null;
+      const curJob = (empInfoObj && empInfoObj.primaryJob) || (prevMeta && prevMeta.primaryJob) || '';
+      const events = empHistByCanonical.get(foremanName) || [];
+      const earliestEvDt = events.length > 0 ? events[0].date : null;
+      const effectiveHire = (rawHire && earliestEvDt && earliestEvDt < rawHire) ? earliestEvDt : rawHire;
+      const maxDay = period.today < period.end ? period.today : period.end;
+
+      periodScWeeks.forEach(([wsKey, sun]) => {
+        if (foremanWeekSet.has(wsKey)) return;
+        const sat = new Date(sun.getTime() + 6 * 86400000);
+        if (effectiveHire && sat < effectiveHire) return;
+        if (lastDayDt && sun > lastDayDt) return;
+
+        let assignedJob = '';
+        let isOff = false;
+        let rosterSkip = null;
+
+        const wkRoster = rosterByWeek.get(wsKey);
+        if (wkRoster && wkRoster.has(foremanName)) {
+          const rInfo = wkRoster.get(foremanName);
+          assignedJob = rInfo.job;
+          isOff = rInfo.isOff;
+          rosterSkip = rInfo.skipMap;
+        } else {
+          const cutDt = new Date(sun.getTime() + 4 * 86400000);
+          let latest = null;
+          for (let i = 0; i < events.length; i++) {
+            if (events[i].date <= cutDt) latest = events[i];
+            else break;
+          }
+          if (!latest && events.length > 0 && effectiveHire && effectiveHire <= sun && effectiveHire < new Date(2025, 11, 1)) {
+            latest = events[0];
+          }
+          if (latest) {
+            assignedJob = latest.job;
+            if (OFF_LOC_RE.test(latest.loc) || OFF_EVT_RE.test(latest.evt)) isOff = true;
+          } else if (curJob && effectiveHire && effectiveHire <= sun) {
+            assignedJob = curJob;
+          }
+        }
+
+        if (isOff || !assignedJob || assignedJob.startsWith('002-')) return;
+
+        let scEntry = scDaysByJobWeek.get(`${assignedJob}|${wsKey}`);
+        if (!scEntry) {
+          const jp = assignedJob.match(/^(\d{2,4})-(\d{2})$/);
+          if (jp) {
+            const yy = parseInt(jp[2], 10);
+            scEntry = scDaysByJobWeek.get(`${jp[1]}-${String(yy + 1).padStart(2, '0')}|${wsKey}`)
+              || scDaysByJobWeek.get(`${jp[1]}-${String(Math.max(0, yy - 1)).padStart(2, '0')}|${wsKey}`);
+          }
+        }
+
+        if (scEntry) {
+          DAYS.forEach((d, idx) => {
+            const dDt = new Date(sun.getTime() + idx * 86400000);
+            if (dDt < period.start || dDt > period.end) return;
+            if (effectiveHire && dDt < effectiveHire) return;
+            if (lastDayDt && dDt > lastDayDt) return;
+            if (scEntry[d] === 'worked') allRoleDates.add(this.dateKey(dDt));
+          });
+        } else if (!assignedJob.startsWith('005-')) {
+          const skipMap = rosterSkip || jtSkipByJob.get(assignedJob) || DEFAULT_WORKWEEK_SKIP;
+          DAYS.forEach((d, idx) => {
+            if (skipMap[d]) return;
+            const dDt = new Date(sun.getTime() + idx * 86400000);
+            if (dDt < period.start || dDt > maxDay) return;
+            if (effectiveHire && dDt < effectiveHire) return;
+            if (lastDayDt && dDt > lastDayDt) return;
+            const dk = this.dateKey(dDt);
+            if (holidaysDateSet.has(dk)) return;
+            allRoleDates.add(dk);
+          });
+        }
+      });
+
+      return {
+        foremanUniqueDays: foremanDateSet.size,
+        totalDaysAllRoles: allRoleDates.size
+      };
+    };
+
+    // -----------------------------------------------------------------------
     // 9. Build Final Foreman Packets (Cover + Current State + Sorted Job Cards)
     // -----------------------------------------------------------------------
     const STATUS_SORT = { 'Active': 1, 'On Hold': 2, 'Handed Off': 3, 'FY Transition': 4, 'Completed': 5, 'Pending Start': 6 };
@@ -1945,8 +2207,11 @@ class ForemanReportCardEngine {
       });
 
       // Weighted YTD Cover Page Totals across ALL jobs in period
+      const allRolesStats = computeAllRolesDaysForForeman(foremanName, jobs, empInfo);
       const totals = {
         daysWorked: 0,
+        foremanUniqueDays: allRolesStats.foremanUniqueDays,
+        totalDaysAllRoles: allRolesStats.totalDaysAllRoles,
         totalJobs: jobs.length,
         activeJobsCount: 0,
         onHoldJobsCount: 0,
@@ -2765,10 +3030,10 @@ class ForemanReportCardEngine {
         <div class="frc-card-body">
           <!-- Cover Page 4 KPI Tiles -->
           <div class="frc-card-kpis">
-            <div class="frc-card-kpi" title="${co && !isWeeklyOnly ? `Company Avg: ${co.avgDaysWorked} days worked per field foreman` : ''}">
-              <div class="frc-card-kpi-lbl">${isWeeklyOnly ? 'Weeks' : 'Days'}</div>
-              <div class="frc-card-kpi-val">${isWeeklyOnly ? fm.ytdWeekly.expected : t.daysWorked}</div>
-              <div class="frc-card-kpi-sub">${isWeeklyOnly ? 'Weekly-only' : (co && co.avgDaysWorked > 0 ? `◆ Avg ${co.avgDaysWorked}` : 'Scheduled')}</div>
+            <div class="frc-card-kpi" title="${isWeeklyOnly ? 'Weekly-only reporting role' : `${t.daysWorked} scheduled workdays as Foreman${t.totalDaysAllRoles > 0 ? ` · ${t.totalDaysAllRoles} total workdays across all roles` : ''}${co && co.avgDaysWorked > 0 ? ` · Company Avg: ${co.avgDaysWorked}d as Foreman` : ''}`}">
+              <div class="frc-card-kpi-lbl">${isWeeklyOnly ? 'Weeks' : 'Foreman'}</div>
+              <div class="frc-card-kpi-val">${isWeeklyOnly ? fm.ytdWeekly.expected : `${t.daysWorked}d`}</div>
+              <div class="frc-card-kpi-sub">${isWeeklyOnly ? 'Weekly-only' : (t.totalDaysAllRoles > t.daysWorked ? `All: ${t.totalDaysAllRoles}d` : (co && co.avgDaysWorked > 0 ? `◆ Avg ${co.avgDaysWorked}d` : 'Scheduled'))}</div>
             </div>
             <div class="frc-card-kpi" title="${co ? `Company Avg: ${co.avgJobsWorked} jobs per foreman` : ''}">
               <div class="frc-card-kpi-lbl">Jobs</div>
@@ -3885,12 +4150,27 @@ class ForemanReportCardEngine {
 
       <!-- YTD KPI Summary Strip -->
       <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:9px;margin-bottom:16px;">
-        <div style="border:1.5px solid #cbd5e1;border-radius:6px;padding:10px 10px;background:#ffffff;text-align:center;">
-          <div style="font-size:9.5px;font-weight:800;text-transform:uppercase;color:#64748b;">${t.daysWorked === 0 && foreman.ytdWeekly.expected > 0 ? 'Weeks Tracked' : 'Days Worked'}</div>
-          <div style="font-size:21px;font-weight:900;color:#0f172a;margin:2px 0;">${t.daysWorked === 0 && foreman.ytdWeekly.expected > 0 ? foreman.ytdWeekly.expected : t.daysWorked}</div>
-          <div style="font-size:9.5px;color:#475569;font-weight:600;">${t.daysWorked === 0 && foreman.ytdWeekly.expected > 0 ? `Weekly-only` : `Workdays (${this.escapeHtml(period.shortLabel)})`}</div>
-          ${coAvg && coAvg.avgDaysWorked > 0 && !(t.daysWorked === 0 && foreman.ytdWeekly.expected > 0) ? `<div style="font-size:9px;color:#0369a1;font-weight:700;margin-top:3px;">◆ Co. avg: ${coAvg.avgDaysWorked}d</div>` : ''}
-        </div>
+        ${(() => {
+          const isWeeklyOnlyCover = t.daysWorked === 0 && foreman.ytdWeekly.expected > 0;
+          const allRolesDays = t.totalDaysAllRoles || 0;
+          const hasMultiJobOverlap = !isWeeklyOnlyCover && allRolesDays > 0 && allRolesDays < t.daysWorked;
+          const subLabel = isWeeklyOnlyCover
+            ? 'Weekly-only'
+            : (allRolesDays > 0
+                ? (hasMultiJobOverlap ? `All roles: ${allRolesDays} cal days` : `All roles: ${allRolesDays}d`)
+                : `Workdays (${period.shortLabel})`);
+          const tileTooltip = isWeeklyOnlyCover
+            ? `${foreman.ytdWeekly.expected} active weekly-only reporting weeks in ${period.shortLabel}`
+            : `${t.daysWorked} scheduled workday${t.daysWorked === 1 ? '' : 's'} as Foreman${hasMultiJobOverlap ? ` (${t.foremanUniqueDays || allRolesDays} unique calendar days across overlapping jobs)` : ''}${allRolesDays > 0 ? ` · ${allRolesDays} total scheduled workdays across all roles in ${period.shortLabel}` : ''}`;
+          return `
+            <div style="border:1.5px solid #cbd5e1;border-radius:6px;padding:10px 10px;background:#ffffff;text-align:center;" title="${this.escapeHtml(tileTooltip)}">
+              <div style="font-size:9.5px;font-weight:800;text-transform:uppercase;color:#64748b;">${isWeeklyOnlyCover ? 'Weeks Tracked' : 'Days as Foreman'}</div>
+              <div style="font-size:21px;font-weight:900;color:#0f172a;margin:2px 0;">${isWeeklyOnlyCover ? foreman.ytdWeekly.expected : t.daysWorked}</div>
+              <div style="font-size:9.5px;color:#475569;font-weight:700;">${this.escapeHtml(subLabel)}</div>
+              ${coAvg && coAvg.avgDaysWorked > 0 && !isWeeklyOnlyCover ? `<div style="font-size:9px;color:#0369a1;font-weight:700;margin-top:3px;">◆ Co. avg: ${coAvg.avgDaysWorked}d</div>` : ''}
+            </div>
+          `;
+        })()}
         <div style="border:1.5px solid #cbd5e1;border-radius:6px;padding:10px 10px;background:#ffffff;text-align:center;">
           <div style="font-size:9.5px;font-weight:800;text-transform:uppercase;color:#64748b;">Jobs Worked</div>
           <div style="font-size:21px;font-weight:900;color:#1d4ed8;margin:2px 0;">${t.totalJobs}</div>
