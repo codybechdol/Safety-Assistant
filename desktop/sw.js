@@ -3,7 +3,7 @@
  * Provides offline caching, network-first strategy, and background sync support.
  */
 
-const CACHE_NAME = 'safety-assistant-v159';
+const CACHE_NAME = 'safety-assistant-v160';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',

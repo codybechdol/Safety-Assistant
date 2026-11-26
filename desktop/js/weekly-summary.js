@@ -2531,7 +2531,19 @@ class WeeklySummaryEngine {
   renderTailgateWorkspace(targetScope = null) {
     if (window.foremanReportCardEngine) {
       if (targetScope && targetScope !== 'all') {
-        window.foremanReportCardEngine.onForemanChange(targetScope);
+        const eng = window.foremanReportCardEngine;
+        const model = eng.cachedModel || eng.buildDataModel();
+        if (model.foremenMap && model.foremenMap.has(targetScope)) {
+          eng.openForemanBook(targetScope);
+        } else {
+          const baseJob = typeof eng.getBaseJobNumber === 'function' ? eng.getBaseJobNumber(targetScope) : targetScope;
+          const owner = (model.foremen || []).find(f => f.jobs && f.jobs.some(j => j.jobNumber === baseJob));
+          if (owner) {
+            eng.openForemanBook(owner.name, baseJob);
+          } else {
+            eng.onForemanChange(targetScope);
+          }
+        }
       } else {
         window.foremanReportCardEngine.renderWorkspace();
       }

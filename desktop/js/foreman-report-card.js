@@ -41,6 +41,11 @@ class ForemanReportCardEngine {
     this.cachedModel = null;
     this._listenersInitialized = false;
     this._isAnimatingTurn = false;
+    this._turnToken = 0;
+    this._turnTimers = [];
+    this._lastBookForeman = '';
+    this._lastBookPrintScope = 'foreman';
+    this._autoSwitchedPrintScope = false;
 
     if (typeof window !== 'undefined') {
       window.foremanReportCardEngine = this;
@@ -55,10 +60,20 @@ class ForemanReportCardEngine {
     this._db = val;
   }
 
+  cancelPendingPageTurn() {
+    this._turnToken++;
+    if (Array.isArray(this._turnTimers) && this._turnTimers.length > 0) {
+      this._turnTimers.forEach(id => clearTimeout(id));
+      this._turnTimers = [];
+    }
+    this._isAnimatingTurn = false;
+  }
+
   init() {
     this.initBookNavigationListeners();
     if (this.db && typeof this.db.subscribe === 'function') {
       this.db.subscribe(() => {
+        this.cancelPendingPageTurn();
         this.cachedModel = null;
         if (this.isWorkspaceVisible()) {
           this.renderWorkspace({ preservePage: true });
@@ -92,7 +107,14 @@ class ForemanReportCardEngine {
     return String(str)
       .replace(/\\/g, '\\\\')
       .replace(/'/g, "\\'")
-      .replace(/"/g, '\\"');
+      .replace(/\r/g, '\\r')
+      .replace(/\n/g, '\\n')
+      .replace(/\u2028/g, '\\u2028')
+      .replace(/\u2029/g, '\\u2029')
+      .replace(/&/g, '&amp;')
+      .replace(/"/g, '&quot;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
   }
 
   parseDate(val) {
@@ -233,57 +255,50 @@ class ForemanReportCardEngine {
 
   buildEmployeeAliasLookup() {
     const aliasMap = new Map(); // normalized -> canonicalName
-    const empTable = this.db ? this.db.getTable('employees') : null;
-    if (!empTable || !Array.isArray(empTable.rows)) return aliasMap;
 
     const register = (key, canonical) => {
       const k = String(key || '').toLowerCase().replace(/\s+/g, ' ').trim();
       if (k && !aliasMap.has(k)) aliasMap.set(k, canonical);
     };
 
-    empTable.rows.forEach(r => {
-      const canonical = String(r['Employee Name'] || r['Name'] || '').trim();
+    const commonNicknames = {
+      matthew: ['matt'],
+      benjamin: ['ben'],
+      christian: ['chris'],
+      christopher: ['chris'],
+      james: ['jim', 'jimmy'],
+      jimmy: ['jim', 'james'],
+      joshua: ['josh'],
+      nicholas: ['nick'],
+      michael: ['mike'],
+      robert: ['rob', 'bob', 'bobby'],
+      william: ['will', 'bill', 'billy'],
+      joseph: ['joe'],
+      anthony: ['tony'],
+      daniel: ['dan', 'danny'],
+      jonathan: ['jon'],
+      timothy: ['tim'],
+      thomas: ['tom', 'tommy'],
+      david: ['dave'],
+      zachary: ['zach', 'zack'],
+      andrew: ['andy', 'drew'],
+      sydney: ['syd']
+    };
+
+    const registerNameAndNicknames = (canonical, altRaw = '') => {
       if (!canonical) return;
       register(canonical, canonical);
       const noHyphen = canonical.replace(/[-_]+/g, ' ');
       register(noHyphen, canonical);
 
-      // Register alternate names column variations
-      const altRaw = String(
-        r['Alternate Names'] || r['Alternative Names'] || r['Alt Names'] || r['AKA'] || ''
-      ).trim();
       if (altRaw) {
         altRaw.split(/[;,/]+/).forEach(a => register(a, canonical));
       }
 
-      // Common short first-name aliases (Matthew -> Matt, Benjamin -> Ben, Christian -> Chris, etc.)
       const parts = canonical.split(/\s+/);
       if (parts.length >= 2) {
         const first = parts[0].toLowerCase();
         const rest = parts.slice(1).join(' ');
-        const commonNicknames = {
-          matthew: ['matt'],
-          benjamin: ['ben'],
-          christian: ['chris'],
-          christopher: ['chris'],
-          james: ['jim', 'jimmy'],
-          jimmy: ['jim', 'james'],
-          joshua: ['josh'],
-          nicholas: ['nick'],
-          michael: ['mike'],
-          robert: ['rob', 'bob', 'bobby'],
-          william: ['will', 'bill', 'billy'],
-          joseph: ['joe'],
-          anthony: ['tony'],
-          daniel: ['dan', 'danny'],
-          jonathan: ['jon'],
-          timothy: ['tim'],
-          thomas: ['tom', 'tommy'],
-          david: ['dave'],
-          zachary: ['zach', 'zack'],
-          andrew: ['andy', 'drew'],
-          sydney: ['syd']
-        };
         if (commonNicknames[first]) {
           commonNicknames[first].forEach(nick => register(`${nick} ${rest}`, canonical));
         }
@@ -293,7 +308,19 @@ class ForemanReportCardEngine {
           register(`${parts[1]} ${parts[2]}`, canonical);
         }
       }
-    });
+    };
+
+    const empTable = this.db ? this.db.getTable('employees') : null;
+    if (empTable && Array.isArray(empTable.rows)) {
+      empTable.rows.forEach(r => {
+        const canonical = String(r['Employee Name'] || r['Name'] || '').trim();
+        if (!canonical) return;
+        const altRaw = String(
+          r['Alternate Names'] || r['Alternative Names'] || r['Alt Names'] || r['AKA'] || ''
+        ).trim();
+        registerNameAndNicknames(canonical, altRaw);
+      });
+    }
 
     // Also register former employees (after active employees so active names win ties)
     ['previous_employees', 'employee_history'].forEach(tblKey => {
@@ -302,8 +329,10 @@ class ForemanReportCardEngine {
       tbl.rows.forEach(r => {
         const canonical = String(r['Employee Name'] || r['Name'] || '').trim();
         if (!canonical || this.isNonForemanLabel(canonical)) return;
-        register(canonical, canonical);
-        register(canonical.replace(/[-_]+/g, ' '), canonical);
+        const altRaw = String(
+          r['Alternate Names'] || r['Alternative Names'] || r['Alt Names'] || r['AKA'] || ''
+        ).trim();
+        registerNameAndNicknames(canonical, altRaw);
       });
     });
 
@@ -323,9 +352,9 @@ class ForemanReportCardEngine {
     if (typeof window !== 'undefined' && window.employeeResolver && typeof window.employeeResolver.getCanonicalName === 'function') {
       const resolved = window.employeeResolver.getCanonicalName(cleaned);
       if (resolved && resolved !== cleaned) return resolved;
-      // Still check fallback map for common nickname variants if resolver returned raw
+      // Still check fallback map for common nickname variants if resolver returned raw or empty
       if (fallbackAliasMap) {
-        const hit = fallbackAliasMap.get(resolved.toLowerCase());
+        const hit = fallbackAliasMap.get(String(resolved || cleaned).toLowerCase());
         if (hit) return hit;
       }
       return resolved || cleaned;
@@ -342,7 +371,9 @@ class ForemanReportCardEngine {
   getFyAliasMap() {
     let aliasMap = {};
     try {
-      const snap = this.db?.snapshot;
+      const snap = (this.db && typeof this.db.getSnapshot === 'function')
+        ? this.db.getSnapshot()
+        : this.db?.snapshot;
       if (snap?.configs?.FY_TRANSITION_ALIAS_MAP && typeof snap.configs.FY_TRANSITION_ALIAS_MAP === 'object') {
         Object.assign(aliasMap, snap.configs.FY_TRANSITION_ALIAS_MAP);
       }
@@ -993,20 +1024,29 @@ class ForemanReportCardEngine {
     const jobMonthEval = new Map();
 
     jobFullWeeks.forEach((weekMap, baseJob) => {
-      // Include contiguous predecessor weeks if job rolled over via FY_TRANSITION_ALIAS_MAP
+      // Include contiguous predecessor weeks from explicit FY_TRANSITION_ALIAS_MAP
+      // AND auto-linked same-prefix prior FY jobs (e.g. 021-26 -> 021-27)
       const combinedWeeks = new Map(weekMap);
-      const predecessors = fyReverseAlias.get(baseJob);
-      if (predecessors) {
-        predecessors.forEach(oldJob => {
-          const oldMap = jobFullWeeks.get(oldJob);
-          if (!oldMap) return;
-          oldMap.forEach((wkObj, wkKey) => {
-            if (!combinedWeeks.has(wkKey) && wkObj.isActiveWeek) {
-              combinedWeeks.set(wkKey, { ...wkObj, _fromPredecessor: true });
-            }
-          });
-        });
+      const predSet = new Set(fyReverseAlias.get(baseJob) || []);
+      const fyMatch = String(baseJob).match(/^(\d+)-(\d{2})$/);
+      if (fyMatch) {
+        const prevFyNum = parseInt(fyMatch[2], 10) - 1;
+        if (prevFyNum >= 0) {
+          const prevCandidate = `${fyMatch[1]}-${String(prevFyNum).padStart(2, '0')}`;
+          if (prevCandidate !== baseJob && jobFullWeeks.has(prevCandidate)) {
+            predSet.add(prevCandidate);
+          }
+        }
       }
+      predSet.forEach(oldJob => {
+        const oldMap = jobFullWeeks.get(oldJob);
+        if (!oldMap) return;
+        oldMap.forEach((wkObj, wkKey) => {
+          if (!combinedWeeks.has(wkKey) && wkObj.isActiveWeek) {
+            combinedWeeks.set(wkKey, { ...wkObj, _fromPredecessor: true });
+          }
+        });
+      });
 
       const sortedActiveWeeks = Array.from(combinedWeeks.values())
         .filter(w => w.isActiveWeek)
@@ -1235,12 +1275,17 @@ class ForemanReportCardEngine {
       const jobForeman = baseJob ? resolveJobForemanOnDate(baseJob, dt) : '';
       const foreman = jobForeman || reportedForeman;
 
+      const cleanAuditLoc = (val) => {
+        const s = String(val || '').trim();
+        return (s && s.toLowerCase() !== 'unassigned') ? s : '';
+      };
+
       const item = {
         date: dt,
         dateStr: this.formatDateUs(dt),
         jobNumber: baseJob,
         jobName: jt ? jt.jobName : '',
-        location: String(sa.location || sa['Location'] || (jt ? jt.location : '') || '').trim(),
+        location: cleanAuditLoc(sa.locationPrimary) || cleanAuditLoc(sa.locationDisplay) || cleanAuditLoc(sa.location) || cleanAuditLoc(sa['Location']) || (jt ? jt.location : '') || '',
         foreman,
         reportedSupervisor: reportedForeman,
         inspector: String(sa.inspector || sa['Inspector'] || '').trim(),
@@ -1494,6 +1539,20 @@ class ForemanReportCardEngine {
       else if (ev.outcome === 'pending') acc.monthlyPending++;
       else if (ev.outcome === 'exempt_short') acc.monthlyExempt++;
     });
+
+    // 7d. Ensure jobs with Incidents or Site Audits inside the selected period are never silently dropped
+    // (e.g., an October FY27 incident logged on a -26 job whose last SC week was in September FY26)
+    const ensureJobsFromRecords = (recordsByJobMap) => {
+      recordsByJobMap.forEach((list, baseJob) => {
+        list.forEach(rec => {
+          if (rec.foreman && isValidForemanName(rec.foreman)) {
+            ensureForemanJob(rec.foreman, baseJob);
+          }
+        });
+      });
+    };
+    ensureJobsFromRecords(incidentsByJob);
+    ensureJobsFromRecords(auditsByJob);
 
     // -----------------------------------------------------------------------
     // 8. Index All 9 Equipment Tables & Swap Pick Lists + 60-Day Expiring Certs
@@ -1799,18 +1858,24 @@ class ForemanReportCardEngine {
       const ytdWeekly = this.computeMetricStats(totals.weeklyOnTime, totals.weeklyLate, totals.weeklyMissing, totals.weeklyPending);
       const ytdMonthly = this.computeMetricStats(totals.monthlyOnTime, totals.monthlyLate, totals.monthlyMissing, totals.monthlyPending, totals.monthlyExempt);
 
-      // Build Current State:
+      const isPreviousEmployee = Boolean(
+        (empInfo && !empInfo.isActive) || (!empInfo && prevPeopleSet.has(foremanName))
+      );
+
+      // Build Current State (active employees only — never treat stale Active/On Hold JT rows on Previous Employees as live crews):
       // 1) Active-first: if foreman has >= 1 Active job, build Current State strictly from Active job(s)
       //    (noting any On Hold jobs in the header only, so bounced/stale On Hold crews don't mix in).
       // 2) On-Hold fallback: if foreman has 0 Active jobs and >= 1 On Hold job (e.g. vacation week),
       //    fall back to On Hold job(s) so their crew's equipment and expiring certs still appear.
       const activeJobs = [];
       const onHoldJobs = [];
-      jtByBaseJob.forEach(jt => {
-        if (jt.foreman !== foremanName) return;
-        if (jt.status === 'Active') activeJobs.push(jt);
-        else if (jt.status === 'On Hold') onHoldJobs.push(jt);
-      });
+      if (!isPreviousEmployee) {
+        jtByBaseJob.forEach(jt => {
+          if (jt.foreman !== foremanName) return;
+          if (jt.status === 'Active') activeJobs.push(jt);
+          else if (jt.status === 'On Hold') onHoldJobs.push(jt);
+        });
+      }
 
       // Sort jobs: primary job (from Employees.Job Number) first
       const empPrimaryJob = empInfo ? empInfo.primaryJob : '';
@@ -1920,9 +1985,6 @@ class ForemanReportCardEngine {
         (empInfo && empInfo.location) ||
         (jobs.find(j => j.location)?.location) || '—';
 
-      const isPreviousEmployee = Boolean(
-        (empInfo && !empInfo.isActive) || (!empInfo && prevPeopleSet.has(foremanName))
-      );
       const isCurrentForeman = !isPreviousEmployee && (activeJobs.length > 0 || onHoldJobNumbers.length > 0);
       const roleGroup = isCurrentForeman ? 'current' : (isPreviousEmployee ? 'previous' : 'former_role');
       const roleStatus = isCurrentForeman
@@ -2205,7 +2267,9 @@ class ForemanReportCardEngine {
       companyAverages,
       generatedAt: refDate
     };
-    this.cachedModel = model;
+    if (options.cache !== false) {
+      this.cachedModel = model;
+    }
     return model;
   }
 
@@ -2213,8 +2277,9 @@ class ForemanReportCardEngine {
   // Page List Builder (for Selected Foreman)
   // =========================================================================
 
-  getFilteredJobsForForeman(foremanPacket) {
+  getFilteredJobsForForeman(foremanPacket, { includeAllStatuses = false } = {}) {
     if (!foremanPacket) return [];
+    if (includeAllStatuses) return [...foremanPacket.jobs];
     return foremanPacket.jobs.filter(j => {
       if (j.status === 'Active') return this.statusFilters['Active'] !== false;
       if (j.status === 'On Hold') return this.statusFilters['On Hold'] !== false;
@@ -2223,9 +2288,9 @@ class ForemanReportCardEngine {
     });
   }
 
-  buildPagesForForeman(foremanPacket) {
+  buildPagesForForeman(foremanPacket, { includeAllStatuses = false } = {}) {
     if (!foremanPacket) return [];
-    const filteredJobs = this.getFilteredJobsForForeman(foremanPacket);
+    const filteredJobs = this.getFilteredJobsForForeman(foremanPacket, { includeAllStatuses });
     const pages = [];
 
     // Page 1: Foreman Cover Page
@@ -2238,11 +2303,12 @@ class ForemanReportCardEngine {
     });
 
     // Page 2: Current State
-    // - Active mode: shown when Active filter is enabled
-    // - On-Hold fallback mode: shown when On Hold filter is enabled
+    // - Active mode: shown when Active filter is enabled (or includeAllStatuses)
+    // - On-Hold fallback mode: shown when On Hold filter is enabled (or includeAllStatuses)
     const cs = foremanPacket.currentState;
     const showCurrentState = Boolean(
       cs && (
+        includeAllStatuses ||
         (cs.mode === 'active' && this.statusFilters['Active'] !== false) ||
         (cs.mode === 'on_hold' && this.statusFilters['On Hold'] !== false)
       )
@@ -2736,11 +2802,11 @@ class ForemanReportCardEngine {
 
     let pageBodyHtml = '';
     if (activePage.type === 'cover') {
-      pageBodyHtml = this.renderCoverPageHtml(foreman, model.period, pages, { isPrint: false });
+      pageBodyHtml = this.renderCoverPageHtml(foreman, model.period, pages, { isPrint: false, companyAverages: model.companyAverages });
     } else if (activePage.type === 'current_state') {
       pageBodyHtml = this.renderCurrentStatePageHtml(foreman, model.period, { isPrint: false });
     } else {
-      pageBodyHtml = this.renderJobReportCardHtml(foreman, activePage.job, model.period, { isPrint: false });
+      pageBodyHtml = this.renderJobReportCardHtml(foreman, activePage.job, model.period, { isPrint: false, companyAverages: model.companyAverages });
     }
 
     container.innerHTML = `
@@ -2914,35 +2980,99 @@ class ForemanReportCardEngine {
       }).join('');
     }
 
-    // Badge
-    const badge = document.getElementById('tailgate-badge');
-    if (badge) {
+    // Print / Save PDF scope selector (disable single-foreman scopes while on Cards Grid)
+    const scopeSelect = document.getElementById('frc-print-scope-select');
+    if (scopeSelect) {
+      const foremanOpt = scopeSelect.querySelector('option[value="foreman"]');
+      const currentOpt = scopeSelect.querySelector('option[value="current"]');
       if (this.viewMode === 'cards') {
-        badge.textContent = `${model.period.shortLabel} · ${model.foremen.length} Forem${model.foremen.length === 1 ? 'an' : 'en'}`;
+        if (scopeSelect.value && scopeSelect.value !== 'all') {
+          this._lastBookPrintScope = scopeSelect.value;
+          this._autoSwitchedPrintScope = true;
+        }
+        if (foremanOpt) foremanOpt.disabled = true;
+        if (currentOpt) currentOpt.disabled = true;
+        scopeSelect.value = 'all';
       } else {
-        const fm = model.foremenMap.get(this.selectedForeman);
-        badge.textContent = fm
-          ? `${model.period.shortLabel} · ${fm.totals.totalJobs} Job${fm.totals.totalJobs === 1 ? '' : 's'}`
-          : model.period.shortLabel;
+        if (foremanOpt) foremanOpt.disabled = false;
+        if (currentOpt) currentOpt.disabled = false;
+        if (this._autoSwitchedPrintScope && scopeSelect.value === 'all') {
+          scopeSelect.value = this._lastBookPrintScope || 'foreman';
+          this._autoSwitchedPrintScope = false;
+        }
       }
+    }
+
+    // Badge
+    this.updateCardsBadge(model);
+  }
+
+  updateCardsBadge(model) {
+    if (typeof document === 'undefined' || !model) return;
+    const badge = document.getElementById('tailgate-badge');
+    if (!badge) return;
+    if (this.viewMode === 'cards') {
+      const visible = this.getFilteredForemen(model);
+      const total = model.foremen.length;
+      const word = total === 1 ? 'Foreman' : 'Foremen';
+      badge.textContent = visible.length !== total
+        ? `${model.period.shortLabel} · ${visible.length} of ${total} ${word}`
+        : `${model.period.shortLabel} · ${total} ${word}`;
+    } else {
+      const fm = model.foremenMap.get(this.selectedForeman);
+      badge.textContent = fm
+        ? `${model.period.shortLabel} · ${fm.totals.totalJobs} Job${fm.totals.totalJobs === 1 ? '' : 's'}`
+        : model.period.shortLabel;
+    }
+  }
+
+  ensureJobStatusVisible(jobStatus) {
+    if (jobStatus === 'Active') this.statusFilters['Active'] = true;
+    else if (jobStatus === 'On Hold') this.statusFilters['On Hold'] = true;
+    else if (jobStatus === 'Completed' || jobStatus === 'Handed Off' || jobStatus === 'FY Transition') {
+      this.statusFilters['Completed'] = true;
     }
   }
 
   setViewMode(mode) {
     const next = mode === 'book' ? 'book' : 'cards';
     if (next === this.viewMode) return;
+    this.cancelPendingPageTurn();
     this.viewMode = next;
-    if (next === 'book' && !this.selectedForeman) {
+    if (next === 'cards') {
+      if (this.selectedForeman) this._lastBookForeman = this.selectedForeman;
+      this.selectedForeman = '';
+    } else if (!this.selectedForeman) {
       const model = this.cachedModel || this.buildDataModel();
-      const visible = this.getFilteredForemen(model);
-      if (visible.length > 0) this.selectedForeman = visible[0].name;
+      const roleScoped = (!this.roleFilter || this.roleFilter === 'all')
+        ? model.foremen
+        : model.foremen.filter(f => f.roleGroup === this.roleFilter);
+      const bookList = roleScoped.length > 0 ? roleScoped : model.foremen;
+      if (this._lastBookForeman && bookList.some(f => f.name === this._lastBookForeman)) {
+        this.selectedForeman = this._lastBookForeman;
+      } else {
+        const visible = this.getFilteredForemen(model);
+        const pick = visible.find(f => bookList.some(b => b.name === f.name)) || bookList[0];
+        if (pick) this.selectedForeman = pick.name;
+      }
     }
     this.renderWorkspace({ reuseCache: true, preservePage: next === 'book' });
   }
 
   openForemanBook(foremanName, targetJobNumber = '') {
     if (!foremanName) return;
+    this.cancelPendingPageTurn();
+    const model = this.cachedModel || this.buildDataModel();
+    const fm = model.foremenMap.get(foremanName);
+    if (fm && this.roleFilter !== 'all' && fm.roleGroup !== this.roleFilter) {
+      this.roleFilter = 'all';
+    }
+    if (fm && targetJobNumber) {
+      const tJob = fm.jobs.find(j => j.jobNumber === targetJobNumber);
+      if (tJob) this.ensureJobStatusVisible(tJob.status);
+    }
     this.selectedForeman = foremanName;
+    this._lastBookForeman = foremanName;
     this.viewMode = 'book';
     this.currentPageIndex = 0;
     const opts = { reuseCache: true };
@@ -2960,6 +3090,7 @@ class ForemanReportCardEngine {
     if (gridBody) {
       const visible = this.getFilteredForemen(model);
       gridBody.innerHTML = this.renderForemanCardsGridBodyHtml(model, visible);
+      this.updateCardsBadge(model);
     } else {
       this.renderWorkspace({ reuseCache: true });
     }
@@ -2981,6 +3112,7 @@ class ForemanReportCardEngine {
     const valid = new Set(['all', 'current', 'former_role', 'previous']);
     const next = valid.has(roleKey) ? roleKey : 'all';
     if (next === this.roleFilter) return;
+    this.cancelPendingPageTurn();
     this.roleFilter = next;
     this.currentPageIndex = 0;
     this.renderWorkspace({ reuseCache: true });
@@ -2988,13 +3120,20 @@ class ForemanReportCardEngine {
 
   jumpToForemanJob(targetForeman, targetJobNumber = '', fallbackCalendarYear = null) {
     if (!targetForeman) return;
+    this.cancelPendingPageTurn();
     this.roleFilter = 'all';
     this.viewMode = 'book';
     let model = this.cachedModel || this.buildDataModel();
 
-    // If the target foreman only ran weeks outside the current period (e.g. Cody Lund on 011-26 while in FY27),
-    // automatically switch to Calendar Year for that job's year so their report card opens immediately!
-    if (!model.foremenMap.has(targetForeman) && fallbackCalendarYear) {
+    const hasTargetJob = (m) => {
+      const f = m.foremenMap.get(targetForeman);
+      if (!f) return false;
+      return !targetJobNumber || f.jobs.some(j => j.jobNumber === targetJobNumber);
+    };
+
+    // If the target foreman (or the specific historical job) only ran outside the current period
+    // (e.g. 011-26 while in FY27), automatically switch to Calendar Year for that job's year!
+    if (!hasTargetJob(model) && fallbackCalendarYear) {
       this.periodMode = 'calendar';
       this.selectedYear = parseInt(fallbackCalendarYear, 10) || this.selectedYear;
       this.cachedModel = null;
@@ -3007,7 +3146,12 @@ class ForemanReportCardEngine {
     }
 
     this.selectedForeman = targetForeman;
+    this._lastBookForeman = targetForeman;
     const fm = model.foremenMap.get(targetForeman);
+    if (targetJobNumber) {
+      const tJob = fm.jobs.find(j => j.jobNumber === targetJobNumber);
+      if (tJob) this.ensureJobStatusVisible(tJob.status);
+    }
     const pages = this.buildPagesForForeman(fm);
     const jobIdx = targetJobNumber
       ? pages.findIndex(p => p.type === 'job' && p.jobNumber === targetJobNumber)
@@ -3017,12 +3161,16 @@ class ForemanReportCardEngine {
   }
 
   onForemanChange(foremanName) {
+    this.cancelPendingPageTurn();
     if (!foremanName) {
+      if (this.selectedForeman) this._lastBookForeman = this.selectedForeman;
+      this.selectedForeman = '';
       this.viewMode = 'cards';
       this.renderWorkspace({ reuseCache: true });
       return;
     }
     this.selectedForeman = foremanName;
+    this._lastBookForeman = foremanName;
     this.viewMode = 'book';
     this.currentPageIndex = 0;
     this.renderWorkspace({ reuseCache: true });
@@ -3031,6 +3179,7 @@ class ForemanReportCardEngine {
   setPeriodMode(mode) {
     const nextMode = mode === 'calendar' ? 'calendar' : 'fiscal';
     if (nextMode === this.periodMode) return;
+    this.cancelPendingPageTurn();
     this.periodMode = nextMode;
     const years = this.getAvailableYears(nextMode);
     this.selectedYear = years[0];
@@ -3042,6 +3191,7 @@ class ForemanReportCardEngine {
   onYearChange(yearVal) {
     const num = parseInt(yearVal, 10);
     if (isNaN(num)) return;
+    this.cancelPendingPageTurn();
     this.selectedYear = num;
     this.currentPageIndex = 0;
     this.cachedModel = null;
@@ -3049,6 +3199,7 @@ class ForemanReportCardEngine {
   }
 
   toggleStatusFilter(statusKey) {
+    this.cancelPendingPageTurn();
     this.statusFilters[statusKey] = !this.statusFilters[statusKey];
     // Prevent all 3 from being unchecked at once
     if (!this.statusFilters['Active'] && !this.statusFilters['On Hold'] && !this.statusFilters['Completed']) {
@@ -3060,6 +3211,7 @@ class ForemanReportCardEngine {
   }
 
   refresh() {
+    this.cancelPendingPageTurn();
     this.cachedModel = null;
     this.renderWorkspace({ preservePage: true });
   }
@@ -3074,11 +3226,8 @@ class ForemanReportCardEngine {
 
     window.addEventListener('keydown', (e) => {
       if (!this.isWorkspaceVisible()) return;
-      const activeEl = document.activeElement;
-      if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA' || activeEl.tagName === 'SELECT')) {
-        return;
-      }
-      // Close Incident/Audit drill-down modal on Escape before navigating away
+
+      // Always let Escape close Foreman Report Card modals even when focus is inside an input/select
       const recordsModal = document.getElementById('frc-records-modal');
       if (recordsModal) {
         if (e.key === 'Escape') {
@@ -3088,8 +3237,22 @@ class ForemanReportCardEngine {
         return;
       }
 
-      // Don't hijack arrows/Escape when any modal overlay is open
-      if (document.querySelector('#frc-job-status-modal, #job-lifecycle-sheet-modal, .modal-overlay.active')) {
+      const statusModal = document.getElementById('frc-job-status-modal');
+      if (statusModal) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          statusModal.remove();
+        }
+        return;
+      }
+
+      const activeEl = document.activeElement;
+      if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA' || activeEl.tagName === 'SELECT')) {
+        return;
+      }
+
+      // Don't hijack arrows/Escape when another modal overlay is open
+      if (document.querySelector('#job-lifecycle-sheet-modal, .modal-overlay.active')) {
         return;
       }
 
@@ -3157,20 +3320,23 @@ class ForemanReportCardEngine {
 
   goToPage(targetIndex, forcedDirection = null) {
     if (this._isAnimatingTurn) return;
+    const idx = parseInt(targetIndex, 10);
+    if (isNaN(idx)) return;
     const model = this.cachedModel || this.buildDataModel();
     const foreman = model.foremenMap.get(this.selectedForeman);
     if (!foreman) return;
     const pages = this.buildPagesForForeman(foreman);
-    if (targetIndex < 0 || targetIndex >= pages.length || targetIndex === this.currentPageIndex) return;
+    if (idx < 0 || idx >= pages.length || idx === this.currentPageIndex) return;
 
-    const dir = forcedDirection !== null ? forcedDirection : (targetIndex > this.currentPageIndex ? 1 : -1);
-    const sheet = document.getElementById('frc-paper-sheet');
+    const dir = forcedDirection !== null ? forcedDirection : (idx > this.currentPageIndex ? 1 : -1);
+    const sheet = typeof document !== 'undefined' ? document.getElementById('frc-paper-sheet') : null;
     if (!sheet) {
-      this.currentPageIndex = targetIndex;
+      this.currentPageIndex = idx;
       this.renderWorkspace({ reuseCache: true, preservePage: true });
       return;
     }
 
+    const myToken = ++this._turnToken;
     this._isAnimatingTurn = true;
     const turnClass = dir > 0 ? 'dossier-turn-forward' : 'dossier-turn-backward';
     const enterClass = dir > 0 ? 'dossier-enter-forward' : 'dossier-enter-backward';
@@ -3178,23 +3344,35 @@ class ForemanReportCardEngine {
     sheet.classList.remove('dossier-turn-forward', 'dossier-turn-backward', 'dossier-enter-forward', 'dossier-enter-backward');
     sheet.classList.add(turnClass);
 
-    setTimeout(() => {
-      this.currentPageIndex = targetIndex;
-      this.renderWorkspace({ reuseCache: true, preservePage: true });
-      const wsContent = document.getElementById('tailgate-workspace-content');
-      if (wsContent) wsContent.scrollTop = 0;
-
-      const newSheet = document.getElementById('frc-paper-sheet');
-      if (newSheet) {
-        newSheet.classList.add(enterClass);
-        setTimeout(() => {
-          newSheet.classList.remove(enterClass);
-          this._isAnimatingTurn = false;
-        }, 230);
-      } else {
+    const t1 = setTimeout(() => {
+      if (myToken !== this._turnToken || this.viewMode !== 'book') {
         this._isAnimatingTurn = false;
+        return;
+      }
+      try {
+        this.currentPageIndex = idx;
+        this.renderWorkspace({ reuseCache: true, preservePage: true });
+        const wsContent = document.getElementById('tailgate-workspace-content');
+        if (wsContent) wsContent.scrollTop = 0;
+
+        const newSheet = document.getElementById('frc-paper-sheet');
+        if (newSheet) {
+          newSheet.classList.add(enterClass);
+          const t2 = setTimeout(() => {
+            if (myToken !== this._turnToken) return;
+            newSheet.classList.remove(enterClass);
+            this._isAnimatingTurn = false;
+          }, 230);
+          this._turnTimers.push(t2);
+        } else {
+          this._isAnimatingTurn = false;
+        }
+      } catch (err) {
+        this._isAnimatingTurn = false;
+        throw err;
       }
     }, 125);
+    this._turnTimers.push(t1);
   }
 
   jumpToJobPage(jobNumber) {
@@ -3931,15 +4109,20 @@ class ForemanReportCardEngine {
           ` : ''}
         </div>
 
-        <div style="text-align:right;min-width:130px;">
-          <div style="background:#0f172a;color:#ffffff;padding:5px 10px;border-radius:5px;display:inline-block;">
-            <div style="font-size:18px;font-weight:900;line-height:1.1;">${job.daysWorked}</div>
-            <div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:#cbd5e1;">Days Worked</div>
-          </div>
-          <div style="font-size:10px;font-weight:700;color:#475569;margin-top:4px;">
-            ${job.weeksWorked} Active Week${job.weeksWorked === 1 ? '' : 's'}
-          </div>
-        </div>
+        ${(() => {
+          const isWeeklyOnlyJob = job.daysWorked === 0 && job.weeksWorked > 0;
+          return `
+            <div style="text-align:right;min-width:130px;">
+              <div style="background:#0f172a;color:#ffffff;padding:5px 10px;border-radius:5px;display:inline-block;">
+                <div style="font-size:18px;font-weight:900;line-height:1.1;">${isWeeklyOnlyJob ? job.weeksWorked : job.daysWorked}</div>
+                <div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:#cbd5e1;">${isWeeklyOnlyJob ? 'Weeks Tracked' : 'Days Worked'}</div>
+              </div>
+              <div style="font-size:10px;font-weight:700;color:#475569;margin-top:4px;">
+                ${isWeeklyOnlyJob ? 'Weekly-only schedule' : `${job.weeksWorked} Active Week${job.weeksWorked === 1 ? '' : 's'}`}
+              </div>
+            </div>
+          `;
+        })()}
       </div>
 
       ${job.foremanHistory && job.foremanHistory.length > 1 ? `
@@ -4299,10 +4482,21 @@ class ForemanReportCardEngine {
     const returnIso = this.formatIsoDate(this.parseDate(jtRow?.['Estimated Return'])) || '';
     const endIso = this.formatIsoDate(this.parseDate(jtRow?.['Actual End Date'])) || todayIso;
 
+    const curModel = this.cachedModel;
+    const curFm = curModel && this.selectedForeman ? curModel.foremenMap.get(this.selectedForeman) : null;
+    const curPages = curFm ? this.buildPagesForForeman(curFm) : [];
+    const openedPageId = (this.viewMode === 'book' && curPages[this.currentPageIndex])
+      ? curPages[this.currentPageIndex].id
+      : '';
+
     const modal = document.createElement('div');
     modal.id = 'frc-job-status-modal';
     modal.className = 'modal-overlay active';
+    modal.dataset.openedPageId = openedPageId;
     modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.75);backdrop-filter:blur(4px);z-index:10050;display:flex;align-items:center;justify-content:center;padding:20px;';
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) modal.remove();
+    });
 
     modal.innerHTML = `
       <div style="background:var(--bg-card,#1e293b);border:1px solid var(--border-color,#334155);border-radius:10px;width:100%;max-width:480px;box-shadow:0 16px 40px rgba(0,0,0,0.6);overflow:hidden;color:#f8fafc;">
@@ -4422,9 +4616,11 @@ class ForemanReportCardEngine {
 
       Object.assign(row, updatedFields);
 
-      // Sync rawGrid
+      // Sync rawGrid using dynamic Job Number header index
       if (Array.isArray(jtTable.rawGrid) && Array.isArray(jtTable.headers)) {
-        const gIdx = jtTable.rawGrid.findIndex((gr, idx) => idx > 0 && this.getBaseJobNumber(gr[0] || '') === baseJob);
+        const jobColIdx = jtTable.headers.findIndex(h => /^job\s*(number|#)$/i.test(String(h || '').trim()));
+        const jIdx = jobColIdx >= 0 ? jobColIdx : 0;
+        const gIdx = jtTable.rawGrid.findIndex((gr, idx) => idx > 0 && this.getBaseJobNumber(gr[jIdx] || '') === baseJob);
         if (gIdx > 0) {
           jtTable.rawGrid[gIdx] = jtTable.headers.map(h => (row[h] !== undefined ? row[h] : ''));
         }
@@ -4441,24 +4637,30 @@ class ForemanReportCardEngine {
         });
       }
     } else {
-      // Create a new Job Tracking row for historical job
-      const newRow = {
+      // Create a new Job Tracking row for historical job (clean payload without internal _rowIdx)
+      const knownFm = this.cachedModel && this.selectedForeman ? this.cachedModel.foremenMap.get(this.selectedForeman) : null;
+      const knownJob = knownFm ? knownFm.jobs.find(j => j.jobNumber === baseJob) : null;
+      const inferredStartUs = (knownJob && knownJob.firstWorkDate)
+        ? this.formatDateUs(knownJob.firstWorkDate)
+        : (targetStatus === 'Completed' && endUs ? endUs : todayUs);
+
+      const rowPayload = {
         'Job Number': baseJob,
-        'Location': '',
+        'Location': (knownJob && knownJob.location) || (knownFm && knownFm.location !== '—' ? knownFm.location : '') || '',
         'Foreman': this.selectedForeman || '',
-        'Start Date': todayUs,
+        'Start Date': inferredStartUs,
         'Put On Hold Date': holdUs,
         'Estimated Return': returnUs,
         'Actual End Date': endUs,
         'Status': targetStatus,
         'Last Updated': todayUs
       };
-      newRow._rowIdx = (Array.isArray(jtTable.rawGrid) && jtTable.rawGrid.length > 0)
+      const rowIdx = (Array.isArray(jtTable.rawGrid) && jtTable.rawGrid.length > 0)
         ? jtTable.rawGrid.length + 1
         : jtTable.rows.length + 2;
-      jtTable.rows.push(newRow);
+      jtTable.rows.push({ ...rowPayload, _rowIdx: rowIdx });
       if (Array.isArray(jtTable.rawGrid) && Array.isArray(jtTable.headers)) {
-        jtTable.rawGrid.push(jtTable.headers.map(h => (newRow[h] !== undefined ? newRow[h] : '')));
+        jtTable.rawGrid.push(jtTable.headers.map(h => (rowPayload[h] !== undefined ? rowPayload[h] : '')));
       }
       if (typeof this.db.addMutation === 'function') {
         await this.db.addMutation({
@@ -4466,7 +4668,7 @@ class ForemanReportCardEngine {
           sheetName: jtTable.name || 'Job Tracking',
           tableKey: 'job_tracking',
           itemIdentifier: baseJob,
-          rowData: newRow
+          rowData: rowPayload
         });
       }
     }
@@ -4484,10 +4686,16 @@ class ForemanReportCardEngine {
     }
 
     const modal = document.getElementById('frc-job-status-modal');
+    const openedPageId = modal ? (modal.dataset.openedPageId || '') : '';
     if (modal) modal.remove();
 
     this.cachedModel = null;
-    this.renderWorkspace({ preservePage: true, targetPageId: `job:${baseJob}` });
+    if (openedPageId === 'cover') {
+      this.renderWorkspace({ preservePage: true, targetPageId: 'cover' });
+    } else {
+      this.ensureJobStatusVisible(targetStatus);
+      this.renderWorkspace({ preservePage: true, targetPageId: `job:${baseJob}` });
+    }
     this.showPageToast(`✅ Job ${baseJob} marked ${targetStatus}`);
   }
 
@@ -4495,38 +4703,45 @@ class ForemanReportCardEngine {
   // Print & Electron PDF Archival (Current Page | Selected Foreman | All Foremen)
   // =========================================================================
 
-  buildPrintHtml(scope = 'foreman', isPrintAutoTrigger = false) {
+  resolveEffectivePrintScope(scope = null, model = null) {
+    const m = model || this.cachedModel || this.buildDataModel();
+    const rawScope = scope || (typeof document !== 'undefined' ? document.getElementById('frc-print-scope-select')?.value : null) || 'foreman';
+    if (rawScope === 'all') return 'all';
+    if (this.viewMode === 'cards' && !scope) return 'all';
+    if (!this.selectedForeman || !m.foremenMap.has(this.selectedForeman)) return 'all';
+    return rawScope;
+  }
+
+  buildPrintHtml(scope = null, isPrintAutoTrigger = false) {
     const model = this.cachedModel || this.buildDataModel();
     const pagesHtml = [];
 
-    const appendForemanPages = (fm, onlyPageIndex = null) => {
-      const pages = this.buildPagesForForeman(fm);
+    const appendForemanPages = (fm, onlyPageIndex = null, includeAllStatuses = false) => {
+      const pages = this.buildPagesForForeman(fm, { includeAllStatuses });
       const subset = (onlyPageIndex !== null && pages[onlyPageIndex]) ? [pages[onlyPageIndex]] : pages;
       subset.forEach(p => {
         let body = '';
         if (p.type === 'cover') {
-          body = this.renderCoverPageHtml(fm, model.period, pages, { isPrint: true });
+          body = this.renderCoverPageHtml(fm, model.period, pages, { isPrint: true, companyAverages: model.companyAverages });
         } else if (p.type === 'current_state') {
           body = this.renderCurrentStatePageHtml(fm, model.period, { isPrint: true });
         } else {
-          body = this.renderJobReportCardHtml(fm, p.job, model.period, { isPrint: true });
+          body = this.renderJobReportCardHtml(fm, p.job, model.period, { isPrint: true, companyAverages: model.companyAverages });
         }
         pagesHtml.push(`<div class="frc-print-page">${body}</div>`);
       });
     };
 
-    const effectiveScope = (scope !== 'all' && (!this.selectedForeman || !model.foremenMap.has(this.selectedForeman)))
-      ? 'all'
-      : scope;
+    const effectiveScope = this.resolveEffectivePrintScope(scope, model);
 
     if (effectiveScope === 'all') {
-      model.foremen.forEach(fm => appendForemanPages(fm, null));
+      model.foremen.forEach(fm => appendForemanPages(fm, null, true));
     } else if (effectiveScope === 'current') {
       const fm = model.foremenMap.get(this.selectedForeman);
-      if (fm) appendForemanPages(fm, this.currentPageIndex);
+      if (fm) appendForemanPages(fm, this.currentPageIndex, false);
     } else {
       const fm = model.foremenMap.get(this.selectedForeman);
-      if (fm) appendForemanPages(fm, null);
+      if (fm) appendForemanPages(fm, null, false);
     }
 
     const docTitle = effectiveScope === 'all'
@@ -4577,8 +4792,9 @@ class ForemanReportCardEngine {
   }
 
   printPackets(scope = null) {
-    const resolvedScope = scope || document.getElementById('frc-print-scope-select')?.value || 'foreman';
-    const html = this.buildPrintHtml(resolvedScope, true);
+    const model = this.cachedModel || this.buildDataModel();
+    const effectiveScope = this.resolveEffectivePrintScope(scope, model);
+    const html = this.buildPrintHtml(effectiveScope, true);
     if (!html.includes('frc-print-page')) {
       alert('⚠️ No pages available to print.');
       return;
@@ -4594,9 +4810,9 @@ class ForemanReportCardEngine {
   }
 
   async savePdfPackets(scope = null) {
-    const resolvedScope = scope || document.getElementById('frc-print-scope-select')?.value || 'foreman';
     const model = this.cachedModel || this.buildDataModel();
-    const html = this.buildPrintHtml(resolvedScope, false);
+    const effectiveScope = this.resolveEffectivePrintScope(scope, model);
+    const html = this.buildPrintHtml(effectiveScope, false);
     if (!html.includes('frc-print-page')) {
       alert('⚠️ No pages available to archive.');
       return;
@@ -4607,9 +4823,9 @@ class ForemanReportCardEngine {
     const fmSlug = (this.selectedForeman || 'Foreman').replace(/[^a-zA-Z0-9_-]+/g, '_');
 
     let defaultFilename = `Foreman_Report_Card_${fmSlug}_${periodSlug}_${dateStr}.pdf`;
-    if (resolvedScope === 'all') {
+    if (effectiveScope === 'all') {
       defaultFilename = `Foreman_Report_Cards_All_${periodSlug}_${dateStr}.pdf`;
-    } else if (resolvedScope === 'current') {
+    } else if (effectiveScope === 'current') {
       const fm = model.foremenMap.get(this.selectedForeman);
       const pages = fm ? this.buildPagesForForeman(fm) : [];
       const curPage = pages[this.currentPageIndex];
@@ -4630,7 +4846,7 @@ class ForemanReportCardEngine {
         alert('⚠️ PDF Save error: ' + err.message);
       }
     } else {
-      this.printPackets(resolvedScope);
+      this.printPackets(effectiveScope);
     }
   }
 }
