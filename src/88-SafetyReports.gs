@@ -4007,6 +4007,10 @@ function calculateComplianceFromLogs(weekStartDate, options) {
 
     var skipDays, skipWeeklyMeeting, skipMonthlyChecklist;
 
+    var dnwDays = [false, false, false, false, false, false, false];
+
+    var dnwWeeklyMeeting = false;
+
     var foreman = '';
 
 
@@ -4035,9 +4039,9 @@ function calculateComplianceFromLogs(weekStartDate, options) {
 
     } else if (existingCrewData) {
 
-      // PAST WEEK with existing data: PRESERVE the N/A/blank values from the sheet
+      // PAST WEEK with existing data: PRESERVE N/A, blank, and DNW (Did Not Work) values from the sheet
 
-      // Convert existing day values to skipDays array
+      // Convert existing day values to skipDays/dnwDays arrays
 
       var dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -4045,17 +4049,29 @@ function calculateComplianceFromLogs(weekStartDate, options) {
 
       for (var di = 0; di < dayNames.length; di++) {
 
-        var existingVal = existingCrewData.days[dayNames[di]] || '';
+        var existingVal = String(existingCrewData.days[dayNames[di]] || '').trim();
 
-        // If it was N/A or blank in the sheet, keep it as a skip day
+        var existingUpper = existingVal.toUpperCase();
 
-        skipDays.push(existingVal === 'N/A' || existingVal === '');
+        var isDnwDay = (existingUpper === 'DNW' || existingUpper === '\u274CW');
+
+        dnwDays[di] = isDnwDay;
+
+        // If it was N/A, blank, or DNW in the sheet, keep it excused
+
+        skipDays.push(existingVal === 'N/A' || existingVal === '' || isDnwDay);
 
       }
 
-      // Treat blank same as N/A for weekly/monthly
+      // Treat blank or DNW same as excused for weekly/monthly
 
-      skipWeeklyMeeting = (existingCrewData.weeklyMeeting === 'N/A' || existingCrewData.weeklyMeeting === '');
+      var existingWkVal = String(existingCrewData.weeklyMeeting || '').trim();
+
+      var existingWkUpper = existingWkVal.toUpperCase();
+
+      dnwWeeklyMeeting = (existingWkUpper === 'DNW' || existingWkUpper === '\u274CW');
+
+      skipWeeklyMeeting = (existingWkVal === 'N/A' || existingWkVal === '' || dnwWeeklyMeeting);
 
       skipMonthlyChecklist = (existingCrewData.monthlyChecklist === 'N/A' || existingCrewData.monthlyChecklist === '');
 
@@ -4111,7 +4127,11 @@ function calculateComplianceFromLogs(weekStartDate, options) {
 
       skipDays: skipDays,
 
+      dnwDays: dnwDays,
+
       skipWeeklyMeeting: skipWeeklyMeeting,
+
+      dnwWeeklyMeeting: dnwWeeklyMeeting,
 
       skipMonthlyChecklist: skipMonthlyChecklist,
 
@@ -5231,7 +5251,7 @@ function calculateComplianceFromLogs(weekStartDate, options) {
 
       } else if (crew.skipDays[d]) {
 
-        crew.days[dayNames[d]] = 'N/A';
+        crew.days[dayNames[d]] = (crew.dnwDays && crew.dnwDays[d]) ? 'DNW' : 'N/A';
 
       } else {
 
@@ -5257,7 +5277,7 @@ function calculateComplianceFromLogs(weekStartDate, options) {
 
     if (crew.skipWeeklyMeeting) {
 
-      crew.weeklyMeetingStatus = 'N/A';
+      crew.weeklyMeetingStatus = crew.dnwWeeklyMeeting ? 'DNW' : 'N/A';
 
     // NOTE: Holiday excuse for weekly meeting removed (May 2026).
 

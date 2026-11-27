@@ -565,11 +565,193 @@ class ForemanReportCardEngine {
     const s = String(val || '').trim();
     if (!s || s === 'N/A' || s === '—' || s === '-') return 'na';
     const upper = s.toUpperCase();
+    if (upper === 'DNW' || upper === '❌W' || s.includes('❌W')) return 'dnw';
     if (s.includes('✅L') || /✅\s*L/i.test(s) || (s.includes('✅') && upper.includes('LATE'))) return 'late';
     if (s.includes('✅')) return 'onTime';
     if (s.includes('❌') && !s.includes('⏳')) return 'missing';
     if (s.includes('⏳')) return 'pending';
     return 'na';
+  }
+
+  // =========================================================================
+  // Foreman Grading Engine (A, A-, B+, B, B-, C+, C, C-, D+, D, F)
+  // =========================================================================
+
+  getDefaultGradingWeights() {
+    return {
+      jhaWeight: 35,
+      qualityWeight: 30,
+      weeklyWeight: 20,
+      monthlyWeight: 15,
+      lateCreditPct: 65,
+      minDaysForFullConfidence: 8
+    };
+  }
+
+  getGradingWeights() {
+    const defaults = this.getDefaultGradingWeights();
+    try {
+      if (typeof localStorage !== 'undefined') {
+        const raw = localStorage.getItem('sa_frc_grading_weights');
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          const clamp = (v, min, max, fb) => {
+            const n = Number(v);
+            return Number.isFinite(n) ? Math.max(min, Math.min(max, Math.round(n))) : fb;
+          };
+          return {
+            jhaWeight: clamp(parsed.jhaWeight, 0, 100, defaults.jhaWeight),
+            qualityWeight: clamp(parsed.qualityWeight, 0, 100, defaults.qualityWeight),
+            weeklyWeight: clamp(parsed.weeklyWeight, 0, 100, defaults.weeklyWeight),
+            monthlyWeight: clamp(parsed.monthlyWeight, 0, 100, defaults.monthlyWeight),
+            lateCreditPct: clamp(parsed.lateCreditPct, 0, 100, defaults.lateCreditPct),
+            minDaysForFullConfidence: clamp(parsed.minDaysForFullConfidence, 1, 30, defaults.minDaysForFullConfidence)
+          };
+        }
+      }
+    } catch (e) {}
+    return defaults;
+  }
+
+  saveGradingWeights(weights) {
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem('sa_frc_grading_weights', JSON.stringify(weights));
+      }
+    } catch (e) {}
+  }
+
+  scoreToLetterGrade(score) {
+    if (score === null || score === undefined || isNaN(score)) {
+      return {
+        letter: 'N/A',
+        color: '#64748b',
+        bg: '#f1f5f9',
+        border: '#cbd5e1',
+        darkBg: 'rgba(100,116,139,0.2)',
+        darkText: '#cbd5e1',
+        darkBorder: 'rgba(148,163,184,0.4)'
+      };
+    }
+    const s = Math.round(score);
+    if (s >= 93) return { letter: 'A',  color: '#15803d', bg: '#dcfce7', border: '#4ade80', darkBg: 'rgba(22,163,74,0.24)',  darkText: '#86efac', darkBorder: 'rgba(74,222,128,0.55)' };
+    if (s >= 90) return { letter: 'A-', color: '#16a34a', bg: '#dcfce7', border: '#86efac', darkBg: 'rgba(22,163,74,0.20)',  darkText: '#86efac', darkBorder: 'rgba(74,222,128,0.45)' };
+    if (s >= 87) return { letter: 'B+', color: '#0369a1', bg: '#e0f2fe', border: '#38bdf8', darkBg: 'rgba(14,165,233,0.22)', darkText: '#7dd3fc', darkBorder: 'rgba(56,189,248,0.55)' };
+    if (s >= 83) return { letter: 'B',  color: '#1d4ed8', bg: '#dbeafe', border: '#60a5fa', darkBg: 'rgba(37,99,235,0.22)',  darkText: '#93c5fd', darkBorder: 'rgba(96,165,250,0.5)' };
+    if (s >= 80) return { letter: 'B-', color: '#2563eb', bg: '#dbeafe', border: '#93c5fd', darkBg: 'rgba(37,99,235,0.18)',  darkText: '#93c5fd', darkBorder: 'rgba(96,165,250,0.4)' };
+    if (s >= 77) return { letter: 'C+', color: '#b45309', bg: '#fef3c7', border: '#f59e0b', darkBg: 'rgba(245,158,11,0.22)', darkText: '#fde68a', darkBorder: 'rgba(251,191,36,0.55)' };
+    if (s >= 73) return { letter: 'C',  color: '#b45309', bg: '#fef3c7', border: '#fcd34d', darkBg: 'rgba(245,158,11,0.18)', darkText: '#fde68a', darkBorder: 'rgba(251,191,36,0.45)' };
+    if (s >= 70) return { letter: 'C-', color: '#a16207', bg: '#fef9c3', border: '#fde047', darkBg: 'rgba(234,179,8,0.18)',  darkText: '#fef08a', darkBorder: 'rgba(250,204,21,0.45)' };
+    if (s >= 67) return { letter: 'D+', color: '#c2410c', bg: '#ffedd5', border: '#fb923c', darkBg: 'rgba(249,115,22,0.22)', darkText: '#fdba74', darkBorder: 'rgba(251,146,60,0.55)' };
+    if (s >= 60) return { letter: 'D',  color: '#c2410c', bg: '#ffedd5', border: '#fdba74', darkBg: 'rgba(249,115,22,0.18)', darkText: '#fdba74', darkBorder: 'rgba(251,146,60,0.45)' };
+    return { letter: 'F', color: '#b91c1c', bg: '#fee2e2', border: '#f87171', darkBg: 'rgba(220,38,38,0.24)', darkText: '#fca5a5', darkBorder: 'rgba(248,113,113,0.55)' };
+  }
+
+  /**
+   * Computes weighted A–F Foreman/Job Grade across Daily JHA, Field iD JHA Quality,
+   * Weekly Safety Meeting, and Monthly Inspection Checklist.
+   * On-Time = 100%, Late = lateCreditPct (default 65%), Missing = 0%.
+   * Dynamically renormalizes weights across applicable categories (e.g. Monthly Exempt or Weekly-Only).
+   */
+  computeForemanGrade({ ytdJha, jhaQuality, ytdWeekly, ytdMonthly, daysWorked = 0, weeklyExpected = 0 } = {}, weightsOverride = null) {
+    const w = weightsOverride || this.getGradingWeights();
+    const lateFactor = (w.lateCreditPct || 0) / 100;
+
+    const scoreMetric = (m) => {
+      if (!m || !m.expected || m.expected <= 0) return null;
+      return ((m.onTime * 1.0 + m.late * lateFactor) / m.expected) * 100;
+    };
+
+    const jhaRaw = scoreMetric(ytdJha);
+    const qualRaw = (jhaQuality && jhaQuality.evaluatedWeeks > 0 && jhaQuality.passRatePct !== null)
+      ? jhaQuality.passRatePct
+      : null;
+    const wkRaw = scoreMetric(ytdWeekly);
+    const moRaw = scoreMetric(ytdMonthly);
+
+    const candidates = [
+      {
+        key: 'jha',
+        label: 'Daily JHA',
+        score: jhaRaw,
+        weight: w.jhaWeight,
+        detail: ytdJha && ytdJha.expected > 0
+          ? `${ytdJha.onTime} OT · ${ytdJha.late} Late · ${ytdJha.missing} Miss`
+          : 'N/A'
+      },
+      {
+        key: 'quality',
+        label: 'JHA Quality',
+        score: qualRaw,
+        weight: w.qualityWeight,
+        detail: jhaQuality && jhaQuality.evaluatedWeeks > 0
+          ? `${jhaQuality.passedWeeks}/${jhaQuality.evaluatedWeeks} clean (${jhaQuality.failedWeeks} fail${jhaQuality.failedWeeks === 1 ? '' : 's'})`
+          : 'N/A'
+      },
+      {
+        key: 'weekly',
+        label: 'Weekly Mtg',
+        score: wkRaw,
+        weight: w.weeklyWeight,
+        detail: ytdWeekly && ytdWeekly.expected > 0
+          ? `${ytdWeekly.onTime} OT · ${ytdWeekly.late} Late · ${ytdWeekly.missing} Miss`
+          : 'N/A'
+      },
+      {
+        key: 'monthly',
+        label: 'Monthly Insp.',
+        score: moRaw,
+        weight: w.monthlyWeight,
+        detail: ytdMonthly && ytdMonthly.expected > 0
+          ? `${ytdMonthly.onTime} OT · ${ytdMonthly.late} Late · ${ytdMonthly.missing} Miss`
+          : (ytdMonthly && ytdMonthly.exempt > 0 ? 'Exempt (<4w)' : 'N/A')
+      }
+    ];
+
+    const activeParts = candidates.filter(c => c.score !== null && c.weight > 0);
+    const weightSum = activeParts.reduce((s, c) => s + c.weight, 0);
+
+    let finalScore = null;
+    const breakdown = candidates.map(c => {
+      const isApplied = c.score !== null && c.weight > 0 && weightSum > 0;
+      const effWeight = isApplied ? Math.round((c.weight / weightSum) * 100) : 0;
+      const roundedScore = c.score !== null ? Math.round(c.score) : null;
+      return {
+        ...c,
+        score: roundedScore,
+        isApplied,
+        effectiveWeight: effWeight
+      };
+    });
+
+    if (activeParts.length > 0 && weightSum > 0) {
+      const exact = activeParts.reduce((s, c) => s + c.score * (c.weight / weightSum), 0);
+      finalScore = Math.max(0, Math.min(100, Math.round(exact)));
+    }
+
+    const meta = this.scoreToLetterGrade(finalScore);
+    const minDays = w.minDaysForFullConfidence || 8;
+    const isWeeklyOnly = daysWorked === 0 && weeklyExpected > 0;
+    const isLowSample = finalScore !== null && (
+      isWeeklyOnly ? weeklyExpected < 2 : (daysWorked > 0 && daysWorked < minDays)
+    );
+
+    const tooltipParts = breakdown
+      .filter(b => b.isApplied)
+      .map(b => `${b.label}: ${b.score}% (${b.effectiveWeight}% wt · ${b.detail})`);
+    const tooltip = finalScore !== null
+      ? `Grade ${meta.letter} (${finalScore}/100)${isLowSample ? ' · Low sample' : ''}\n${tooltipParts.join('\n')}\nLate credit: ${w.lateCreditPct}%`
+      : 'Not enough compliance data to calculate a grade';
+
+    return {
+      score: finalScore,
+      ...meta,
+      isLowSample,
+      isWeeklyOnly,
+      breakdown,
+      weights: w,
+      tooltip
+    };
   }
 
   mergeCellState(a, b) {
@@ -2179,6 +2361,15 @@ class ForemanReportCardEngine {
         jobAudits.sort((a, b) => b.date.getTime() - a.date.getTime());
         jobIncidents.sort((a, b) => b.date.getTime() - a.date.getTime());
 
+        const jobGrade = this.computeForemanGrade({
+          ytdJha: jha,
+          jhaQuality,
+          ytdWeekly: weekly,
+          ytdMonthly: monthly,
+          daysWorked: jha.expected,
+          weeklyExpected: weekly.expected
+        });
+
         jobs.push({
           ...acc,
           daysWorked: jha.expected, // finalized scheduled workdays (onTime + late + missing)
@@ -2191,7 +2382,8 @@ class ForemanReportCardEngine {
           incidents: jobIncidents,
           jhaFailures: jobJhaFailures,
           jhaFailByWeekStr,
-          jhaQuality
+          jhaQuality,
+          grade: jobGrade
         });
       });
 
@@ -2459,6 +2651,15 @@ class ForemanReportCardEngine {
       foremanAudits.sort((a, b) => (b.date ? b.date.getTime() : 0) - (a.date ? a.date.getTime() : 0));
       foremanIncidents.sort((a, b) => (b.date ? b.date.getTime() : 0) - (a.date ? a.date.getTime() : 0));
 
+      const foremanGrade = this.computeForemanGrade({
+        ytdJha,
+        jhaQuality,
+        ytdWeekly,
+        ytdMonthly,
+        daysWorked: totals.daysWorked,
+        weeklyExpected: ytdWeekly.expected
+      });
+
       foremen.push({
         name: foremanName,
         location: homeLocation,
@@ -2478,6 +2679,7 @@ class ForemanReportCardEngine {
         jhaFailures: foremanJhaFailures,
         jhaFailCategories,
         jhaQuality,
+        grade: foremanGrade,
         totals,
         ytdJha,
         ytdWeekly,
@@ -2715,19 +2917,34 @@ class ForemanReportCardEngine {
     const round1 = (v) => Math.round(v * 10) / 10;
     const fmCount = foremen.length || 1;
     const jhaFailDenom = coDaysForemen > 0 ? coDaysForemen : fmCount;
+    const coJhaStats = this.computeMetricStats(coJhaOT, coJhaL, coJhaM, coJhaP);
+    const coWeeklyStats = this.computeMetricStats(coWkOT, coWkL, coWkM, coWkP);
+    const coMonthlyStats = this.computeMetricStats(coMoOT, coMoL, coMoM, coMoP, coMoEx);
+    const coJhaQualPct = coJhaEvalWeeksSum > 0
+      ? Math.round((Math.max(0, coJhaEvalWeeksSum - coJhaFailsSum) / coJhaEvalWeeksSum) * 100)
+      : null;
+    const gradedForemen = foremen.filter(f => f.grade && f.grade.score !== null && !f.grade.isLowSample);
+    const fallbackGraded = gradedForemen.length > 0 ? gradedForemen : foremen.filter(f => f.grade && f.grade.score !== null);
+    const avgGradeScore = fallbackGraded.length > 0
+      ? Math.round(fallbackGraded.reduce((s, f) => s + f.grade.score, 0) / fallbackGraded.length)
+      : null;
+    const companyGradeMeta = this.scoreToLetterGrade(avgGradeScore);
+
     const companyAverages = {
       foremenCount: foremen.length,
       fieldForemenCount: coDaysForemen,
-      jha: this.computeMetricStats(coJhaOT, coJhaL, coJhaM, coJhaP),
-      weekly: this.computeMetricStats(coWkOT, coWkL, coWkM, coWkP),
-      monthly: this.computeMetricStats(coMoOT, coMoL, coMoM, coMoP, coMoEx),
+      jha: coJhaStats,
+      weekly: coWeeklyStats,
+      monthly: coMonthlyStats,
       avgDaysWorked: coDaysForemen > 0 ? Math.round(coDaysSum / coDaysForemen) : 0,
       avgJobsWorked: foremen.length > 0 ? round1(coJobsSum / fmCount) : 0,
       avgSiteAudits: foremen.length > 0 ? round1(coAuditsSum / fmCount) : 0,
       avgIncidents: foremen.length > 0 ? round1(coIncSum / fmCount) : 0,
       totalJhaFails: coJhaFailsSum,
       avgJhaFails: foremen.length > 0 ? round1(coJhaFailsSum / jhaFailDenom) : 0,
-      jhaQualityPassPct: coJhaEvalWeeksSum > 0 ? Math.round((Math.max(0, coJhaEvalWeeksSum - coJhaFailsSum) / coJhaEvalWeeksSum) * 100) : null
+      jhaQualityPassPct: coJhaQualPct,
+      avgGradeScore,
+      grade: { score: avgGradeScore, ...companyGradeMeta }
     };
 
     const model = {
@@ -2857,8 +3074,24 @@ class ForemanReportCardEngine {
       const scoreOf = (f) => (f.ytdJha && f.ytdJha.expected > 0)
         ? f.ytdJha.submittedPct
         : ((f.ytdWeekly && f.ytdWeekly.expected > 0) ? f.ytdWeekly.submittedPct : -1);
+      const gradeOf = (f) => (f.grade && f.grade.score !== null) ? f.grade.score : -1;
       if (this.cardSortBy === 'name') {
         list.sort((a, b) => a.name.localeCompare(b.name));
+      } else if (this.cardSortBy === 'grade_desc') {
+        list.sort((a, b) => {
+          const ga = gradeOf(a), gb = gradeOf(b);
+          if (ga !== gb) return gb - ga;
+          return (b.totals.daysWorked - a.totals.daysWorked) || a.name.localeCompare(b.name);
+        });
+      } else if (this.cardSortBy === 'grade_asc') {
+        list.sort((a, b) => {
+          const ga = gradeOf(a), gb = gradeOf(b);
+          if (ga < 0 && gb < 0) return a.name.localeCompare(b.name);
+          if (ga < 0) return 1;
+          if (gb < 0) return -1;
+          if (ga !== gb) return ga - gb;
+          return a.name.localeCompare(b.name);
+        });
       } else if (this.cardSortBy === 'jha_asc') {
         list.sort((a, b) => {
           const sa = scoreOf(a), sb = scoreOf(b);
@@ -3017,7 +3250,22 @@ class ForemanReportCardEngine {
            title="Open full Report Card Book for ${this.escapeHtml(fm.name)}">
         <div class="frc-card-hdr">
           <div class="frc-card-hdr-top">
-            <span class="frc-card-name">${this.escapeHtml(fm.name)}</span>
+            <div style="display:flex;align-items:center;gap:7px;min-width:0;">
+              ${(() => {
+                const g = fm.grade;
+                if (!g) return '';
+                return `
+                  <span class="frc-card-grade-badge"
+                        style="background:${g.darkBg};color:${g.darkText};border-color:${g.darkBorder};"
+                        title="${this.escapeHtml(g.tooltip)}">
+                    <span>${this.escapeHtml(g.letter)}</span>
+                    ${g.score !== null ? `<span class="frc-card-grade-score">${g.score}</span>` : ''}
+                    ${g.isLowSample ? '<span style="font-size:8.5px;opacity:0.85;" title="Low sample size (<8 scheduled workdays)">*</span>' : ''}
+                  </span>
+                `;
+              })()}
+              <span class="frc-card-name">${this.escapeHtml(fm.name)}</span>
+            </div>
             ${rolePillHtml}
           </div>
           <div class="frc-card-sub">
@@ -3131,6 +3379,11 @@ class ForemanReportCardEngine {
           <span>${this.escapeHtml(model.period.shortLabel)} Company Averages:</span>
         </div>
         <div class="frc-company-avg-items">
+          ${co.grade && co.grade.score !== null ? `
+            <span class="frc-company-avg-pill" style="cursor:pointer;border-color:${co.grade.darkBorder};background:${co.grade.darkBg};" onclick="window.foremanReportCardEngine.openGradingWeightsModal()" title="Company Average Foreman Grade across full-sample foremen. Click to adjust grading weights.">
+              Avg Grade: <strong style="color:${co.grade.darkText};">${this.escapeHtml(co.grade.letter)} (${co.grade.score})</strong>
+            </span>
+          ` : ''}
           <span class="frc-company-avg-pill">Daily JHA: ${fmtPct(co.jha)}</span>
           <span class="frc-company-avg-pill">Weekly Safety: ${fmtPct(co.weekly)}</span>
           <span class="frc-company-avg-pill">Monthly Insp.: ${fmtPct(co.monthly)}</span>
@@ -3254,9 +3507,11 @@ class ForemanReportCardEngine {
                      oninput="window.foremanReportCardEngine.onCardsSearchInput(this.value)">
               <select class="frc-cards-sort" aria-label="Sort foreman cards" onchange="window.foremanReportCardEngine.onCardsSortChange(this.value)">
                 <option value="role" ${this.cardSortBy === 'role' ? 'selected' : ''}>Sort: Role &amp; Status</option>
+                <option value="grade_desc" ${this.cardSortBy === 'grade_desc' ? 'selected' : ''}>Sort: Grade (High → Low)</option>
+                <option value="grade_asc" ${this.cardSortBy === 'grade_asc' ? 'selected' : ''}>Sort: Grade (Low → High)</option>
                 <option value="name" ${this.cardSortBy === 'name' ? 'selected' : ''}>Sort: Name (A–Z)</option>
-                <option value="jha_asc" ${this.cardSortBy === 'jha_asc' ? 'selected' : ''}>Sort: Compliance (Low → High)</option>
-                <option value="jha_desc" ${this.cardSortBy === 'jha_desc' ? 'selected' : ''}>Sort: Compliance (High → Low)</option>
+                <option value="jha_asc" ${this.cardSortBy === 'jha_asc' ? 'selected' : ''}>Sort: JHA Compliance (Low → High)</option>
+                <option value="jha_desc" ${this.cardSortBy === 'jha_desc' ? 'selected' : ''}>Sort: JHA Compliance (High → Low)</option>
                 <option value="days_desc" ${this.cardSortBy === 'days_desc' ? 'selected' : ''}>Sort: Most Days Worked</option>
               </select>
             </div>
@@ -4135,15 +4390,33 @@ class ForemanReportCardEngine {
             📍 ${this.escapeHtml(foreman.location)} &nbsp;·&nbsp; <span style="color:${activeBadgeColor};">${this.escapeHtml(activeBadgeStr)}</span>
           </div>
         </div>
-        <div style="text-align:right;">
-          <div style="display:inline-block;background:#0f172a;color:#ffffff;padding:4px 10px;border-radius:4px;font-size:12px;font-weight:800;letter-spacing:0.3px;">
-            ${this.escapeHtml(period.shortLabel)} REPORT CARD
-          </div>
-          <div style="font-size:11px;font-weight:700;color:#334155;margin-top:4px;">
-            ${this.escapeHtml(period.displayRangeStr)}
-          </div>
-          <div style="font-size:9.5px;color:#64748b;margin-top:2px;">
-            Generated ${this.escapeHtml(this.formatDateUs(period.today))} · Page 1 (Cover)
+        <div style="display:flex;align-items:center;gap:14px;">
+          ${(() => {
+            const g = foreman.grade;
+            if (!g) return '';
+            const coGradeStr = (coAvg && coAvg.grade && coAvg.grade.score !== null)
+              ? `Co. avg: ${coAvg.grade.letter} (${coAvg.grade.score})`
+              : '';
+            return `
+              <div ${!isPrint ? `onclick="window.foremanReportCardEngine.openGradingWeightsModal()" style="cursor:pointer;border:2px solid ${g.border};background:${g.bg};border-radius:8px;padding:6px 14px;text-align:center;min-width:86px;"` : `style="border:2px solid ${g.border};background:${g.bg};border-radius:8px;padding:6px 14px;text-align:center;min-width:86px;"`}
+                   title="${this.escapeHtml(g.tooltip)}${!isPrint ? '\nClick to customize grading weights' : ''}">
+                <div style="font-size:8.5px;font-weight:800;text-transform:uppercase;letter-spacing:0.6px;color:#475569;">Overall Grade</div>
+                <div style="font-size:26px;font-weight:900;line-height:1.05;color:${g.color};letter-spacing:-0.5px;">${this.escapeHtml(g.letter)}</div>
+                <div style="font-size:10px;font-weight:800;color:#334155;">${g.score !== null ? `${g.score} / 100` : 'No Data'}${g.isLowSample ? ' · Low*' : ''}</div>
+                ${coGradeStr ? `<div style="font-size:8.5px;font-weight:700;color:#0369a1;margin-top:1px;">◆ ${this.escapeHtml(coGradeStr)}</div>` : ''}
+              </div>
+            `;
+          })()}
+          <div style="text-align:right;">
+            <div style="display:inline-block;background:#0f172a;color:#ffffff;padding:4px 10px;border-radius:4px;font-size:12px;font-weight:800;letter-spacing:0.3px;">
+              ${this.escapeHtml(period.shortLabel)} REPORT CARD
+            </div>
+            <div style="font-size:11px;font-weight:700;color:#334155;margin-top:4px;">
+              ${this.escapeHtml(period.displayRangeStr)}
+            </div>
+            <div style="font-size:9.5px;color:#64748b;margin-top:2px;">
+              Generated ${this.escapeHtml(this.formatDateUs(period.today))} · Page 1 (Cover)
+            </div>
           </div>
         </div>
       </div>
@@ -4214,11 +4487,28 @@ class ForemanReportCardEngine {
         <span>1. Foreman Overall Compliance Report Card (${this.escapeHtml(period.shortLabel)} Weighted Totals)</span>
         <span style="font-size:10px;font-weight:600;color:#64748b;text-transform:none;"><strong style="color:#0369a1;">◆ = Co. Avg</strong> &nbsp;·&nbsp; On-Time % + Late % + Missing % = 100%</span>
       </div>
-      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:${(foreman.jhaFailures && foreman.jhaFailures.length > 0) ? '10px' : '18px'};">
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:10px;">
         ${this.renderMetricCardHtml('Daily JHA Compliance', 'day', 'days', foreman.ytdJha, 'Weighted by scheduled days worked', coAvg ? coAvg.jha : null)}
         ${this.renderMetricCardHtml('Weekly Safety Meeting', 'week', 'weeks', foreman.ytdWeekly, 'Weighted by active crew weeks', coAvg ? coAvg.weekly : null)}
         ${this.renderMetricCardHtml('Monthly Inspection', 'month', 'months', foreman.ytdMonthly, '≥4 consec. wks · On-time thru 7th of next mo', coAvg ? coAvg.monthly : null)}
       </div>
+
+      ${foreman.grade && foreman.grade.score !== null ? `
+        <!-- Transparent Weighted Grade Breakdown Strip -->
+        <div style="border:1px solid ${foreman.grade.border};background:#f8fafc;border-radius:6px;padding:7px 11px;margin-bottom:${(foreman.jhaFailures && foreman.jhaFailures.length > 0) ? '10px' : '16px'};display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;font-size:10px;color:#334155;">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:4px;background:${foreman.grade.bg};border:1px solid ${foreman.grade.border};color:${foreman.grade.color};font-weight:900;font-size:11px;">
+              Grade ${this.escapeHtml(foreman.grade.letter)} (${foreman.grade.score}/100)
+            </span>
+            ${foreman.grade.breakdown.filter(b => b.isApplied).map(b => `
+              <span><strong>${this.escapeHtml(b.label)}:</strong> ${b.score}% <span style="color:#64748b;">(${b.effectiveWeight}% wt)</span></span>
+            `).join('<span style="color:#cbd5e1;">·</span>')}
+            <span style="color:#64748b;">(On-Time 100% · Late ${foreman.grade.weights.lateCreditPct}% · Missing 0%)</span>
+            ${foreman.grade.isLowSample ? '<span style="color:#b45309;font-weight:800;">*Low sample (&lt;' + foreman.grade.weights.minDaysForFullConfidence + 'd)</span>' : ''}
+          </div>
+          ${!isPrint ? '<button type="button" class="frc-no-print" onclick="window.foremanReportCardEngine.openGradingWeightsModal()" style="background:none;border:none;color:#2563eb;font-size:10px;font-weight:700;cursor:pointer;text-decoration:underline;padding:0;">⚖️ Weights</button>' : ''}
+        </div>
+      ` : ''}
 
       ${foreman.jhaFailures && foreman.jhaFailures.length > 0 ? `
         <!-- Field iD JHA Quality Summary Strip (Separate Quality Metric) -->
@@ -4619,14 +4909,24 @@ class ForemanReportCardEngine {
       `;
     };
 
-    const renderDayIconCell = (st) => {
+    const renderDayIconCell = (st, weekStartStr = '', colKey = '') => {
       if (st === 'out') return '<span style="color:#cbd5e1;font-size:9px;">·</span>';
       if (st === 'onTime') return '<span style="color:#15803d;font-weight:800;">✅</span>';
       if (st === 'late') return '<span style="color:#b45309;font-weight:900;">✅L</span>';
-      if (st === 'missing') return '<span style="color:#b91c1c;font-weight:900;">❌</span>';
+      if (st === 'missing') {
+        if (canEdit && weekStartStr && colKey) {
+          return `<button type="button" class="frc-dnw-cell-btn" onclick="window.foremanReportCardEngine.toggleComplianceCellDnw('${this.escapeJs(job.jobNumber)}', '${this.escapeJs(weekStartStr)}', '${this.escapeJs(colKey)}')" title="Click to mark Did Not Work (DNW) if crew was off this day"><span style="color:#b91c1c;font-weight:900;">❌</span></button>`;
+        }
+        return '<span style="color:#b91c1c;font-weight:900;">❌</span>';
+      }
       if (st === 'pending') return '<span style="color:#0369a1;">⏳</span>';
       if (st === 'holiday') return '<span title="Holiday">🏖️</span>';
-      if (st === 'dnw') return '<span style="color:#64748b;font-size:9px;font-weight:700;">DNW</span>';
+      if (st === 'dnw') {
+        if (canEdit && weekStartStr && colKey) {
+          return `<button type="button" class="frc-dnw-cell-btn" onclick="window.foremanReportCardEngine.toggleComplianceCellDnw('${this.escapeJs(job.jobNumber)}', '${this.escapeJs(weekStartStr)}', '${this.escapeJs(colKey)}')" title="Marked Did Not Work (excluded from Missing). Click to restore back to ❌ Missing."><span style="color:#64748b;font-size:9px;font-weight:800;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:3px;padding:0 3px;">DNW</span></button>`;
+        }
+        return '<span style="color:#64748b;font-size:9px;font-weight:700;">DNW</span>';
+      }
       return '<span style="color:#94a3b8;">—</span>';
     };
 
@@ -4674,14 +4974,24 @@ class ForemanReportCardEngine {
 
         ${(() => {
           const isWeeklyOnlyJob = job.daysWorked === 0 && job.weeksWorked > 0;
+          const jg = job.grade;
           return `
-            <div style="text-align:right;min-width:130px;">
-              <div style="background:#0f172a;color:#ffffff;padding:5px 10px;border-radius:5px;display:inline-block;">
-                <div style="font-size:18px;font-weight:900;line-height:1.1;">${isWeeklyOnlyJob ? job.weeksWorked : job.daysWorked}</div>
-                <div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:#cbd5e1;">${isWeeklyOnlyJob ? 'Weeks Tracked' : 'Days Worked'}</div>
-              </div>
-              <div style="font-size:10px;font-weight:700;color:#475569;margin-top:4px;">
-                ${isWeeklyOnlyJob ? 'Weekly-only schedule' : `${job.weeksWorked} Active Week${job.weeksWorked === 1 ? '' : 's'}`}
+            <div style="text-align:right;display:flex;align-items:center;gap:8px;flex-shrink:0;">
+              ${jg && jg.score !== null ? `
+                <div style="border:1.5px solid ${jg.border};background:${jg.bg};border-radius:6px;padding:4px 10px;text-align:center;min-width:62px;" title="${this.escapeHtml(jg.tooltip)}">
+                  <div style="font-size:8px;font-weight:800;text-transform:uppercase;color:#475569;">Job Grade</div>
+                  <div style="font-size:19px;font-weight:900;line-height:1.05;color:${jg.color};">${this.escapeHtml(jg.letter)}</div>
+                  <div style="font-size:9px;font-weight:800;color:#334155;">${jg.score}/100</div>
+                </div>
+              ` : ''}
+              <div>
+                <div style="background:#0f172a;color:#ffffff;padding:5px 10px;border-radius:5px;display:inline-block;">
+                  <div style="font-size:18px;font-weight:900;line-height:1.1;">${isWeeklyOnlyJob ? job.weeksWorked : job.daysWorked}</div>
+                  <div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:#cbd5e1;">${isWeeklyOnlyJob ? 'Weeks Tracked' : 'Days Worked'}</div>
+                </div>
+                <div style="font-size:10px;font-weight:700;color:#475569;margin-top:4px;">
+                  ${isWeeklyOnlyJob ? 'Weekly-only schedule' : `${job.weeksWorked} Active Week${job.weeksWorked === 1 ? '' : 's'}`}
+                </div>
               </div>
             </div>
           `;
@@ -4814,9 +5124,9 @@ class ForemanReportCardEngine {
       ` : ''}
 
       <!-- Week-by-Week Compliance History Table -->
-      <div style="font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.4px;border-bottom:1.5px solid #0f172a;padding-bottom:3px;margin-bottom:8px;color:#0f172a;display:flex;justify-content:space-between;">
+      <div style="font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.4px;border-bottom:1.5px solid #0f172a;padding-bottom:3px;margin-bottom:8px;color:#0f172a;display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;">
         <span>${job.monthlyDetails.length > 0 ? '3' : '2'}. Weekly Compliance Detail (${job.weeks.length} Week${job.weeks.length === 1 ? '' : 's'} in ${this.escapeHtml(period.shortLabel)})</span>
-        <span style="font-size:9.5px;font-weight:600;color:#64748b;text-transform:none;">✅ On-Time · ✅L Late · ❌ Missing · ⏳ Pending · 🏖️ Holiday</span>
+        <span style="font-size:9.5px;font-weight:600;color:#64748b;text-transform:none;">✅ On-Time · ✅L Late · ❌ Missing · DNW Did Not Work · 🏖️ Holiday${canEdit ? ' · <strong style="color:#2563eb;">Click ❌ to mark DNW</strong>' : ''}</span>
       </div>
 
       ${job.weeks.length === 0 ? `
@@ -4838,6 +5148,9 @@ class ForemanReportCardEngine {
               const hasMiss = DAYS.some(d => w.days[d] === 'missing') || w.weekly === 'missing';
               const hasLate = DAYS.some(d => w.days[d] === 'late') || w.weekly === 'late';
               const wkFail = job.jhaFailByWeekStr ? job.jhaFailByWeekStr.get(w.weekStartStr) : null;
+              const missDayCount = DAYS.filter(d => w.days[d] === 'missing').length;
+              const subDayCount = DAYS.filter(d => w.days[d] === 'onTime' || w.days[d] === 'late').length;
+              const isAllMissingWeek = missDayCount >= 2 && subDayCount === 0 && w.weekly !== 'onTime' && w.weekly !== 'late';
               const rowBg = hasMiss ? '#fef2f2' : ((hasLate || wkFail) ? '#fffbeb' : '#ffffff');
               return `
                 <tr style="background:${rowBg};">
@@ -4845,9 +5158,13 @@ class ForemanReportCardEngine {
                     ${this.escapeHtml(w.weekStartStr)}
                     ${w.reattributedFrom ? `<span title="Foreman verified via JHA Log (Safety Compliance listed ${this.escapeHtml(w.reattributedFrom)})" style="margin-left:4px;font-size:9px;font-weight:700;background:#e0e7ff;color:#3730a3;border:1px solid #c7d2fe;border-radius:4px;padding:0 4px;">JHA Log</span>` : ''}
                     ${wkFail ? `<span title="Field iD JHA Quality Fail: ${this.escapeHtml(wkFail.qualityComments)}" style="margin-left:4px;font-size:9px;font-weight:800;background:#fef3c7;color:#92400e;border:1px solid #f59e0b;border-radius:4px;padding:0 4px;">🚩 Fail</span>` : ''}
+                    ${isAllMissingWeek ? (canEdit
+                      ? `<button type="button" class="frc-verify-sched-btn frc-no-print" onclick="window.foremanReportCardEngine.markWeekDidNotWork('${this.escapeJs(job.jobNumber)}', '${this.escapeJs(w.weekStartStr)}')" title="Every scheduled day this week is ❌ Missing with 0 submissions — crew may not have worked. Click to mark the whole week DNW (Did Not Work).">⚠️ Verify? Mark DNW</button>`
+                      : `<span title="Every scheduled day this week is ❌ Missing with 0 submissions — verify whether crew worked" style="margin-left:4px;font-size:9px;font-weight:800;background:#fef3c7;color:#92400e;border:1px solid #f59e0b;border-radius:4px;padding:0 4px;">⚠️ Verify schedule</span>`
+                    ) : ''}
                   </td>
-                  ${DAYS.map(d => `<td style="border:1px solid #cbd5e1;padding:4px 4px;text-align:center;">${renderDayIconCell(w.days[d])}</td>`).join('')}
-                  <td style="border:1px solid #cbd5e1;padding:4px 6px;text-align:center;">${renderDayIconCell(w.weekly)}</td>
+                  ${DAYS.map(d => `<td style="border:1px solid #cbd5e1;padding:4px 4px;text-align:center;">${renderDayIconCell(w.days[d], w.weekStartStr, d)}</td>`).join('')}
+                  <td style="border:1px solid #cbd5e1;padding:4px 6px;text-align:center;">${renderDayIconCell(w.weekly, w.weekStartStr, 'Weekly Meeting')}</td>
                   <td style="border:1px solid #cbd5e1;padding:4px 7px;text-align:right;font-weight:700;color:#334155;">${this.escapeHtml(w.jhaSummary)}</td>
                 </tr>
                 ${wkFail ? `
@@ -5479,6 +5796,317 @@ class ForemanReportCardEngine {
     } else {
       this.printPackets(effectiveScope);
     }
+  }
+
+  // =========================================================================
+  // Did-Not-Work (DNW) Override & Grading Weights Settings Modal
+  // =========================================================================
+
+  _recomputeSafetyComplianceRowStatus(row) {
+    if (!row) return 'Complete';
+    const dayCols = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const missing = [];
+    let hasPending = false;
+    dayCols.forEach(d => {
+      const st = this.classifyDayCell(row[d]);
+      if (st === 'missing') missing.push(d);
+      else if (st === 'pending') hasPending = true;
+    });
+    const wkSt = this.classifyWeeklyCell(row['Weekly Meeting']);
+    if (wkSt === 'missing') missing.push('Weekly');
+    else if (wkSt === 'pending') hasPending = true;
+
+    const moSt = this.classifyWeeklyCell(row['Monthly Checklist']);
+    if (moSt === 'missing') missing.push('Monthly');
+    else if (moSt === 'pending') hasPending = true;
+
+    if (missing.length > 0) return `Missing (${missing.length})`;
+    if (hasPending) return 'Pending';
+    return 'Complete';
+  }
+
+  async _applySafetyComplianceDnwEdits(jobNumber, weekStartStr, colUpdatesMap) {
+    if (!this.canEditJobStatus()) return { updatedRows: 0 };
+    const baseJob = this.getBaseJobNumber(jobNumber);
+    const targetWeekDt = this.parseDate(weekStartStr);
+    if (!baseJob || !targetWeekDt) return { updatedRows: 0 };
+    const targetSun = new Date(targetWeekDt.getFullYear(), targetWeekDt.getMonth(), targetWeekDt.getDate() - targetWeekDt.getDay(), 12, 0, 0);
+    const targetWsKey = this.dateKey(targetSun);
+
+    const scTable = this.db ? this.db.getTable('safety_compliance') : null;
+    if (!scTable || !Array.isArray(scTable.rows)) return { updatedRows: 0 };
+
+    const matchingRows = scTable.rows.filter(r => {
+      const bj = this.getBaseJobNumber(r['Job Number'] || r['Crew'] || r['Job #'] || '');
+      if (bj !== baseJob) return false;
+      const ws = this.parseDate(r['Week Start'] || r['Week']);
+      if (!ws) return false;
+      const sun = new Date(ws.getFullYear(), ws.getMonth(), ws.getDate() - ws.getDay(), 12, 0, 0);
+      return this.dateKey(sun) === targetWsKey;
+    });
+
+    if (matchingRows.length === 0) return { updatedRows: 0 };
+
+    const now = new Date();
+    const updatedStamp = `${this.formatDateUs(now)} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    let updatedCount = 0;
+
+    for (const row of matchingRows) {
+      const updatedFields = {};
+      Object.entries(colUpdatesMap).forEach(([colKey, nextVal]) => {
+        const curSt = colKey === 'Weekly Meeting' ? this.classifyWeeklyCell(row[colKey]) : this.classifyDayCell(row[colKey]);
+        if (nextVal === 'DNW' && curSt === 'missing') {
+          updatedFields[colKey] = 'DNW';
+        } else if (nextVal === '❌' && curSt === 'dnw') {
+          updatedFields[colKey] = '❌';
+        }
+      });
+      if (Object.keys(updatedFields).length === 0) continue;
+
+      Object.assign(row, updatedFields);
+      const nextStatus = this._recomputeSafetyComplianceRowStatus(row);
+      updatedFields['Status'] = nextStatus;
+      updatedFields['Updated'] = updatedStamp;
+      row['Status'] = nextStatus;
+      row['Updated'] = updatedStamp;
+
+      if (Array.isArray(scTable.rawGrid) && Array.isArray(scTable.headers)) {
+        const gIdx = (row._rowIdx && row._rowIdx > 1) ? (row._rowIdx - 1) : -1;
+        if (gIdx > 0 && scTable.rawGrid[gIdx]) {
+          scTable.rawGrid[gIdx] = scTable.headers.map(h => (row[h] !== undefined ? row[h] : ''));
+        }
+      }
+
+      if (typeof this.db.addMutation === 'function') {
+        const rowNum = row._rowIdx || (scTable.rows.indexOf(row) + 2);
+        await this.db.addMutation({
+          action: 'UPDATE_ROW',
+          sheetName: scTable.name || 'Safety Compliance',
+          tableKey: 'safety_compliance',
+          itemIdentifier: `${row['Job Number'] || baseJob}|${row['Week Start'] || weekStartStr}`,
+          row: rowNum,
+          updatedFields
+        });
+      }
+      updatedCount++;
+    }
+
+    if (updatedCount > 0) {
+      if (typeof this.db.markTableDirty === 'function') {
+        this.db.markTableDirty('safety_compliance');
+      }
+      if (typeof this.db.persistSnapshot === 'function') {
+        await this.db.persistSnapshot(this.db.snapshot);
+      }
+      if (typeof window !== 'undefined' && window.sheetNavigator && typeof window.sheetNavigator.renderSafetyCompliance === 'function') {
+        const scView = document.getElementById('safety-compliance-view');
+        if (scView && scView.classList.contains('active')) {
+          window.sheetNavigator.renderSafetyCompliance();
+        }
+      }
+    }
+
+    return { updatedRows: updatedCount };
+  }
+
+  /**
+   * 1-click toggle on a Weekly Compliance cell: ❌ Missing <-> DNW (Did Not Work).
+   * Immediately recalculates compliance percentages and A–F Foreman Grade.
+   */
+  async toggleComplianceCellDnw(jobNumber, weekStartStr, colKey) {
+    if (!this.canEditJobStatus()) return;
+    const baseJob = this.getBaseJobNumber(jobNumber);
+    const model = this.cachedModel || this.buildDataModel();
+    const fm = this.selectedForeman ? model.foremenMap.get(this.selectedForeman) : null;
+    const job = fm ? fm.jobs.find(j => j.jobNumber === baseJob) : null;
+    const wk = job ? job.weeks.find(w => w.weekStartStr === weekStartStr) : null;
+    if (!wk) return;
+
+    const curState = colKey === 'Weekly Meeting' ? wk.weekly : wk.days[colKey];
+    if (curState !== 'missing' && curState !== 'dnw') return;
+
+    const nextVal = curState === 'missing' ? 'DNW' : '❌';
+    const res = await this._applySafetyComplianceDnwEdits(baseJob, weekStartStr, { [colKey]: nextVal });
+    if (res.updatedRows > 0) {
+      this.cachedModel = null;
+      this.renderWorkspace({ preservePage: true, targetPageId: `job:${baseJob}` });
+      const freshFm = this.cachedModel && this.selectedForeman ? this.cachedModel.foremenMap.get(this.selectedForeman) : null;
+      const gradeBit = freshFm && freshFm.grade && freshFm.grade.score !== null
+        ? ` · Grade: ${freshFm.grade.letter} (${freshFm.grade.score})`
+        : '';
+      this.showPageToast(
+        nextVal === 'DNW'
+          ? `✅ Marked ${baseJob} (${weekStartStr} ${colKey}) as Did Not Work${gradeBit}`
+          : `↩ Restored ${baseJob} (${weekStartStr} ${colKey}) to ❌ Missing${gradeBit}`
+      );
+    }
+  }
+
+  /**
+   * 1-click excuse for a suspicious all-missing week where the crew did not work
+   * and the schedule wasn't adjusted ahead of time.
+   */
+  async markWeekDidNotWork(jobNumber, weekStartStr) {
+    if (!this.canEditJobStatus()) return;
+    const baseJob = this.getBaseJobNumber(jobNumber);
+    if (typeof confirm === 'function') {
+      const ok = confirm(
+        `Mark Job ${baseJob} — Week of ${weekStartStr} as Did Not Work (DNW)?\n\n` +
+        `This converts all ❌ Missing days (and Missing Weekly Meeting) in this week to DNW so they no longer count against the foreman's compliance or grade.\n\n` +
+        `You can click any DNW cell afterward to undo individual days.`
+      );
+      if (!ok) return;
+    }
+
+    const colUpdates = {
+      Sun: 'DNW', Mon: 'DNW', Tue: 'DNW', Wed: 'DNW', Thu: 'DNW', Fri: 'DNW', Sat: 'DNW',
+      'Weekly Meeting': 'DNW'
+    };
+    const res = await this._applySafetyComplianceDnwEdits(baseJob, weekStartStr, colUpdates);
+    if (res.updatedRows > 0) {
+      this.cachedModel = null;
+      this.renderWorkspace({ preservePage: true, targetPageId: `job:${baseJob}` });
+      const freshFm = this.cachedModel && this.selectedForeman ? this.cachedModel.foremenMap.get(this.selectedForeman) : null;
+      const gradeBit = freshFm && freshFm.grade && freshFm.grade.score !== null
+        ? ` · Updated Grade: ${freshFm.grade.letter} (${freshFm.grade.score})`
+        : '';
+      this.showPageToast(`✅ Marked Week of ${weekStartStr} (${baseJob}) as Did Not Work${gradeBit}`);
+    }
+  }
+
+  openGradingWeightsModal() {
+    if (typeof document === 'undefined') return;
+    const existing = document.getElementById('frc-grading-weights-modal');
+    if (existing) existing.remove();
+
+    const w = this.getGradingWeights();
+    const modal = document.createElement('div');
+    modal.id = 'frc-grading-weights-modal';
+    modal.style.cssText = 'position:fixed;inset:0;background:rgba(2,6,23,0.78);z-index:10060;display:flex;align-items:center;justify-content:center;padding:16px;';
+
+    const closeModal = () => {
+      document.removeEventListener('keydown', onEsc);
+      modal.remove();
+    };
+    const onEsc = (e) => { if (e.key === 'Escape') closeModal(); };
+    document.addEventListener('keydown', onEsc);
+    modal.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
+
+    const totalWt = w.jhaWeight + w.qualityWeight + w.weeklyWeight + w.monthlyWeight;
+
+    modal.innerHTML = `
+      <div style="background:var(--bg-card,#1e293b);border:1px solid var(--border-color,#334155);border-radius:10px;width:100%;max-width:490px;box-shadow:0 18px 46px rgba(0,0,0,0.65);overflow:hidden;color:#f8fafc;">
+        <div style="padding:14px 18px;background:rgba(15,23,42,0.92);border-bottom:1px solid var(--border-color,#334155);display:flex;justify-content:space-between;align-items:center;">
+          <div>
+            <h3 style="margin:0;font-size:15px;font-weight:800;">⚖️ Foreman Grading Weights (A–F)</h3>
+            <div style="font-size:11px;color:#94a3b8;margin-top:2px;">Customize category weights &amp; Late submission credit (auto-normalizes if Monthly is exempt)</div>
+          </div>
+          <button type="button" onclick="document.getElementById('frc-grading-weights-modal').remove()" style="background:none;border:none;color:#94a3b8;font-size:18px;cursor:pointer;">✕</button>
+        </div>
+
+        <div style="padding:16px 18px;display:flex;flex-direction:column;gap:12px;">
+          <div style="display:grid;grid-template-columns:1fr 90px;gap:10px;align-items:center;">
+            <label style="font-size:12.5px;font-weight:700;color:#e2e8f0;">📋 Daily JHA Submission &amp; Timeliness (%)</label>
+            <input type="number" id="frc-wt-jha" min="0" max="100" value="${w.jhaWeight}" oninput="window.foremanReportCardEngine.updateGradingWeightsTotalPreview()" style="padding:6px 8px;border-radius:6px;border:1px solid #475569;background:#0f172a;color:#f8fafc;font-size:13px;font-weight:700;text-align:right;">
+
+            <label style="font-size:12.5px;font-weight:700;color:#fde68a;">🚩 JHA Quality — EcoOnline Field iD (%)</label>
+            <input type="number" id="frc-wt-quality" min="0" max="100" value="${w.qualityWeight}" oninput="window.foremanReportCardEngine.updateGradingWeightsTotalPreview()" style="padding:6px 8px;border-radius:6px;border:1px solid #475569;background:#0f172a;color:#fde68a;font-size:13px;font-weight:700;text-align:right;">
+
+            <label style="font-size:12.5px;font-weight:700;color:#e2e8f0;">🗣️ Weekly Safety Meeting (%)</label>
+            <input type="number" id="frc-wt-weekly" min="0" max="100" value="${w.weeklyWeight}" oninput="window.foremanReportCardEngine.updateGradingWeightsTotalPreview()" style="padding:6px 8px;border-radius:6px;border:1px solid #475569;background:#0f172a;color:#f8fafc;font-size:13px;font-weight:700;text-align:right;">
+
+            <label style="font-size:12.5px;font-weight:700;color:#e2e8f0;">🚛 Monthly Equipment Checklist (%)</label>
+            <input type="number" id="frc-wt-monthly" min="0" max="100" value="${w.monthlyWeight}" oninput="window.foremanReportCardEngine.updateGradingWeightsTotalPreview()" style="padding:6px 8px;border-radius:6px;border:1px solid #475569;background:#0f172a;color:#f8fafc;font-size:13px;font-weight:700;text-align:right;">
+          </div>
+
+          <div id="frc-wt-total-banner" style="padding:7px 10px;border-radius:6px;font-size:11.5px;font-weight:700;display:flex;justify-content:space-between;align-items:center;background:${totalWt === 100 ? 'rgba(16,185,129,0.14)' : 'rgba(245,158,11,0.16)'};border:1px solid ${totalWt === 100 ? 'rgba(52,211,153,0.4)' : 'rgba(251,191,36,0.45)'};color:${totalWt === 100 ? '#6ee7b7' : '#fde68a'};">
+            <span>Category Weight Total</span>
+            <span id="frc-wt-total-val">${totalWt}% ${totalWt === 100 ? '✓' : '(auto-scales proportionally)'}</span>
+          </div>
+
+          <div style="border-top:1px solid rgba(148,163,184,0.18);padding-top:12px;display:grid;grid-template-columns:1fr 90px;gap:10px;align-items:center;">
+            <div>
+              <label style="font-size:12.5px;font-weight:700;color:#93c5fd;display:block;">⏱️ Late Submission Credit (%)</label>
+              <div style="font-size:10.5px;color:#94a3b8;">On-Time = 100% · Late = this % · Missing = 0%</div>
+            </div>
+            <input type="number" id="frc-wt-late" min="0" max="100" value="${w.lateCreditPct}" style="padding:6px 8px;border-radius:6px;border:1px solid #475569;background:#0f172a;color:#93c5fd;font-size:13px;font-weight:700;text-align:right;">
+
+            <div>
+              <label style="font-size:12.5px;font-weight:700;color:#cbd5e1;display:block;">📊 Low-Sample Flag Threshold (Days)</label>
+              <div style="font-size:10.5px;color:#94a3b8;">Marks foremen below this count with a Low* sample note</div>
+            </div>
+            <input type="number" id="frc-wt-mindays" min="1" max="30" value="${w.minDaysForFullConfidence}" style="padding:6px 8px;border-radius:6px;border:1px solid #475569;background:#0f172a;color:#cbd5e1;font-size:13px;font-weight:700;text-align:right;">
+          </div>
+
+          <div style="background:rgba(15,23,42,0.55);border:1px solid rgba(148,163,184,0.2);border-radius:6px;padding:8px 10px;font-size:10.5px;color:#94a3b8;line-height:1.45;">
+            <strong style="color:#e2e8f0;">Scale:</strong> A (93–100) · A- (90–92) · B+ (87–89) · B (83–86) · B- (80–82) · C+ (77–79) · C (73–76) · C- (70–72) · D+ (67–69) · D (60–66) · F (&lt;60).<br>
+            Site Audits and Incident Reports remain separate highlight badges and do not alter the letter grade.
+          </div>
+        </div>
+
+        <div style="padding:12px 18px;background:rgba(15,23,42,0.6);border-top:1px solid var(--border-color,#334155);display:flex;justify-content:space-between;align-items:center;gap:8px;">
+          <button type="button" class="btn btn-secondary" style="font-size:11.5px;" onclick="window.foremanReportCardEngine.resetGradingWeights()">↩ Reset Defaults</button>
+          <div style="display:flex;gap:8px;">
+            <button type="button" class="btn btn-secondary" onclick="document.getElementById('frc-grading-weights-modal').remove()">Cancel</button>
+            <button type="button" class="btn btn-primary" style="font-weight:700;" onclick="window.foremanReportCardEngine.saveGradingWeightsModal()">💾 Apply Weights</button>
+          </div>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(modal);
+  }
+
+  updateGradingWeightsTotalPreview() {
+    const g = (id) => Math.max(0, parseInt(document.getElementById(id)?.value || '0', 10) || 0);
+    const total = g('frc-wt-jha') + g('frc-wt-quality') + g('frc-wt-weekly') + g('frc-wt-monthly');
+    const valEl = document.getElementById('frc-wt-total-val');
+    const barEl = document.getElementById('frc-wt-total-banner');
+    if (valEl) valEl.textContent = `${total}% ${total === 100 ? '✓' : '(auto-scales proportionally)'}`;
+    if (barEl) {
+      barEl.style.background = total === 100 ? 'rgba(16,185,129,0.14)' : 'rgba(245,158,11,0.16)';
+      barEl.style.borderColor = total === 100 ? 'rgba(52,211,153,0.4)' : 'rgba(251,191,36,0.45)';
+      barEl.style.color = total === 100 ? '#6ee7b7' : '#fde68a';
+    }
+  }
+
+  saveGradingWeightsModal() {
+    const clamp = (id, min, max, fb) => {
+      const n = parseInt(document.getElementById(id)?.value, 10);
+      return Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : fb;
+    };
+    const d = this.getDefaultGradingWeights();
+    const next = {
+      jhaWeight: clamp('frc-wt-jha', 0, 100, d.jhaWeight),
+      qualityWeight: clamp('frc-wt-quality', 0, 100, d.qualityWeight),
+      weeklyWeight: clamp('frc-wt-weekly', 0, 100, d.weeklyWeight),
+      monthlyWeight: clamp('frc-wt-monthly', 0, 100, d.monthlyWeight),
+      lateCreditPct: clamp('frc-wt-late', 0, 100, d.lateCreditPct),
+      minDaysForFullConfidence: clamp('frc-wt-mindays', 1, 30, d.minDaysForFullConfidence)
+    };
+    if (next.jhaWeight + next.qualityWeight + next.weeklyWeight + next.monthlyWeight <= 0) {
+      alert('⚠️ At least one category weight must be greater than 0%.');
+      return;
+    }
+    this.saveGradingWeights(next);
+    const modal = document.getElementById('frc-grading-weights-modal');
+    if (modal) modal.remove();
+    this.cachedModel = null;
+    this.renderWorkspace({ preservePage: true });
+    this.showPageToast(`⚖️ Grading weights updated (${next.jhaWeight}/${next.qualityWeight}/${next.weeklyWeight}/${next.monthlyWeight} · Late ${next.lateCreditPct}%)`);
+  }
+
+  resetGradingWeights() {
+    const d = this.getDefaultGradingWeights();
+    this.saveGradingWeights(d);
+    const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+    setVal('frc-wt-jha', d.jhaWeight);
+    setVal('frc-wt-quality', d.qualityWeight);
+    setVal('frc-wt-weekly', d.weeklyWeight);
+    setVal('frc-wt-monthly', d.monthlyWeight);
+    setVal('frc-wt-late', d.lateCreditPct);
+    setVal('frc-wt-mindays', d.minDaysForFullConfidence);
+    this.updateGradingWeightsTotalPreview();
   }
 }
 

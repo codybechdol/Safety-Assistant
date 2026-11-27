@@ -2173,19 +2173,24 @@ class SheetNavigator {
       'Sat': 'Saturday JHA'
     };
 
+    const isMissingCell = (rawVal) => {
+      const s = String(rawVal || '').trim();
+      const up = s.toUpperCase();
+      if (up === 'DNW' || up === '❌W' || s.includes('❌W')) return false;
+      return s.startsWith('❌');
+    };
     const missingItems = [];
     ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].forEach(d => {
-      const v = String(crewRow[d] || '').trim();
-      if (v.startsWith('❌')) {
+      if (isMissingCell(crewRow[d])) {
         missingItems.push(dayLabels[d]);
       }
     });
     const wm = String(crewRow['Weekly Meeting'] || '').trim();
-    if (wm.startsWith('❌')) {
+    if (isMissingCell(wm)) {
       missingItems.push('Weekly Safety Meeting');
     }
     const mc = String(crewRow['Monthly Checklist'] || '').trim();
-    if (mc.startsWith('❌')) {
+    if (isMissingCell(mc)) {
       missingItems.push('Monthly Checklist');
     }
 
@@ -2259,6 +2264,10 @@ class SheetNavigator {
         const shortHolName = this.getShortHolidayName(holName);
         icon = `<span style="font-size: 11px; line-height: 1;">🏖️</span><span style="font-size: 7.5px; font-weight: 900; color: #93c5fd; display: block; line-height: 1; margin-top: 1px; letter-spacing: -0.2px;">${this.escapeHtml(shortHolName)}</span>`;
         title = `${dayKey}: 🏖️ Holiday — ${this.escapeHtml(holName)} (Assigned Day Off for ${this.escapeHtml(foreman || jobNum)}) · Click to adjust day off`;
+      } else if (v.toUpperCase() === 'DNW' || v.toUpperCase() === '❌W' || v.includes('❌W')) {
+        pillClass = 'pill-na';
+        icon = '<span style="font-size: 8.5px; font-weight: 800; color: #94a3b8;">DNW</span>';
+        title = `${dayKey}: Did Not Work (Excluded from missing)`;
       } else if (v === '❌' || v.startsWith('❌')) {
         pillClass = 'pill-missing';
         const letter = v.replace('❌', '').trim();
@@ -2310,6 +2319,9 @@ class SheetNavigator {
           icon = '✅ Received';
         }
         canClickPdf = true;
+      } else if (v.toUpperCase() === 'DNW' || v.toUpperCase() === '❌W' || v.includes('❌W')) {
+        badgeStyle = 'background: rgba(100, 116, 139, 0.14); color: #94a3b8; border: 1px solid rgba(100, 116, 139, 0.35);';
+        icon = 'DNW (Did Not Work)';
       } else if (v === '❌' || v.startsWith('❌')) {
         badgeStyle = 'background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.4);';
         icon = '❌ Missing';
